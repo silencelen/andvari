@@ -12,13 +12,17 @@ import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
 import { initSodium } from "../crypto/sodium";
 import { Account } from "./account";
 import { memoryClientState } from "./accountstatesync";
-import { personalVaultChoices } from "./personalvault";
-import { VaultStore } from "./store";
+import { FakeSharedLogs, vaultMadeBy } from "./fakesharedlogs.testkit";
+import { type ItemWire, VaultStore } from "./store";
+
+/** A shared vault's key as its creating account holds it: what its verified log hands another device (design §3.6). */
+const vkOf = (account: Account, vaultId: string): Uint8Array => (account as unknown as { vaultKeys: Map<string, Uint8Array> }).vaultKeys.get(vaultId)!.slice();
 
 /**
  * Security review 2026-10, root cause A §4 / §8.5 (branch A5) — web twin of core PersonalVaultIdentityTest +
  * PersonalWrapVectorTest. "Personal" is the UVK-authenticated `personalWrap`, never a server `type` label or
- * `role`; the §8.5 migration picks the right vault; re-designation is allowed with a reauth (Q9).
+ * `role`. The store tests run with the fake log layer attached, as every session's store is: the personal vault is the
+ * one whose served wrap opened at unlock (design §5.3), and nothing else ever becomes it.
  */
 
 const vectorsDir = fileURLToPath(new URL("../../../spec/test-vectors/", import.meta.url));
@@ -44,18 +48,6 @@ describe("personalwrap.json", () => {
     const blob = (which: string) => fromB64(which === "personal" ? w.personalWrapB64 : w.ownerWrapB64);
     for (const r of v.open) expect(toB64(open(uvk, blob(r.wrap), adOf(r.adUtf8))), r.name).toBe(r.vkB64);
     for (const r of v.reject) expect(() => open(uvk, blob(r.wrap), adOf(r.adUtf8)), r.name).toThrow();
-  });
-
-  it("the personal-vault question: never automatic, label ignored", () => {
-    for (const r of v.migration) {
-      expect(r.expected.auto, r.name).toBeUndefined();
-      const d = personalVaultChoices(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        r.candidates.map((c: any) => ({ vaultId: c.vaultId, ownUvkWrap: c.ownUvkWrap, name: c.name, itemCount: 0 })),
-        r.lastUsed,
-      );
-      expect(d.map((c) => c.vaultId), r.name).toEqual(r.expected.ask);
-    }
   });
 });
 
@@ -87,18 +79,14 @@ async function enroll(email: string): Promise<Enrolled> {
 }
 
 class FakeApi {
-  puts: { wrap: PersonalWrap; currentAuthKey?: string }[] = [];
   constructor(private feed: SyncResponse) {}
   async sync(): Promise<SyncResponse> {
     const f = this.feed;
     this.feed = { ...f, full: false, vaults: [], grants: [], items: [], removedGrants: [] };
     return f;
   }
-  async push() {
+  async pushMutations() {
     return { rev: 1, results: [] };
-  }
-  async putPersonalWrap(wrap: PersonalWrap, currentAuthKey?: string) {
-    this.puts.push({ wrap, currentAuthKey });
   }
   async vaultMembers() {
     return [];
@@ -109,11 +97,16 @@ class FakeApi {
   asClient(): ApiClient {
     return this as unknown as ApiClient;
   }
+
+  /** The item routes the store calls (its ItemWire): this fake serves them too. */
+  asWire(): ItemWire {
+    return this as unknown as ItemWire;
+  }
 }
 
 const feed = (vaults: WireVault[], grants: WireGrant[]): SyncResponse => ({ rev: 9, full: true, vaults, grants, items: [], removedGrants: [] });
 const personalRow = (e: Enrolled, type = "personal"): WireVault => ({ vaultId: e.personalVaultId, type, rev: 2, metaBlob: e.personalMeta, createdAt: 0 });
-const personalGrant = (e: Enrolled): WireGrant => ({ vaultId: e.personalVaultId, userId: e.userId, role: "owner", wrappedVk: e.personalWrappedVk, rev: 2, sealedVk: null });
+const personalGrant = (e: Enrolled): WireGrant => ({ vaultId: e.personalVaultId, userId: e.userId, role: "owner", wrappedVk: e.personalWrappedVk, rev: 2 });
 
 describe("the personal vault is never a server label (VaultStore)", () => {
   beforeAll(async () => {
@@ -122,12 +115,11 @@ describe("the personal vault is never a server label (VaultStore)", () => {
 
   it("an OWNER-created shared vault relabelled personal (real personal withheld) is not personal", async () => {
     const victim = await enroll("owner-relabel@example.com");
-    const shared = victim.account.buildCreateSharedVault("Household");
-    const device = await Account.unlock(victim.userId, victim.password, victim.keys); // pre-A5 keys: no wrap
-    const store = new VaultStore(
-      new FakeApi(feed([{ vaultId: shared.vaultId, type: "personal", rev: 4, metaBlob: shared.request.metaBlob, createdAt: 0 }], [{ vaultId: shared.vaultId, userId: victim.userId, role: "owner", wrappedVk: shared.request.wrappedVk, rev: 4, sealedVk: null }])).asClient(),
-      device,
-    );
+    const shared = vaultMadeBy(victim.account, "Household");
+    const device = await Account.unlock(victim.userId, victim.password, victim.keys); // the served wrap is withheld
+    const api = new FakeApi(feed([{ vaultId: shared.vaultId, type: "personal", rev: 4, metaBlob: shared.request.metaBlob, createdAt: 0 }], [{ vaultId: shared.vaultId, userId: victim.userId, role: "owner", wrappedVk: shared.request.wrappedVk, rev: 4 }]));
+    const store = new VaultStore(api.asClient(), device, undefined, undefined, api.asWire());
+    new FakeSharedLogs(device).attachTo(store).share(shared.vaultId, vkOf(victim.account, shared.vaultId), "owner");
     await store.sync();
     expect(device.hasVault(shared.vaultId)).toBe(true);
     expect(device.personalVaultId).not.toBe(shared.vaultId);
@@ -137,20 +129,15 @@ describe("the personal vault is never a server label (VaultStore)", () => {
 
   it("with the personal wrap, the server can swap the labels and nothing moves", async () => {
     const victim = await enroll("swap@example.com");
-    const owned = victim.account.buildCreateSharedVault("Personal");
+    const owned = vaultMadeBy(victim.account, "Personal");
     const device = await Account.unlock(victim.userId, victim.password, { ...victim.keys, personalWrap: victim.personalWrap });
     expect(device.personalStatus).toBe("confirmed");
-    const store = new VaultStore(
-      new FakeApi(feed([personalRow(victim, "shared"), { vaultId: owned.vaultId, type: "personal", rev: 3, metaBlob: owned.request.metaBlob, createdAt: 0 }], [personalGrant(victim), { vaultId: owned.vaultId, userId: victim.userId, role: "owner", wrappedVk: owned.request.wrappedVk, rev: 3, sealedVk: null }])).asClient(),
-      device,
-      undefined,
-      memoryClientState(),
-    );
+    const api = new FakeApi(feed([personalRow(victim, "shared"), { vaultId: owned.vaultId, type: "personal", rev: 3, metaBlob: owned.request.metaBlob, createdAt: 0 }], [personalGrant(victim), { vaultId: owned.vaultId, userId: victim.userId, role: "owner", wrappedVk: owned.request.wrappedVk, rev: 3 }]));
+    const store = new VaultStore(api.asClient(), device, undefined, memoryClientState(), api.asWire());
+    new FakeSharedLogs(device).attachTo(store).share(owned.vaultId, vkOf(victim.account, owned.vaultId), "owner");
     await store.sync();
-    // A9 (M-2): a fresh device with no designation on record confirms the served wrap once; the labels decide nothing.
-    expect(device.personalStatus).toBe("proposed");
-    await store.describePersonalChange();
-    store.acceptPersonalChange();
+    // Design §5.3: the wrap that opened at unlock is in force; the labels decide nothing.
+    expect(device.personalStatus).toBe("confirmed");
     expect(device.personalVaultId).toBe(victim.personalVaultId);
     const types = Object.fromEntries(store.vaults().map((x) => [x.vaultId, x.type]));
     expect(types[victim.personalVaultId]).toBe("personal");
@@ -162,56 +149,11 @@ describe("the personal vault is never a server label (VaultStore)", () => {
     const device = await Account.unlock(victim.userId, victim.password, { ...victim.keys, personalWrap: { vaultId: victim.personalVaultId, wrappedVk: victim.personalWrappedVk } });
     expect(device.personalStatus).toBe("unreadable");
     const api = new FakeApi(feed([personalRow(victim)], [personalGrant(victim)]));
-    await new VaultStore(api.asClient(), device, undefined, memoryClientState()).sync();
-    expect(device.personalVaultId).toBe("");
-    expect(api.puts).toHaveLength(0);
-  });
-
-  it("§8.5 (H-1): no automatic pick; only the human's answer mints the wrap, which the device then caches", async () => {
-    const victim = await enroll("migrate@example.com");
-    const other = victim.account.buildCreateSharedVault("Household");
-    const device = await Account.unlock(victim.userId, victim.password, victim.keys);
-    const api = new FakeApi(feed([personalRow(victim), { vaultId: other.vaultId, type: "shared", rev: 3, metaBlob: other.request.metaBlob, createdAt: 0 }], [personalGrant(victim), { vaultId: other.vaultId, userId: victim.userId, role: "owner", wrappedVk: other.request.wrappedVk, rev: 3, sealedVk: null }]));
-    const local = memoryClientState();
-    const store = new VaultStore(api.asClient(), device, undefined, local);
+    const store = new VaultStore(api.asClient(), device, undefined, memoryClientState(), api.asWire());
+    new FakeSharedLogs(device).attachTo(store);
     await store.sync();
     expect(device.personalVaultId).toBe("");
-    expect(api.puts).toHaveLength(0);
-    expect(new Set(store.personalVaultChoices!.map((c) => c.vaultId))).toEqual(new Set([victim.personalVaultId, other.vaultId]));
-    await store.confirmPersonalVault(await store.proposePersonalVault(victim.personalVaultId));
-    expect(device.personalStatus).toBe("confirmed");
-    expect(api.puts).toHaveLength(1);
-    expect(api.puts[0]!.currentAuthKey).toBeUndefined();
-    expect(local.get("personal.wrap")).toContain(victim.personalVaultId);
-  });
-
-  it("ambiguity asks; the answer and a re-designation (Q9) accept only own-UVK-wrapped vaults, with a reauth to replace", async () => {
-    const victim = await enroll("ask@example.com");
-    const mate = await enroll("ask-mate@example.com");
-    const owned = victim.account.buildCreateSharedVault("Personal");
-    const sealed = mate.account.buildCreateSharedVault("Personal");
-    const device = await Account.unlock(victim.userId, victim.password, victim.keys);
-    const api = new FakeApi(
-      feed(
-        [personalRow(victim), { vaultId: owned.vaultId, type: "personal", rev: 3, metaBlob: owned.request.metaBlob, createdAt: 0 }, { vaultId: sealed.vaultId, type: "personal", rev: 4, metaBlob: sealed.request.metaBlob, createdAt: 0 }],
-        [personalGrant(victim), { vaultId: owned.vaultId, userId: victim.userId, role: "owner", wrappedVk: owned.request.wrappedVk, rev: 3, sealedVk: null }, { vaultId: sealed.vaultId, userId: victim.userId, role: "writer", wrappedVk: "", rev: 4, sealedVk: mate.account.wrapVkForMember(device.identityPub, sealed.vaultId) }],
-      ),
-    );
-    const store = new VaultStore(api.asClient(), device, undefined, memoryClientState());
-    await store.sync();
-    expect(device.personalVaultId).toBe("");
-    expect(new Set(store.personalVaultChoices!.map((c) => c.vaultId))).toEqual(new Set([victim.personalVaultId, owned.vaultId]));
-    expect(api.puts).toHaveLength(0);
-    await expect(store.proposePersonalVault(sealed.vaultId)).rejects.toThrow();
-
-    await store.confirmPersonalVault(await store.proposePersonalVault(victim.personalVaultId));
-    expect(device.personalVaultId).toBe(victim.personalVaultId);
-    expect(store.personalVaultChoices).toBeNull();
-
-    expect(new Set(store.redesignationChoices().map((x) => x.vaultId))).toEqual(new Set([victim.personalVaultId, owned.vaultId]));
-    await store.confirmPersonalVault(await store.proposePersonalVault(owned.vaultId), "fresh-auth-key");
-    expect(device.personalVaultId).toBe(owned.vaultId);
-    expect(api.puts.at(-1)!.currentAuthKey).toBe("fresh-auth-key");
+    // Nothing can mint or send a wrap: the transport has no personal-wrap route (web-pins).
   });
 
   it("enrolment sends the personal wrap and it opens under vk-personal", async () => {
@@ -227,17 +169,21 @@ describe("the personal vault is never a server label (VaultStore)", () => {
 async function h1Feed() {
   const victim = await enroll(`h1-${Math.random().toString(16).slice(2)}@example.com`);
   const mate = await enroll(`h1m-${Math.random().toString(16).slice(2)}@example.com`);
-  const decoy = mate.account.buildCreateSharedVault("Personal");
-  // The decoy's VK reaches the victim as a bare UVK self-wrap on an owner-labelled row, seal stripped:
-  // the victim's own client wrapped it (buildSelfWrap) after a member grant, and the server kept only that.
-  victim.account.addGrant({ vaultId: decoy.vaultId, userId: victim.userId, role: "writer", wrappedVk: "", rev: 4, sealedVk: mate.account.wrapVkForMember(victim.account.identityPub, decoy.vaultId) });
-  victim.account.authorizeLegacyKey(decoy.vaultId); // A6: a self-wrap is minted only for a vouched-for key
-  const selfWrap = victim.account.buildSelfWrap(decoy.vaultId);
+  const decoy = vaultMadeBy(mate.account, "Personal");
+  // The decoy is a vault the mate shared with the victim (its log lists the victim as a writer); the server labels it
+  // personal and serves an owner-labelled row for it.
   const rows = feed(
     [personalRow(victim, "shared"), { vaultId: decoy.vaultId, type: "personal", rev: 5, metaBlob: decoy.request.metaBlob, createdAt: 0 }],
-    [personalGrant(victim), { vaultId: decoy.vaultId, userId: victim.userId, role: "owner", wrappedVk: selfWrap, rev: 5, sealedVk: null }],
+    [personalGrant(victim), { vaultId: decoy.vaultId, userId: victim.userId, role: "owner", wrappedVk: "", rev: 5 }],
   );
-  return { victim, decoyId: decoy.vaultId, rows };
+  return { victim, decoyId: decoy.vaultId, decoyVk: vkOf(mate.account, decoy.vaultId), rows };
+}
+
+/** A store on [api] for [device], with the fake log layer listing it as a writer of the decoy. */
+function h1Store(h: Awaited<ReturnType<typeof h1Feed>>, api: FakeApi, device: Account): VaultStore {
+  const store = new VaultStore(api.asClient(), device, undefined, memoryClientState(), api.asWire());
+  new FakeSharedLogs(device).attachTo(store).share(h.decoyId, h.decoyVk, "writer");
+  return store;
 }
 
 describe("H-1 — a withheld personal wrap never lets the label decide", () => {
@@ -245,35 +191,29 @@ describe("H-1 — a withheld personal wrap never lets the label decide", () => {
     await initSodium();
   });
 
-  it("fresh device: no label pick, no minted wrap, and the question offers every own-wrapped vault", async () => {
+  it("a withheld wrap: no label pick, no minted wrap, no question, and the decoy stays a shared vault", async () => {
     const h = await h1Feed();
     const device = await Account.unlock(h.victim.userId, h.victim.password, h.victim.keys); // wrap withheld
     const api = new FakeApi(h.rows);
-    const store = new VaultStore(api.asClient(), device, undefined, memoryClientState());
+    const store = h1Store(h, api, device);
     await store.sync();
     expect(device.personalVaultId).not.toBe(h.decoyId);
     expect(device.personalVaultId).toBe("");
-    expect(api.puts).toHaveLength(0);
-    expect(new Set((store.personalVaultChoices ?? []).map((c) => c.vaultId))).toEqual(new Set([h.victim.personalVaultId, h.decoyId]));
+    // Nothing can mint or send a wrap: the transport has no personal-wrap route (web-pins).
+    // Design §5.3: no question, no proposal (the store has no designation method at all: web-pins).
+    expect(device.hasVault(h.decoyId)).toBe(true);
   });
 
-  it("existing device: an absent wrap after one was seen is an anomaly and the cached wrap stands", async () => {
+  it("existing device: an absent wrap after one was seen puts no cached wrap in force (design §5.3)", async () => {
     const h = await h1Feed();
     const local = memoryClientState();
-    const first = await Account.unlock(h.victim.userId, h.victim.password, { ...h.victim.keys, personalWrap: h.victim.personalWrap });
-    const s1 = new VaultStore(new FakeApi(h.rows).asClient(), first, undefined, local);
-    await s1.sync();
-    await s1.describePersonalChange();
-    s1.acceptPersonalChange(); // A9 (M-2): confirmed once on a device with no designation on record
-    expect(first.personalVaultId).toBe(h.victim.personalVaultId);
-
+    local.set("personal.wrap", JSON.stringify(h.victim.personalWrap)); // what a pre-log browser cached
     const again = await Account.unlock(h.victim.userId, h.victim.password, h.victim.keys); // now withheld
     const api = new FakeApi(h.rows);
-    const store = new VaultStore(api.asClient(), again, undefined, local);
+    const store = new VaultStore(api.asClient(), again, undefined, local, api.asWire());
+    new FakeSharedLogs(again).attachTo(store).share(h.decoyId, h.decoyVk, "writer");
     await store.sync();
-    expect(String(again.personalStatus)).toBe("withheld");
-    expect(again.personalVaultId).toBe(h.victim.personalVaultId);
-    expect(api.puts).toHaveLength(0);
-    expect(store.personalVaultChoices).toBeNull();
+    expect(again.personalVaultId).toBe("");
+    // Nothing can mint or send a wrap: the transport has no personal-wrap route (web-pins).
   });
 });

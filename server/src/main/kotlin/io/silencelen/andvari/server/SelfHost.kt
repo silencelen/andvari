@@ -11,14 +11,13 @@ package io.silencelen.andvari.server
  *   deploy/docker-compose.yml       → download
  *   deploy/docker-compose.caddy.yml → download (the recommended --caddy auto-HTTPS overlay)
  *   deploy/andvari.env.template     → download
- *   deploy/bringup.sh               → download
  *
  * A build made before those files exist serves a stub page and 404s the absent artifacts —
  * never the SPA fallback (the route itself is what §8.1 mandates exists).
  */
 internal object SelfHost {
     /** Downloadable artifact allowlist — FIXED names; no request input reaches the classpath lookup. */
-    val ARTIFACTS = listOf("docker-compose.yml", "docker-compose.caddy.yml", "andvari.env.template", "bringup.sh")
+    val ARTIFACTS = listOf("docker-compose.yml", "docker-compose.caddy.yml", "andvari.env.template")
 
     /** The page is static text + links: everything locked down except the inline <style>. */
     const val CSP = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"

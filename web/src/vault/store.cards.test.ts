@@ -15,16 +15,16 @@ import type {
   WireItem,
   WireVault,
 } from "../api/types";
-import { adItem } from "../crypto/ad";
+import { adItem, adVaultMeta } from "../crypto/ad";
 import { toB64, utf8 } from "../crypto/bytes";
 import { seal } from "../crypto/envelope";
 import { fingerprint } from "../crypto/escrow";
 import type { KdfParams } from "../crypto/keys";
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
-import { sealSharedGrant } from "../crypto/sharedgrant";
 import { initSodium } from "../crypto/sodium";
 import { Account, ITEM_FORMAT_VERSION, docFloor } from "./account";
-import { VaultStore } from "./store";
+import { FakeSharedLogs } from "./fakesharedlogs.testkit";
+import { type ItemWire, VaultStore } from "./store";
 
 /**
  * Cards / formatVersion 2 (design 2026-07-09, "the degradation gate") — the web twin of
@@ -75,12 +75,17 @@ class FakeApi {
     this.rev = Math.max(this.rev, resp.rev);
     return resp;
   }
-  async push(mutations: Mutation[]): Promise<PushResponse> {
+  async pushMutations(mutations: Mutation[]): Promise<PushResponse> {
     this.pushes.push(mutations);
     return { rev: ++this.rev, results: mutations.map((m) => ({ mutationId: m.mutationId, status: "applied" as const, newItemRev: 1 })) };
   }
   asClient(): ApiClient {
     return this as unknown as ApiClient;
+  }
+
+  /** The item routes the store calls (its ItemWire): this fake serves them too. */
+  asWire(): ItemWire {
+    return this as unknown as ItemWire;
   }
 }
 
@@ -102,13 +107,21 @@ function wire(vaultId: string, itemId: string, blob: string | null, formatVersio
   return { itemId, vaultId, rev, createdAt: 0, updatedAt: 0, deleted: false, conflict: false, formatVersion, attachmentIds: [], blob };
 }
 
-/** A raw test-held VK delivered through the real sealed-grant path (core twin's fixture) —
- *  lets a test mint envelopes at an ARBITRARY AD fv, simulating other-generation writers. */
+/** A raw test-held VK adopted into the account's log key ring, as a verified log listing the member as a writer
+ *  would put it (design §3.6) — lets a test mint envelopes at an ARBITRARY AD fv, simulating other-generation writers. */
 function grantRawVk(member: Account, vaultId: string): Uint8Array {
   const vk = randomBytes(32);
-  member.addGrant({ vaultId, userId: member.userId, role: "writer", wrappedVk: "", rev: 1, sealedVk: toB64(sealSharedGrant(member.identityPub, vaultId, vk)) });
-  member.authorizeLegacyKey(vaultId); // A6: a vouched-for legacy key (writable); the unconfirmed path is covered elsewhere
+  member.logKeyRing().set(vaultId, vk.slice());
+  member.attachLogRoles(() => "writer", () => true);
   return vk;
+}
+
+/** The store of [member] on [api], with the fake log layer listing it as a writer of [vaultId] under [vk]. */
+function storeWithLog(api: FakeApi, member: Account, vaultId: string, vk: Uint8Array): { store: VaultStore; logs: FakeSharedLogs } {
+  const store = new VaultStore(api.asClient(), member, undefined, undefined, api.asWire());
+  const logs = new FakeSharedLogs(member).attachTo(store);
+  logs.share(vaultId, vk, "writer");
+  return { store, logs };
 }
 
 const sealAt = (vk: Uint8Array, vaultId: string, itemId: string, doc: ItemDoc, fv: number): string =>
@@ -180,7 +193,7 @@ describe("VaultStore card formatVersion wiring (fv2)", () => {
   it("a card save pushes formatVersion 2 and round-trips through sync + decryptItem (AD consistency)", async () => {
     const account = await enroll("save@example.com");
     const api = new FakeApi();
-    const store = new VaultStore(api.asClient(), account);
+    const store = new VaultStore(api.asClient(), account, undefined, undefined, api.asWire());
 
     await store.save(null, CARD_DOC);
     const cardMut = api.pushes.at(-1)![0]!;
@@ -190,7 +203,7 @@ describe("VaultStore card formatVersion wiring (fv2)", () => {
     // A server echo of exactly the pushed row decrypts back to the same card — the wire
     // fv IS the AD fv, or this open would throw and the card would vanish undecryptable.
     const echoed = wire(cardMut.vaultId, cardMut.itemId, cardMut.item!.blob, cardMut.item!.formatVersion, 5);
-    const rejoined = new VaultStore(api.asClient(), account); // fresh working set, same keys
+    const rejoined = new VaultStore(api.asClient(), account, undefined, undefined, api.asWire()); // fresh working set, same keys
     api.queue.push({ rev: 9, full: true, vaults: [], grants: [], items: [echoed], removedGrants: [] });
     await rejoined.sync();
     expect(rejoined.get(cardMut.itemId)?.doc).toEqual(CARD_DOC);
@@ -199,7 +212,7 @@ describe("VaultStore card formatVersion wiring (fv2)", () => {
   it("login/note saves still carry formatVersion 1 (bit-compat with the fielded fleet)", async () => {
     const account = await enroll("bitcompat@example.com");
     const api = new FakeApi();
-    const store = new VaultStore(api.asClient(), account);
+    const store = new VaultStore(api.asClient(), account, undefined, undefined, api.asWire());
 
     await store.save(null, LOGIN_DOC);
     expect(api.pushes.at(-1)![0]!.item!.formatVersion).toBe(1);
@@ -212,7 +225,7 @@ describe("VaultStore card formatVersion wiring (fv2)", () => {
     const vaultId = "55555555-5555-4555-8555-555555555555";
     const vk = grantRawVk(member, vaultId);
     const api = new FakeApi();
-    const store = new VaultStore(api.asClient(), member);
+    const { store } = storeWithLog(api, member, vaultId, vk);
 
     // A NOTE carrying a card object (the shape the legacy-restore edge mints): its floor
     // is 2 only while the card key is present — so the per-item fv MEMORY, not the floor,
@@ -246,21 +259,21 @@ describe("VaultStore card formatVersion wiring (fv2)", () => {
   it("holding-area round-trip: a held card re-seals at fv2 and rehydrates on reinstate", async () => {
     const owner = await enroll("owner@example.com");
     const member = await enroll("member@example.com");
-    const { request, vaultId } = owner.buildCreateSharedVault("Family");
-    const sealedVk = owner.wrapVkForMember(member.identityPub, vaultId);
-    member.authorizeLegacyKey(vaultId, owner.legacyKeyTag(vaultId)!); // A6: a vouched-for legacy key (writable), bound to its key
+    const vaultId = owner.newItemId();
+    const vk = grantRawVk(owner, vaultId);
     const itemId = owner.newItemId();
     const up = owner.encryptItem(vaultId, itemId, CARD_DOC);
-    const vault: WireVault = { vaultId, type: "shared", rev: 2, metaBlob: request.metaBlob, createdAt: 0 };
-    const grant: WireGrant = { vaultId, userId: member.userId, role: "writer", wrappedVk: "", rev: 3, sealedVk };
+    const vault: WireVault = { vaultId, type: "shared", rev: 2, metaBlob: toB64(seal(vk, utf8(JSON.stringify({ name: "Family" })), adVaultMeta(vaultId))), createdAt: 0 };
+    const grant: WireGrant = { vaultId, userId: member.userId, role: "writer", wrappedVk: "", rev: 3 }; // a hint only: the log decides
 
     const api = new FakeApi();
-    const store = new VaultStore(api.asClient(), member);
+    const { store, logs } = storeWithLog(api, member, vaultId, vk);
     api.queue.push({ rev: 5, full: true, vaults: [vault], grants: [grant], items: [wire(vaultId, itemId, up.blob, up.formatVersion, 4)], removedGrants: [] });
     await store.sync();
     expect(store.get(itemId)?.doc).toEqual(CARD_DOC);
 
-    // Revocation: the card is re-sealed into the ciphertext-only holding snapshot.
+    // Revocation (the member left, as the log says): the card is re-sealed into the ciphertext-only holding snapshot.
+    logs.remove(vaultId, false);
     api.queue.push({ rev: 6, full: false, vaults: [], grants: [], items: [], removedGrants: [vaultId], removedGrantsInfo: [{ vaultId, reason: "left" }] });
     await store.sync();
     expect(store.get(itemId)).toBeUndefined();
@@ -269,6 +282,7 @@ describe("VaultStore card formatVersion wiring (fv2)", () => {
     // Reinstate via a re-delivered live grant WITHOUT the item in the backfill: the belt
     // rehydrate decrypts the held snapshot — a held wire fv diverging from the fv the
     // snapshot blob was sealed (AD-bound) at would throw here and silently drop the card.
+    logs.share(vaultId, vk, "writer"); // the log lists the member again
     api.queue.push({ rev: 7, full: false, vaults: [{ ...vault, rev: 7 }], grants: [{ ...grant, rev: 7 }], items: [], removedGrants: [] });
     await store.sync();
     expect(store.heldVaults()).toHaveLength(0);
@@ -279,7 +293,7 @@ describe("VaultStore card formatVersion wiring (fv2)", () => {
     const account = await enroll("banner@example.com");
     const pv = account.personalVaultId;
     const api = new FakeApi();
-    const store = new VaultStore(api.asClient(), account);
+    const store = new VaultStore(api.asClient(), account, undefined, undefined, api.asWire());
 
     const newerId = account.newItemId();
     const corruptId = account.newItemId();
@@ -298,7 +312,7 @@ describe("VaultStore card formatVersion wiring (fv2)", () => {
     const account = await enroll("trash@example.com");
     const pv = account.personalVaultId;
     const api = new FakeApi();
-    const store = new VaultStore(api.asClient(), account);
+    const store = new VaultStore(api.asClient(), account, undefined, undefined, api.asWire());
 
     const deadId = account.newItemId();
     api.deletedList = [{ itemId: deadId, vaultId: pv, deletedAt: 1_690_000_000_000 }];
@@ -315,7 +329,7 @@ describe("VaultStore card formatVersion wiring (fv2)", () => {
     const account = await enroll("undelete@example.com");
     const pv = account.personalVaultId;
     const api = new FakeApi();
-    const store = new VaultStore(api.asClient(), account);
+    const store = new VaultStore(api.asClient(), account, undefined, undefined, api.asWire());
 
     const deadId = account.newItemId();
     api.deletedList = [{ itemId: deadId, vaultId: pv, deletedAt: 1_690_000_000_000 }];
@@ -334,7 +348,7 @@ describe("VaultStore card formatVersion wiring (fv2)", () => {
   it("importDocs of plain logins/notes still pushes formatVersion 1", async () => {
     const account = await enroll("import@example.com");
     const api = new FakeApi();
-    const store = new VaultStore(api.asClient(), account);
+    const store = new VaultStore(api.asClient(), account, undefined, undefined, api.asWire());
 
     await store.importDocs([
       { itemId: account.newItemId(), doc: LOGIN_DOC },

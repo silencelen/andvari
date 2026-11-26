@@ -4,15 +4,21 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { ApiError, type ApiClient } from "../api/client";
 import type { ItemDoc, Mutation, PushResponse, SyncResponse, WireGrant, WireItem, WireVault } from "../api/types";
 import type { AccountKeys } from "../api/types";
-import { toB64 } from "../crypto/bytes";
+import { adVaultMeta } from "../crypto/ad";
+import { toB64, utf8 } from "../crypto/bytes";
+import { seal } from "../crypto/envelope";
 import { fingerprint } from "../crypto/escrow";
 import type { KdfParams } from "../crypto/keys";
-import { deleteProof } from "../crypto/lifecycleproof";
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
 import { initSodium } from "../crypto/sodium";
 import { Account } from "./account";
-import { IdbVaultCache, openVaultCache } from "./idbcache";
-import { VaultStore } from "./store";
+import { type FakeRole, FakeSharedLogs } from "./fakesharedlogs.testkit";
+import { IdbVaultCache, openVaultCache, type VaultCache } from "./idbcache";
+import { type ItemWire, VaultStore } from "./store";
+import { SAVE_COPY_BEING_REMOVED, SAVE_COPY_REMOVAL_BLOCKED } from "../ui/copy";
+import { saveErrorText } from "../ui/saveerror";
+import { applyOrgOfflineCachePolicy } from "../ui/session";
+import { CopyBeingRemovedError } from "./policywipe";
 
 /**
  * S4 suite (design 2026-07-13-web-offline-cache §D.3): durable offline WRITES — the queue,
@@ -54,6 +60,8 @@ class FakeApi {
   private release: (() => void) | null = null;
   private reached: (() => void) | null = null;
   gated = new Promise<void>((r) => (this.reached = r));
+  /** Run when the canned response it is keyed by is served: what this browser's log learns at that pull. */
+  whenServed = new WeakMap<SyncResponse, () => void>();
   releaseSync(): void {
     const r = this.release;
     this.release = null;
@@ -85,6 +93,7 @@ class FakeApi {
     }
     const canned = this.queue.shift();
     if (canned) {
+      this.whenServed.get(canned)?.();
       this.rev = Math.max(this.rev, canned.rev);
       for (const v of canned.vaults) FakeApi.newest(this.vaultRows, v.vaultId, v);
       for (const gr of canned.grants) FakeApi.newest(this.grantRows, gr.vaultId, gr);
@@ -106,7 +115,7 @@ class FakeApi {
     };
   }
 
-  async push(mutations: Mutation[]): Promise<PushResponse> {
+  async pushMutations(mutations: Mutation[]): Promise<PushResponse> {
     if (this.offline || this.failPushes) throw new TypeError("offline");
     if (this.refuseWithStatus) throw new ApiError(this.refuseWithStatus.status, this.refuseWithStatus.code, "transient");
     if (mutations.some((m) => this.refuseBatchIfContains.has(m.itemId))) throw new ApiError(400, "unknown_attachment", "bad attachment refs");
@@ -170,6 +179,11 @@ class FakeApi {
   asClient(): ApiClient {
     return this as unknown as ApiClient;
   }
+
+  /** The item routes the store calls (its ItemWire): this fake serves them too. */
+  asWire(): ItemWire {
+    return this as unknown as ItemWire;
+  }
 }
 
 interface Enrolled {
@@ -202,9 +216,10 @@ async function enroll(email: string): Promise<Enrolled> {
       encryptedIdentitySeed: request.encryptedIdentitySeed,
       identityPub: request.identityPub,
       escrowFingerprint: request.escrow!.fingerprint,
+      personalWrap: request.personalWrap, // design §5.3: the personal vault is the one whose served wrap opens at unlock
     },
     personalVault: { vaultId: request.personalVault.vaultId, type: "personal", rev: 1, metaBlob: request.personalVault.metaBlob, createdAt: 0 },
-    personalGrant: { vaultId: request.personalVault.vaultId, userId: request.userId, role: "owner", wrappedVk: request.personalVault.wrappedVk, rev: 1, sealedVk: null },
+    personalGrant: { vaultId: request.personalVault.vaultId, userId: request.userId, role: "owner", wrappedVk: request.personalVault.wrappedVk, rev: 1 },
   };
 }
 
@@ -214,27 +229,31 @@ interface Scenario {
   owner: Enrolled;
   member: Enrolled;
   vaultId: string;
+  vk: Uint8Array;
+  role: FakeRole;
   vault: WireVault;
   grant: WireGrant;
   itemId: string;
   item: WireItem;
 }
 
-async function scenario(role = "writer"): Promise<Scenario> {
+/** Owner's shared vault + item; its verified log lists the member with [role] (design §3.6) — real client crypto. */
+async function scenario(role: FakeRole = "writer"): Promise<Scenario> {
   const owner = await enroll("owner@example.com");
   const member = await enroll("member@example.com");
-  const { request, vaultId } = owner.account.buildCreateSharedVault("Family");
-  const sealedVk = owner.account.wrapVkForMember(member.account.identityPub, vaultId);
-  // A6: this fixture's member vouched for the v1-only key (as after "Accept" on the review card), so the
-  // legacy key is writable here; signedgrant.store.test.ts covers the unconfirmed path.
-  member.account.authorizeLegacyKey(vaultId, owner.account.legacyKeyTag(vaultId)!); // bound to the vault key (A6 HIGH-1)
+  const vaultId = owner.account.newItemId();
+  const vk = randomBytes(32);
+  owner.account.logKeyRing().set(vaultId, vk.slice());
+  owner.account.attachLogRoles(() => "owner", () => true);
   const itemId = owner.account.newItemId();
   return {
     owner,
     member,
     vaultId,
-    vault: { vaultId, type: "shared", rev: 2, metaBlob: request.metaBlob, createdAt: 0 },
-    grant: { vaultId, userId: member.account.userId, role, wrappedVk: "", rev: 3, sealedVk },
+    vk,
+    role,
+    vault: { vaultId, type: "shared", rev: 2, metaBlob: toB64(seal(vk, utf8(JSON.stringify({ name: "Family" })), adVaultMeta(vaultId))), createdAt: 0 },
+    grant: { vaultId, userId: member.account.userId, role, wrappedVk: "", rev: 3 }, // a hint only: the log decides
     itemId,
     item: {
       itemId,
@@ -251,11 +270,27 @@ async function scenario(role = "writer"): Promise<Scenario> {
   };
 }
 
-async function seeded(role = "writer") {
+/** A store for the member's [account] (the first device, or a restarted one), with the fake log layer attached as
+ *  enterVault attaches the real one: the vault's log lists the member with the scenario's role. */
+function memberStore(s: Scenario, api: ApiClient, account: Account, cache?: VaultCache): { store: VaultStore; logs: FakeSharedLogs } {
+  const store = new VaultStore(api, account, cache, undefined, api as unknown as ItemWire); // the fake serves the item routes too
+  const logs = new FakeSharedLogs(account).attachTo(store);
+  logs.share(s.vaultId, s.vk, s.role);
+  return { store, logs };
+}
+
+/** A restarted device whose log, like the first device's, ends in the owner's delete (the vault is in its grace). */
+function restartedInGrace(s: Scenario, api: ApiClient, account: Account, cache: VaultCache): { store: VaultStore; logs: FakeSharedLogs } {
+  const m = memberStore(s, api, account, cache);
+  m.logs.deleteVault(s.vaultId);
+  return m;
+}
+
+async function seeded(role: FakeRole = "writer") {
   const s = await scenario(role);
   const cache = (await openVaultCache(s.member.account.userId)) as IdbVaultCache;
   const api = new FakeApi();
-  const store = new VaultStore(api.asClient(), s.member.account, cache);
+  const { store, logs } = memberStore(s, api.asClient(), s.member.account, cache);
   api.queue.push({
     rev: 5,
     full: true,
@@ -265,7 +300,31 @@ async function seeded(role = "writer") {
     removedGrants: [],
   });
   await store.sync();
-  return { s, api, cache, store };
+  return { s, api, cache, store, logs };
+}
+
+/** Queue the owner's delete of the shared vault at `rev`: this browser's log learns of it at the pull that serves it
+ *  (an edit made before then is sent, and denied by the server, as in-grace). The served purge time is only shown. */
+function queueVerifiedDelete(s: Scenario, api: FakeApi, logs: FakeSharedLogs, rev: number): void {
+  const resp: SyncResponse = {
+    rev,
+    full: false,
+    vaults: [],
+    grants: [],
+    items: [],
+    removedGrants: [s.vaultId],
+    removedGrantsInfo: [{ vaultId: s.vaultId, reason: "deleted", purgeAt: Date.now() + 7 * 86_400_000 }],
+  };
+  api.whenServed.set(resp, () => logs.deleteVault(s.vaultId));
+  api.queue.push(resp);
+}
+
+/** Queue the vault's reinstate (grant + vault + item re-delivered above the cursor); the log's `restore` is learnt at
+ *  the same pull. */
+function queueRestore(s: Scenario, api: FakeApi, logs: FakeSharedLogs, rev: number): void {
+  const resp: SyncResponse = { rev, full: false, vaults: [{ ...s.vault, rev }], grants: [{ ...s.grant, rev }], items: [{ ...s.item, rev }], removedGrants: [] };
+  api.whenServed.set(resp, () => logs.share(s.vaultId, s.vk, s.role));
+  api.queue.push(resp);
 }
 
 /** Stub navigator so offlineQueueAllowed() reads a known persistence verdict (and no Web
@@ -386,7 +445,9 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
   // ---- breaker #3 epoch guard ----
 
   it("a denial staged while an earlier pull is IN FLIGHT is NOT classified by that pull — only by one that STARTED after it (breaker #3)", async () => {
-    const { s, api, cache, store } = await seeded("reader"); // a reader's edit is genuinely denied
+    // A writer by the log, so the row is sent (a reader's never is: INV-WRITE-KEY refuses it locally); the server
+    // denies it, as when its grant was cut back server-side.
+    const { s, api, cache, store } = await seeded("writer");
     stubPersisted(true);
     api.denyVaults.add(s.vaultId);
 
@@ -459,22 +520,12 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
   // ---- F21 parked durability across a restart + reinstate replay ----
 
   it("a denied edit whose vault went in-grace is PARKED, survives a restart, and replays on reinstate (F21)", async () => {
-    const { s, api, cache, store } = await seeded("writer");
+    const { s, api, cache, store, logs } = await seeded("writer");
     stubPersisted(true);
     api.denyVaults.add(s.vaultId); // the vault went in-grace server-side → the edit is denied
 
     // The reconcile pull will deliver the vault's verified delete in the SAME cycle.
-    const key = await s.owner.account.lifecycleKeyFor(s.vaultId);
-    const deleteId = crypto.randomUUID();
-    api.queue.push({
-      rev: 6,
-      full: false,
-      vaults: [],
-      grants: [],
-      items: [],
-      removedGrants: [s.vaultId],
-      removedGrantsInfo: [{ vaultId: s.vaultId, reason: "deleted", deleteId, deleteProof: await deleteProof(key, s.vaultId, deleteId), purgeAt: Date.now() + 7 * 86_400_000 }],
-    });
+    queueVerifiedDelete(s, api, logs, 6);
 
     // The edit is denied (flush) then PARKED (the same cycle's pull moves the vault to holding)
     // — never surfaced as a hard failure.
@@ -487,13 +538,14 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     const fresh = await relock(s.member);
     const api2 = new FakeApi();
     const cache2 = (await openVaultCache(fresh.userId)) as IdbVaultCache;
-    const store2 = new VaultStore(api2.asClient(), fresh, cache2);
+    const { store: store2, logs: logs2 } = restartedInGrace(s, api2.asClient(), fresh, cache2);
     await store2.hydrate();
-    expect(store2.heldVaults().find((h) => h.vaultId === s.vaultId)?.name).toBe("Family");
+    // The key went with the removal and no grant row is kept, so a reload cannot re-derive the name.
+    expect(store2.heldVaults().find((h) => h.vaultId === s.vaultId)?.name).toBe("(vault)");
 
     // The owner restores the vault → the grant re-arrives (rev ABOVE the restored cursor, so the
     // strict-delta fake actually delivers it) → reinstate replays the parked edit ONCE.
-    api2.queue.push({ rev: 8, full: false, vaults: [{ ...s.vault, rev: 8 }], grants: [{ ...s.grant, rev: 8 }], items: [{ ...s.item, rev: 8 }], removedGrants: [] });
+    queueRestore(s, api2, logs2, 8);
     await store2.sync();
     const replays = api2.pushes.flat().filter((m) => m.itemId === s.itemId && m.op === "put");
     expect(replays).toHaveLength(1); // the parked edit replayed — exactly once (no double-load)
@@ -503,20 +555,10 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
   // ---- S2 note: no double-load after hydrate ----
 
   it("a parked staged-denial loads exactly ONCE after a restart — held.parked, never also via stagedDenied", async () => {
-    const { s, api, cache, store } = await seeded("writer");
+    const { s, api, cache, store, logs } = await seeded("writer");
     stubPersisted(true);
     api.denyVaults.add(s.vaultId);
-    const key = await s.owner.account.lifecycleKeyFor(s.vaultId);
-    const deleteId = crypto.randomUUID();
-    api.queue.push({
-      rev: 6,
-      full: false,
-      vaults: [],
-      grants: [],
-      items: [],
-      removedGrants: [s.vaultId],
-      removedGrantsInfo: [{ vaultId: s.vaultId, reason: "deleted", deleteId, deleteProof: await deleteProof(key, s.vaultId, deleteId), purgeAt: Date.now() + 7 * 86_400_000 }],
-    });
+    queueVerifiedDelete(s, api, logs, 6);
     await store.save(s.itemId, { ...DOC, name: "parked edit" }, [], undefined, s.vaultId);
 
     // On disk: the mutation lives ONLY in held.parked; the staged queue row was dropped in the
@@ -527,21 +569,22 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
 
     const fresh = await relock(s.member);
     const api2 = new FakeApi();
-    const store2 = new VaultStore(api2.asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
+    const { store: store2 } = restartedInGrace(s, api2.asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
     await store2.hydrate();
     // A plain reconcile (no delete) must NOT surface a spurious duplicate denial from a
     // double-loaded staging — nothing staged means nothing to classify.
     api2.queue.push({ rev: 7, full: false, vaults: [], grants: [], items: [], removedGrants: [] });
     await expect(store2.sync()).resolves.toBeUndefined();
-    expect(store2.heldVaults().find((h) => h.vaultId === s.vaultId)?.name).toBe("Family"); // still held, once
+    expect(store2.heldVaults().filter((h) => h.vaultId === s.vaultId).map((h) => h.name)).toEqual(["(vault)"]); // still held, once
   });
 
   // ---- the genuine online denial still throws (Editor failure UX unchanged) ----
 
-  it("a genuine online denial (a reader edit on a live vault) throws and reverts — Editor failure UX unchanged", async () => {
-    const { s, api, store } = await seeded("reader");
+  it("a genuine online denial (a server-refused edit on a live vault) throws and reverts — Editor failure UX unchanged", async () => {
+    // A writer by the log, so the edit is sent (a reader's never is: INV-WRITE-KEY refuses it locally).
+    const { s, api, store } = await seeded("writer");
     stubPersisted(true);
-    api.denyVaults.add(s.vaultId); // a live vault the reader can't write
+    api.denyVaults.add(s.vaultId); // a live vault the server will not let this member write
     await expect(store.save(s.itemId, { ...DOC, name: "reader tried" }, [], undefined, s.vaultId)).rejects.toMatchObject({ code: "denied" });
     expect(store.get(s.itemId)?.doc.name).toBe(DOC.name); // reverted to the live value
   });
@@ -549,34 +592,11 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
   // ==== converged data-loss review fixes (2026-07-14): C1 reinstate replay, C2 denial
   // revert + notice + epoch-deferral, C3 FIFO send, C4 id-scoped queue drop ====
 
-  /** Queue a VERIFIED owner delete of the shared vault at `rev`; returns its deleteId. */
-  async function queueVerifiedDelete(s: Scenario, api: FakeApi, rev: number): Promise<string> {
-    const key = await s.owner.account.lifecycleKeyFor(s.vaultId);
-    const deleteId = crypto.randomUUID();
-    api.queue.push({
-      rev,
-      full: false,
-      vaults: [],
-      grants: [],
-      items: [],
-      removedGrants: [s.vaultId],
-      removedGrantsInfo: [
-        { vaultId: s.vaultId, reason: "deleted", deleteId, deleteProof: await deleteProof(key, s.vaultId, deleteId), purgeAt: Date.now() + 7 * 86_400_000 },
-      ],
-    });
-    return deleteId;
-  }
-
-  /** Queue the vault's reinstate (grant + vault + item re-delivered above the cursor). */
-  const queueRestore = (s: Scenario, api: FakeApi, rev: number): void => {
-    api.queue.push({ rev, full: false, vaults: [{ ...s.vault, rev }], grants: [{ ...s.grant, rev }], items: [{ ...s.item, rev }], removedGrants: [] });
-  };
-
   it("C1: a reinstate replay whose push FAILS (transport) keeps the parked edit durably queued — it survives a restart and flushes on reconnect", async () => {
-    const { s, api, cache, store } = await seeded("writer");
+    const { s, api, cache, store, logs } = await seeded("writer");
     stubPersisted(true);
     api.denyVaults.add(s.vaultId);
-    await queueVerifiedDelete(s, api, 6);
+    queueVerifiedDelete(s, api, logs, 6);
     await store.save(s.itemId, { ...DOC, name: "edited before delete" }, [], undefined, s.vaultId); // denied → parked (F21)
     const parkedId = (await cache.getHeld(s.vaultId))!.parked[0]!.mutationId;
 
@@ -585,7 +605,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     // dropped the holding record and disk had removed it in the same commit.
     api.denyVaults.delete(s.vaultId);
     api.failPushes = true;
-    queueRestore(s, api, 8);
+    queueRestore(s, api, logs, 8);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       await expect(store.sync()).resolves.toBeUndefined(); // offline replay failure ≠ pull failure
@@ -602,7 +622,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     const fresh = await relock(s.member);
     const api2 = new FakeApi();
     const cache2 = (await openVaultCache(fresh.userId)) as IdbVaultCache;
-    const store2 = new VaultStore(api2.asClient(), fresh, cache2);
+    const { store: store2 } = memberStore(s, api2.asClient(), fresh, cache2); // the log shows the restore
     await store2.hydrate();
     expect(store2.hasPendingSync(s.itemId)).toBe(true);
     api2.queue.push({ rev: 9, full: false, vaults: [], grants: [], items: [], removedGrants: [] });
@@ -612,23 +632,23 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
   });
 
   it("C1: a reinstate replay that is DENIED again re-parks when the vault is re-deleted — the edit is never lost", async () => {
-    const { s, api, cache, store } = await seeded("writer");
+    const { s, api, cache, store, logs } = await seeded("writer");
     stubPersisted(true);
     api.denyVaults.add(s.vaultId);
-    await queueVerifiedDelete(s, api, 6);
+    queueVerifiedDelete(s, api, logs, 6);
     await store.save(s.itemId, { ...DOC, name: "parked edit" }, [], undefined, s.vaultId);
     const parkedId = (await cache.getHeld(s.vaultId))!.parked[0]!.mutationId;
 
     // Restore arrives but the vault is ALREADY going back in-grace server-side: the replay
     // push is denied. It must STAGE (durable), not throw and not vanish.
-    queueRestore(s, api, 8); // denyVaults still contains the vault
+    queueRestore(s, api, logs, 8); // denyVaults still contains the vault
     await expect(store.sync()).resolves.toBeUndefined(); // a replay denial never fails the sync
     expect((await cache.stagedDenied()).map((m) => m.mutationId)).toEqual([parkedId]); // staged, awaiting a fresh verdict
     expect(await cache.pending()).toEqual([]);
 
     // The second delete lands on the NEXT cycle: the staged replay folds back into the
     // holding record (re-parked, survives the next restore) instead of being dropped.
-    await queueVerifiedDelete(s, api, 10);
+    queueVerifiedDelete(s, api, logs, 10);
     await expect(store.sync()).resolves.toBeUndefined();
     const held = await cache.getHeld(s.vaultId);
     expect(held?.parked.map((m) => m.mutationId)).toEqual([parkedId]); // re-parked, not lost
@@ -637,15 +657,15 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
   });
 
   it("C1: a replay denied on a STILL-LIVE vault drains into the calm replay-denied notice — never a thrown sync failure", async () => {
-    const { s, api, cache, store } = await seeded("writer");
+    const { s, api, cache, store, logs } = await seeded("writer");
     stubPersisted(true);
     api.denyVaults.add(s.vaultId);
-    await queueVerifiedDelete(s, api, 6);
+    queueVerifiedDelete(s, api, logs, 6);
     await store.save(s.itemId, { ...DOC, name: "parked edit" }, [], undefined, s.vaultId);
 
     // Restore arrives; the replay is denied (the member came back as effectively read-only),
     // and the vault STAYS live — the next cycle classifies it as a wasReplay denial.
-    queueRestore(s, api, 8);
+    queueRestore(s, api, logs, 8);
     await expect(store.sync()).resolves.toBeUndefined(); // replay denied → staged, too fresh to classify
     await expect(store.sync()).resolves.toBeUndefined(); // classified now: CALM notice, no throw
     const notice = store.notices().find((n) => n.vaultId === s.vaultId && n.kind === "replay-denied");
@@ -678,7 +698,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
 
     // The revert landed on DISK too: a fresh session hydrates the pre-edit value.
     const fresh = await relock(s.member);
-    const store2 = new VaultStore(new FakeApi().asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
+    const { store: store2 } = memberStore(s, new FakeApi().asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
     await store2.hydrate();
     expect(store2.get(s.itemId)?.doc.name).toBe(DOC.name);
   });
@@ -699,13 +719,14 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
 
     // And on disk: a fresh hydrate still shows the item.
     const fresh = await relock(s.member);
-    const store2 = new VaultStore(new FakeApi().asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
+    const { store: store2 } = memberStore(s, new FakeApi().asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
     await store2.hydrate();
     expect(store2.get(s.itemId)?.doc.name).toBe(DOC.name);
   });
 
   it("C2: the epoch-DEFERRAL case — a save whose reconcile joined a stale pull does NOT return success for a denied write", async () => {
-    const { s, api, cache, store } = await seeded("reader");
+    // A writer by the log, so the save is sent (a reader's never is); the server denies it.
+    const { s, api, cache, store } = await seeded("writer");
     stubPersisted(true);
     api.denyVaults.add(s.vaultId);
 
@@ -805,7 +826,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     // The SEEDED value, not "draft 1" and not "draft 2".
     expect(store.get(s.itemId)?.doc.name).toBe(DOC.name);
     const fresh = await relock(s.member);
-    const store2 = new VaultStore(new FakeApi().asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
+    const { store: store2 } = memberStore(s, new FakeApi().asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
     await store2.hydrate();
     expect(store2.get(s.itemId)?.doc.name, "…on disk too, so a restart agrees").toBe(DOC.name);
   });
@@ -896,10 +917,10 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
   });
 
   it("C4: a row staged after moveToHolding's fold-read but before the commit is NOT collaterally erased", async () => {
-    const { s, api, cache, store } = await seeded("writer");
+    const { s, api, cache, store, logs } = await seeded("writer");
     stubPersisted(true);
     api.denyVaults.add(s.vaultId);
-    await queueVerifiedDelete(s, api, 6);
+    queueVerifiedDelete(s, api, logs, 6);
 
     // Interleave a concurrent enqueue for the SAME vault between the pull's in-memory apply
     // (fold-read) and its disk commit — exactly the window the vault-wide dropPending erased.
@@ -959,7 +980,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
 
     // A fresh session agrees: the item is gone.
     const fresh = await relock(s.member);
-    const store2 = new VaultStore(new FakeApi().asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
+    const { store: store2 } = memberStore(s, new FakeApi().asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
     await store2.hydrate();
     expect(store2.get(s.itemId)).toBeUndefined();
   });
@@ -975,12 +996,9 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     // but its durable twin rides the queue row. Pre-fix, this ORDINARY flow (edit offline →
     // close → reopen → reconnect → denied) left the refused value on display indefinitely.
     const fresh = await relock(s.member);
-    // A6: the restarted device keeps its vouch for this legacy key (bound to the key). Before the A6 fix round this
-    // test passed only because the freeze marker lived in per-instance client state and was recomputed on reload.
-    fresh.authorizeLegacyKey(s.vaultId, s.owner.account.legacyKeyTag(s.vaultId)!);
     const api2 = new FakeApi();
     const cache2 = (await openVaultCache(fresh.userId)) as IdbVaultCache;
-    const store2 = new VaultStore(api2.asClient(), fresh, cache2);
+    const { store: store2 } = memberStore(s, api2.asClient(), fresh, cache2); // the reload adopts the key again from the log
     await store2.hydrate();
     expect(store2.get(s.itemId)?.doc.name).toBe("renamed offline"); // optimistic value survived the restart
 
@@ -998,7 +1016,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
 
     // The revert landed on DISK too: a SECOND fresh hydrate shows the pre-edit value.
     const fresh2 = await relock(s.member);
-    const store3 = new VaultStore(new FakeApi().asClient(), fresh2, (await openVaultCache(fresh2.userId)) as IdbVaultCache);
+    const { store: store3 } = memberStore(s, new FakeApi().asClient(), fresh2, (await openVaultCache(fresh2.userId)) as IdbVaultCache);
     await store3.hydrate();
     expect(store3.get(s.itemId)?.doc.name).toBe(DOC.name);
   });
@@ -1011,9 +1029,8 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     expect(store.get(s.itemId)).toBeUndefined();
 
     const fresh = await relock(s.member);
-    fresh.authorizeLegacyKey(s.vaultId, s.owner.account.legacyKeyTag(s.vaultId)!); // A6: the restarted device keeps its vouched-for legacy key (the store persists it; this fixture sets it on the Account)
     const api2 = new FakeApi();
-    const store2 = new VaultStore(api2.asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
+    const { store: store2 } = memberStore(s, api2.asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
     await store2.hydrate();
     expect(store2.get(s.itemId)).toBeUndefined(); // still deleted after the restart
 
@@ -1025,8 +1042,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
 
     // And on disk: a second fresh hydrate still shows it.
     const fresh2 = await relock(s.member);
-    fresh2.authorizeLegacyKey(s.vaultId, s.owner.account.legacyKeyTag(s.vaultId)!);
-    const store3 = new VaultStore(new FakeApi().asClient(), fresh2, (await openVaultCache(fresh2.userId)) as IdbVaultCache);
+    const { store: store3 } = memberStore(s, new FakeApi().asClient(), fresh2, (await openVaultCache(fresh2.userId)) as IdbVaultCache);
     await store3.hydrate();
     expect(store3.get(s.itemId)?.doc.name).toBe(DOC.name);
   });
@@ -1045,7 +1061,7 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
 
     const fresh = await relock(s.member);
     const api2 = new FakeApi();
-    const store2 = new VaultStore(api2.asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
+    const { store: store2 } = memberStore(s, api2.asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
     await store2.hydrate();
     api2.denyVaults.add(s.vaultId);
     api2.queue.push({ rev: 6, full: false, vaults: [], grants: [], items: [], removedGrants: [] });
@@ -1056,6 +1072,134 @@ describe("VaultStore durable offline writes (S4, design §D.3)", () => {
     expect(notice?.parkedCount).toBe(1);
     expect(notice?.revertedCount).toBe(0);
     expect(notice?.removedCount).toBe(0);
+  });
+
+  it("decided on 2026-11-17: from the moment a policy that forbids the copy is read, a change is refused with its reason and the store's drain stays out; the one attempt sends what waits and counts it", async () => {
+    const { s, api, cache, store } = await seeded("writer");
+    stubPersisted(true);
+    const kept = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => kept.get(k) ?? null,
+      setItem: (k: string, v: string) => void kept.set(k, v),
+      removeItem: (k: string) => void kept.delete(k),
+      key: (i: number) => [...kept.keys()][i] ?? null,
+      get length() {
+        return kept.size;
+      },
+    });
+    api.offline = true;
+    await store.save(null, { type: "note", name: "made offline" });
+    const waiting = (await cache.pending()).map((m) => m.mutationId);
+    expect(waiting).toHaveLength(1);
+    api.offline = false;
+
+    let release = () => {};
+    const answered = new Promise<void>((r) => (release = r));
+    const sent: string[] = [];
+    const run = applyOrgOfflineCachePolicy(false, s.member.account.userId, {
+      send: async (b) => {
+        sent.push(...b.map((m) => m.mutationId));
+        await answered;
+        return { rev: 9, results: b.map((m) => ({ mutationId: m.mutationId, status: "applied" as const })) };
+      },
+      server: "Family",
+      mayWrite: () => true,
+    });
+    await vi.waitFor(() => expect(sent).toEqual(waiting));
+
+    // The check's sequence: a change made while the attempt's push is on its way.
+    const refused = await store.save(null, { type: "note", name: "made during the run" }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(refused).toBeInstanceOf(CopyBeingRemovedError);
+    expect(saveErrorText(refused, true)).toBe(SAVE_COPY_BEING_REMOVED);
+    await expect(store.remove(s.itemId)).rejects.toBeInstanceOf(CopyBeingRemovedError);
+    await store.sync().catch(() => {}); // the store's own drain sends nothing of the copy meanwhile
+    expect(api.pushes).toEqual([]);
+    expect((await cache.pending()).map((m) => m.mutationId), "nothing new queued into the copy").toEqual(waiting);
+
+    release();
+    expect(await run).toEqual({ server: "Family", unsent: 0, unsure: 0 });
+    // The copy is gone: the store runs without one, and a change is sent as on any browser without an offline copy.
+    await store.save(null, { type: "note", name: "made after" });
+    expect(api.pushes.flat()).toHaveLength(1);
+  });
+
+  it("a removal that stays held up (a connection that does not close) says so truly, and the account is open for changes again once the wipe is made", async () => {
+    const { s, api, cache, store } = await seeded("writer");
+    stubPersisted(true);
+    const kept = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => kept.get(k) ?? null,
+      setItem: (k: string, v: string) => void kept.set(k, v),
+      removeItem: (k: string) => void kept.delete(k),
+      key: (i: number) => [...kept.keys()][i] ?? null,
+      get length() {
+        return kept.size;
+      },
+    });
+    const userId = s.member.account.userId;
+    api.offline = true;
+    await store.save(null, { type: "note", name: "made offline" }); // a change waits in the copy
+    api.offline = false;
+    // The copy is held open by a tab that has not let go of it (a tab the browser froze does not get to the deletion's
+    // request until it runs again): the deletion stays held up, and that store still holds the copy.
+    const db = (cache as unknown as { db: IDBDatabase }).db;
+    const letGo = db.onversionchange!;
+    db.onversionchange = () => {};
+    const ran = await applyOrgOfflineCachePolicy(false, userId, { send: async (b) => ({ rev: 9, results: b.map((m) => ({ mutationId: m.mutationId, status: "applied" as const })) }), server: "Family", mayWrite: () => true }, { deleteWaitMs: 50 });
+    expect(ran, "not said as made").toBeNull();
+    const refused = await store.save(null, { type: "note", name: "made while it is held up" }).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(refused).toBeInstanceOf(CopyBeingRemovedError);
+    expect((refused as CopyBeingRemovedError).blocked).toBe(true);
+    expect(saveErrorText(refused, true)).toBe(SAVE_COPY_REMOVAL_BLOCKED);
+    expect(saveErrorText(refused, true)).not.toBe(SAVE_COPY_BEING_REMOVED);
+    const pushedBefore = api.pushes.flat().length;
+
+    letGo.call(db, new Event("versionchange") as IDBVersionChangeEvent); // the tab runs again and lets go: the deletion is made
+    await vi.waitFor(() => expect([...kept.keys()].some((k) => k.startsWith("andvari.copyBeingRemoved."))).toBe(false));
+    await store.save(null, { type: "note", name: "made after" });
+    expect(api.pushes.flat().length, "open for changes again").toBe(pushedBefore + 1);
+  });
+
+  it("only the copy being removed is closed: a tab of another account in the same browser goes on as before while that copy's run is under way", async () => {
+    const { store, api } = await seeded("writer");
+    stubPersisted(true);
+    const kept = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (k: string) => kept.get(k) ?? null,
+      setItem: (k: string, v: string) => void kept.set(k, v),
+      removeItem: (k: string) => void kept.delete(k),
+      key: (i: number) => [...kept.keys()][i] ?? null,
+      get length() {
+        return kept.size;
+      },
+    });
+    // Another account's copy in this browser, with a change waiting; its tab reads the policy and its run starts.
+    const other = "77777777-7777-4777-8777-777777777777";
+    const otherCache = await openVaultCache(other);
+    await otherCache.enqueue({ mutationId: "o1", op: "delete", itemId: "o-item", vaultId: "o-vault", baseItemRev: 1 } as Mutation);
+    otherCache.close();
+    let release = () => {};
+    const answered = new Promise<void>((r) => (release = r));
+    const run = applyOrgOfflineCachePolicy(false, other, {
+      send: async (b) => {
+        await answered;
+        return { rev: 1, results: b.map((m) => ({ mutationId: m.mutationId, status: "applied" as const })) };
+      },
+      server: "Family",
+      mayWrite: () => true,
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    // This tab (its own account, its own durable copy) saves and sends as before: no "being removed" refusal.
+    await store.save(null, { type: "note", name: "made in the other tab" });
+    expect(api.pushes.flat()).toHaveLength(1);
+    release();
+    expect(await run).toEqual({ server: "Family", unsent: 0, unsure: 0 });
   });
 });
 

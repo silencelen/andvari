@@ -23,7 +23,7 @@ describe("root cause C — no master-password-derived request can reach the serv
     passwordadvice: src("./passwordadvice.tsx"),
     Welcome: src("./Welcome.tsx"),
     Settings: src("./Settings.tsx"),
-    Recover: src("./Recover.tsx"),
+    KitCard: src("./KitCard.tsx"),
     ExportPanel: src("./ExportPanel.tsx"),
   } as const;
 
@@ -48,7 +48,7 @@ describe("root cause C — no master-password-derived request can reach the serv
   });
 
   it("the master-password hint is no longer handed an API client", () => {
-    for (const name of ["Welcome", "Settings", "Recover"] as const) {
+    for (const name of ["Welcome", "Settings"] as const) {
       expect(surfaces[name], `${name}'s MasterPasswordHint must not get a client`).not.toMatch(/<MasterPasswordHint[^>]*client=/);
     }
     // The ExportPanel element itself, up to its own "/>", must not be handed the client.

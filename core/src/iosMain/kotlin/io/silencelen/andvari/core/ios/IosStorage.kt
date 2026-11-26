@@ -6,6 +6,10 @@ import io.silencelen.andvari.core.app.BlobStore
 import io.silencelen.andvari.core.app.FillSnapshotStore
 import io.silencelen.andvari.core.app.SaveQueue
 import io.silencelen.andvari.core.app.SaveQueueStore
+import io.silencelen.andvari.core.app.content.StrictBlobStore
+import io.silencelen.andvari.core.app.content.StrictReads
+import io.silencelen.andvari.core.app.content.StrictRecordStore
+import io.silencelen.andvari.core.app.content.StrictSaveQueueStore
 import io.silencelen.andvari.core.client.DeviceState
 import io.silencelen.andvari.core.client.JsonDeviceState
 import io.silencelen.andvari.core.client.OriginCanon
@@ -90,10 +94,6 @@ internal class UserDefaultsPrefs(suite: String?) : KeyValuePrefs {
     override fun putString(key: String, value: String?) {
         if (value == null) defaults.removeObjectForKey(key) else defaults.setObject(value, forKey = key)
     }
-
-    /** The keys of these defaults under [prefix] (the system's own keys, which the list also holds, start otherwise). */
-    override fun keysWithPrefix(prefix: String): List<String> =
-        defaults.dictionaryRepresentation().keys.mapNotNull { it as? String }.filter { it.startsWith(prefix) }
 }
 
 /**
@@ -253,15 +253,6 @@ internal class IosNamespaceStorage(private val root: String = defaultRoot()) : N
         }
     }
 
-    /** The origin's whole directory: every user's vault cache and device state there. The users are its sub-directories. */
-    override fun deleteOrigin(originKey: String): List<String> {
-        val fm = NSFileManager.defaultManager
-        val origin = "$root/${OriginCanon.pathSafe(originKey)}"
-        val users = runCatching { fm.contentsOfDirectoryAtPath(origin, error = null)?.mapNotNull { it as? String } }.getOrNull().orEmpty()
-        runCatching { fm.removeItemAtPath(origin, error = null) }
-        return users
-    }
-
     companion object {
         fun defaultRoot(): String {
             val support = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, true).firstOrNull() as? String
@@ -296,7 +287,7 @@ internal fun NSData.toByteArray(): ByteArray {
  * rename so a reader sees the old one or the new one, never a torn one. Ciphertext, excluded from backup, with the
  * protection class [protection] ([FileClasses]).
  */
-internal class FileFillSnapshots(private val path: String, private val protection: Any?) : FillSnapshotStore {
+internal class FileFillSnapshots(private val path: String, private val protection: Any?) : FillSnapshotStore, StrictRecordStore {
     override fun write(bytes: ByteArray): Boolean = runCatching {
         val fm = NSFileManager.defaultManager
         fm.createDirectoryAtPath(path.substringBeforeLast('/'), withIntermediateDirectories = true, attributes = null, error = null)
@@ -313,6 +304,10 @@ internal class FileFillSnapshots(private val path: String, private val protectio
 
     override fun read(): ByteArray? = runCatching { NSFileManager.defaultManager.contentsAtPath(path)?.toByteArray() }.getOrNull()
 
+    /** The vault's content's reader: null only when there is no file (the extensions keep [read]). */
+    override fun readOrThrow(): ByteArray? =
+        StrictReads.value("the record", { NSFileManager.defaultManager.contentsAtPath(path)?.toByteArray() }) { NSFileManager.defaultManager.fileExistsAtPath(path) }
+
     override fun delete() {
         runCatching { NSFileManager.defaultManager.removeItemAtPath(path, error = null) }
         runCatching { NSFileManager.defaultManager.removeItemAtPath("$path.tmp", error = null) }
@@ -325,7 +320,7 @@ internal class FileFillSnapshots(private val path: String, private val protectio
  * whole through a rename, excluded from backup, readable after the first unlock ([FileClasses.AFTER_FIRST_UNLOCK]): the
  * upload grace reads them while the person may have locked the phone.
  */
-internal class FileBlobStore(private val dir: String) : BlobStore {
+internal class FileBlobStore(private val dir: String) : BlobStore, StrictBlobStore {
     private val fm get() = NSFileManager.defaultManager
     private val attributes get() = mapOf<Any?, Any?>(NSFileProtectionKey to FileClasses.AFTER_FIRST_UNLOCK)
 
@@ -354,6 +349,16 @@ internal class FileBlobStore(private val dir: String) : BlobStore {
     override fun ids(): List<String> =
         runCatching { fm.contentsOfDirectoryAtPath(dir, error = null)?.mapNotNull { it as? String } }.getOrNull().orEmpty().filter { ID.matches(it) }
 
+    /** The vault's content's readers: "not there" only when there is no file, or no directory. */
+    override fun getOrThrow(id: String): ByteArray? {
+        val path = pathOf(id) ?: return null
+        return StrictReads.value("a file set aside", { fm.contentsAtPath(path)?.toByteArray() }) { fm.fileExistsAtPath(path) }
+    }
+
+    override fun idsOrThrow(): List<String> =
+        StrictReads.names("the files set aside", { fm.contentsOfDirectoryAtPath(dir, error = null)?.mapNotNull { it as? String } }) { fm.fileExistsAtPath(dir) }
+            .filter { ID.matches(it) }
+
     override fun clear() {
         runCatching { fm.removeItemAtPath(dir, error = null) }
     }
@@ -369,7 +374,7 @@ internal class FileBlobStore(private val dir: String) : BlobStore {
  * (SafariWebExtensionHandler.swift). Every write is a rename into place; entries are ciphertext. An entry is never
  * replaced: it goes into place with RENAME_EXCL, which fails when the name is taken, here and in the handler alike.
  */
-internal class FileSaveQueue(private val dir: String) : SaveQueueStore {
+internal class FileSaveQueue(private val dir: String) : SaveQueueStore, StrictSaveQueueStore {
     private val fm get() = NSFileManager.defaultManager
     private val attributes get() = mapOf<Any?, Any?>(NSFileProtectionKey to FileClasses.OPEN_OR_NEW)
 
@@ -400,21 +405,44 @@ internal class FileSaveQueue(private val dir: String) : SaveQueueStore {
      * most [SaveQueue.MAX_ENTRIES] are returned, and whatever else sits in the directory as an entry (a name that is
      * not an id, an oversized file, one past the count) is removed. Another process writes here.
      */
-    override fun entries(): Map<String, ByteArray> {
+    override fun entries(): Map<String, ByteArray> = collect(names(), strict = false)
+
+    /**
+     * The vault's content's reader: as [entries], but a directory that cannot be listed, or an entry that is there and
+     * cannot be sized or read, throws instead of being left out (or removed for want of a size). An entry removed
+     * between the listing and the read is not there.
+     */
+    override fun entriesOrThrow(): Map<String, ByteArray> = collect(
+        StrictReads.names("the save queue", { fm.contentsOfDirectoryAtPath(dir, error = null)?.mapNotNull { it as? String } }) { fm.fileExistsAtPath(dir) },
+        strict = true,
+    )
+
+    private fun sizeOf(path: String): Long? = runCatching { (fm.attributesOfItemAtPath(path, error = null)?.get(NSFileSize) as? Number)?.toLong() }.getOrNull()
+
+    private fun collect(names: List<String>, strict: Boolean): Map<String, ByteArray> {
         val out = LinkedHashMap<String, ByteArray>()
-        for (name in names().sorted()) {
+        for (name in names.sorted()) {
             if (name == KEY_FILE) continue
             val path = "$dir/$name"
             val id = name.removePrefix(ENTRY_PREFIX).removeSuffix(ENTRY_SUFFIX)
             val listed = name.startsWith(ENTRY_PREFIX) && name.endsWith(ENTRY_SUFFIX) && SaveQueue.validId(id)
-            val size = runCatching { (fm.attributesOfItemAtPath(path, error = null)?.get(NSFileSize) as? Number)?.toLong() }.getOrNull()
+            val size = if (strict && listed) {
+                StrictReads.value("a queued save", { sizeOf(path) }) { fm.fileExistsAtPath(path) } ?: continue
+            } else {
+                sizeOf(path)
+            }
             if (!listed || size == null || size > SaveQueue.MAX_ENTRY_BYTES || out.size >= SaveQueue.MAX_ENTRIES) {
                 // A temporary file of a write in flight is left to its writer; one left behind by a writer that died
                 // (older than a minute) goes with everything else.
                 if (!name.endsWith(".tmp") || staleTmp(path)) runCatching { fm.removeItemAtPath(path, error = null) }
                 continue
             }
-            runCatching { fm.contentsAtPath(path)?.toByteArray() }.getOrNull()?.let { out[id] = it }
+            val bytes = if (strict) {
+                StrictReads.value("a queued save", { fm.contentsAtPath(path)?.toByteArray() }) { fm.fileExistsAtPath(path) }
+            } else {
+                runCatching { fm.contentsAtPath(path)?.toByteArray() }.getOrNull()
+            }
+            bytes?.let { out[id] = it }
         }
         return out
     }

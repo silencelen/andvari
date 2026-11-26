@@ -68,6 +68,26 @@ class UsageRecorderCore<S : Any>(
     private var pending: Map<String, UsageLedger.Entry> = emptyMap()
     private var flushJob: Job? = null
 
+    /**
+     * Uses a running store took from the buffer and has not settled: a teardown that keeps the
+     * uses itself ([takeAll]) takes these too, so a lock that overtakes a flush keeps them like the others instead of
+     * losing them to a re-arm into a closed session. Merging takes the maximum, so a flush that lands anyway changes
+     * nothing when the kept copy is sent later.
+     */
+    private class Taken(val uses: Map<String, UsageLedger.Entry>)
+    private val inFlight = ArrayList<Taken>()
+
+    private fun takeForStore(): Taken = synchronized(lock) {
+        val t = Taken(pending)
+        pending = emptyMap()
+        if (t.uses.isNotEmpty()) inFlight += t
+        t
+    }
+
+    private fun settled(t: Taken) {
+        synchronized(lock) { inFlight.remove(t) }
+    }
+
     /** Record a use. In memory only; the flush is debounced. Safe from any thread. No session
      *  → nothing to flush against, so drop it rather than buffer records with nowhere to go. */
     fun record(itemId: String, now: Long) {
@@ -86,7 +106,12 @@ class UsageRecorderCore<S : Any>(
      *  local view it would prune against is not provably complete (audit G04). */
     suspend fun flush() {
         val s = session() ?: return
-        store(s, take(), liveItemIds = null)
+        val t = takeForStore()
+        try {
+            store(s, t.uses, liveItemIds = null)
+        } finally {
+            settled(t)
+        }
     }
 
     /**
@@ -131,8 +156,17 @@ class UsageRecorderCore<S : Any>(
      * "no write" pin must observe the flush's END, not a moment during it).
      */
     fun flushWithPrune(explicit: S, liveItemIds: Set<String>): Job {
-        val mine = take()
-        return scope.launch { store(explicit, mine, liveItemIds) }
+        val t = takeForStore()
+        val job = scope.launch {
+            try {
+                store(explicit, t.uses, liveItemIds)
+            } finally {
+                settled(t)
+            }
+        }
+        // A job cancelled before it started never runs its finally.
+        job.invokeOnCompletion { settled(t) }
+        return job
     }
 
     /**
@@ -207,6 +241,34 @@ class UsageRecorderCore<S : Any>(
         if (mine.isEmpty()) return
         synchronized(lock) {
             if (session() != null) pending = UsageLedger.merge(mine, pending)
+        }
+    }
+
+    /**
+     * Drain the buffer and cancel the pending debounce, for a teardown that keeps the uses ITSELF (the app interface's
+     * lock: it seals them before the keys are wiped and keeps them for the next opening). Nothing is sent and nothing
+     * waits. The caller owns what it gets: keep it, or drop it. It includes the uses a running flush took and has not
+     * settled: a flush the lock overtakes cannot send them any more (nothing is sealed after
+     * the wipe), and its re-arm finds no session.
+     */
+    fun takeAll(): Map<String, UsageLedger.Entry> = synchronized(lock) {
+        flushJob?.cancel()
+        flushJob = null
+        var m = pending
+        for (t in inFlight) m = UsageLedger.merge(m, t.uses)
+        inFlight.clear()
+        pending = emptyMap()
+        m
+    }
+
+    /**
+     * Merge uses kept from an earlier opening ([takeAll]) into the buffer, while a session stands; the next flush sends
+     * them. Schedules nothing itself: the caller flushes (after a completed sync, [flushWithPrune]).
+     */
+    fun restore(kept: Map<String, UsageLedger.Entry>) {
+        if (kept.isEmpty()) return
+        synchronized(lock) {
+            if (session() != null) pending = UsageLedger.merge(kept, pending)
         }
     }
 

@@ -1,4 +1,5 @@
 import { fromB64, toB64 } from "../crypto/bytes";
+import { emailNorm } from "../crypto/trust/grammar";
 import { IdentityMismatchError, type Account } from "./account";
 
 /**
@@ -26,7 +27,14 @@ const BY_EMAIL = "andvari.selfIdentityByEmail.";
 const SESSION_KEY = "andvari.session"; // ui/session.ts SESSION_STORAGE_KEY (vault/ must not import ui/)
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-export const normalizeEmail = (email: string): string => email.trim().toLowerCase();
+/**
+ * The email binding's key: the address in the shared §2.2 grammar (crypto/trust/grammar.ts emailNorm, the one every
+ * client and the server use), or null for a string that is not an address, for which no binding is read or written.
+ */
+const bindingKey = (email: string): string | null => {
+  const n = emailNorm(email);
+  return n === null ? null : BY_EMAIL + n;
+};
 
 function pub32(raw: string | null | undefined): Uint8Array | null {
   if (raw == null) return null;
@@ -46,13 +54,78 @@ function get(k: string): string | null {
   }
 }
 
-function putOnce(k: string, v: string): void {
+function putOnce(k: string, v: string): boolean {
   try {
-    if (typeof localStorage === "undefined" || localStorage.getItem(k) != null) return;
+    if (typeof localStorage === "undefined" || localStorage.getItem(k) != null) return false;
     localStorage.setItem(k, v);
+    return true;
   } catch {
     /* storage unavailable (privacy mode): the backstop is best-effort on web */
+    return false;
   }
+}
+
+/**
+ * After a forgetting (decided on 2026-11-17; the notice survives a reload, a lock and a closed tab): the addresses whose
+ * next account is still to be taken, and those whose new account was taken and whose one-time notice is not yet dismissed.
+ * Two device-wide keys holding addresses only.
+ */
+const REMEMBER_NEXT_KEY = "andvari.rememberNext";
+const REMEMBERED_KEY = "andvari.rememberedNew";
+/** The key of the notices to show (an open tab redraws them when another tab changes it). */
+export const REMEMBERED_NOTICES_KEY = REMEMBERED_KEY;
+
+function addressList(k: string): string[] {
+  try {
+    const raw: unknown = JSON.parse(get(k) ?? "[]");
+    return Array.isArray(raw) ? raw.filter((e): e is string => typeof e === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function setAddressList(k: string, list: readonly string[]): void {
+  try {
+    if (list.length === 0) localStorage.removeItem(k);
+    else localStorage.setItem(k, JSON.stringify([...new Set(list)]));
+  } catch {
+    /* storage unavailable: the notice is a notice, not a record */
+  }
+}
+
+/**
+ * The forgetting of [email]'s earlier account is complete: the next account taken under it is said once. Where one was
+ * already taken (a forgetting stopped part-way and finished after the next account's record was written), it is said now.
+ */
+export function rememberNextAt(email: string): void {
+  const k = bindingKey(email);
+  if (k !== null && decodeBinding(get(k)) !== null) setAddressList(REMEMBERED_KEY, [...addressList(REMEMBERED_KEY), k.slice(BY_EMAIL.length)]);
+  else setAddressList(REMEMBER_NEXT_KEY, [...addressList(REMEMBER_NEXT_KEY), email]);
+}
+
+/** The addresses whose notice "this browser now remembers the new account" is to be shown, until dismissed. */
+export function rememberedNotices(): string[] {
+  return addressList(REMEMBERED_KEY);
+}
+
+/** The person dismissed [email]'s notice: it is not shown again. */
+export function dismissRemembered(email: string): void {
+  setAddressList(REMEMBERED_KEY, addressList(REMEMBERED_KEY).filter((e) => e !== email));
+}
+
+/** A record now ties [k]'s address to an account: where that address was forgotten, its notice is raised. */
+function boundAfresh(k: string): void {
+  const n = k.slice(BY_EMAIL.length);
+  const next = addressList(REMEMBER_NEXT_KEY);
+  if (!next.includes(n)) return;
+  setAddressList(REMEMBERED_KEY, [...addressList(REMEMBERED_KEY), n]);
+  setAddressList(REMEMBER_NEXT_KEY, next.filter((e) => e !== n));
+}
+
+/** The address's notices go with the account under it (its deletion here, or a forgetting of it). */
+function dropNotices(n: string): void {
+  setAddressList(REMEMBER_NEXT_KEY, addressList(REMEMBER_NEXT_KEY).filter((e) => e !== n));
+  setAddressList(REMEMBERED_KEY, addressList(REMEMBERED_KEY).filter((e) => e !== n));
 }
 
 function decodeBinding(raw: string | null): { userId: string; pub: Uint8Array } | null {
@@ -76,7 +149,8 @@ export function bindLegacySelfIdentity(): void {
   const { userId, email } = raw as { userId?: unknown; email?: unknown };
   if (typeof userId !== "string" || !UUID_RE.test(userId) || typeof email !== "string" || !email.trim()) return;
   const pub = pub32(get(PREFIX + userId));
-  if (pub) putOnce(BY_EMAIL + normalizeEmail(email), `${userId}\n${toB64(pub)}`);
+  const k = bindingKey(email);
+  if (pub && k && putOnce(k, `${userId}\n${toB64(pub)}`)) boundAfresh(k);
 }
 
 /**
@@ -88,11 +162,93 @@ export function loadSelfIdentityPub(userId: string, email?: string): Uint8Array 
   const legacy = pub32(get(PREFIX + userId));
   if (!email || !email.trim()) return legacy;
   bindLegacySelfIdentity();
-  const b = decodeBinding(get(BY_EMAIL + normalizeEmail(email)));
+  const k = bindingKey(email);
+  const b = k === null ? null : decodeBinding(get(k));
   if (!b) return legacy;
   if (b.userId !== userId) throw new IdentityMismatchError();
   if (legacy && !sameBytes(legacy, b.pub)) throw new IdentityMismatchError();
   return b.pub;
+}
+
+/** The account this browser's record binds [email] to, whatever else its records say; null where none does (or not an address). */
+export function boundAccountAt(email: string): string | null {
+  bindLegacySelfIdentity();
+  const k = bindingKey(email);
+  return k === null ? null : (decodeBinding(get(k))?.userId ?? null);
+}
+
+/**
+ * The earlier account behind a refusal that is this browser's own record of [email] (decided on 2026-11-17, "Forget the
+ * earlier account on this device"): the address's record names an account, and that account's id-keyed pin, where one
+ * is kept, agrees with it. Null where no record names the address, and where its two records disagree: a record that
+ * disagrees with itself is not this case, and nothing is offered on it.
+ */
+export function earlierAccountAt(email: string): string | null {
+  bindLegacySelfIdentity();
+  const k = bindingKey(email);
+  const b = k === null ? null : decodeBinding(get(k));
+  if (!b) return null;
+  const legacy = pub32(get(PREFIX + b.userId));
+  return legacy && !sameBytes(legacy, b.pub) ? null : b.userId;
+}
+
+/**
+ * A forgetting of an earlier account that was begun (decided on 2026-11-17): written before anything of it is removed and
+ * taken away only when the removal is complete, so that a forgetting stopped part-way (a tab closed, a store that threw)
+ * is finished at the next start or the next click, and never answered as "nothing to forget". One key for the browser,
+ * not scoped to an account; it holds the address and the earlier account's id, nothing else.
+ */
+export const FORGETTING_KEY = "andvari.forgetting";
+
+export interface ForgettingMark {
+  readonly email: string;
+  readonly userId: string;
+}
+
+/** The forgettings begun and not finished. A mark that cannot be read is none: nothing is removed on its word. */
+export function forgettingMarks(): ForgettingMark[] {
+  try {
+    const raw: unknown = JSON.parse(get(FORGETTING_KEY) ?? "[]");
+    if (!Array.isArray(raw)) return [];
+    return raw.filter((m): m is ForgettingMark => !!m && typeof m === "object" && typeof (m as ForgettingMark).email === "string" && UUID_RE.test(String((m as ForgettingMark).userId)));
+  } catch {
+    return [];
+  }
+}
+
+/** Writes the mark for [email]'s earlier account [userId]. Throws where it cannot be written: then nothing may be removed. */
+export function markForgetting(email: string, userId: string): void {
+  const marks = forgettingMarks().filter((m) => !(m.email === email && m.userId === userId));
+  localStorage.setItem(FORGETTING_KEY, JSON.stringify([...marks, { email, userId }]));
+}
+
+/** Takes the mark away, once the removal it stands for is complete. */
+export function unmarkForgetting(email: string, userId: string): void {
+  const marks = forgettingMarks().filter((m) => !(m.email === email && m.userId === userId));
+  if (marks.length === 0) localStorage.removeItem(FORGETTING_KEY);
+  else localStorage.setItem(FORGETTING_KEY, JSON.stringify(marks));
+}
+
+/** The key of [userId]'s id-keyed pin, the record of that account's identity key. */
+export function selfIdentityPinKey(userId: string): string {
+  return PREFIX + userId;
+}
+
+/**
+ * The forgetting's first removal: the record that ties [email] to the earlier account [userId] (only where it still names
+ * that account). A store that fails throws: the caller's mark stands. That account's id-keyed pin, the record of its
+ * identity key, is KEPT: with it the earlier account can never come back on this browser under another key, also after a
+ * forgetting (a server that showed another account under the address to obtain the forgetting, and then serves the old
+ * account with a key of its own, is refused); served again with its own key, it is taken as itself. It is public (the
+ * server holds the same key) and names nothing else; it goes with the site's data, and with a deletion of that account
+ * run here and confirmed by the server ({@link forgetSelfIdentity}).
+ */
+export function forgetEarlierRecords(userId: string, email: string): void {
+  const k = bindingKey(email);
+  if (k !== null && decodeBinding(localStorage.getItem(k))?.userId === userId) {
+    localStorage.removeItem(k);
+    dropNotices(k.slice(BY_EMAIL.length));
+  }
 }
 
 function remove(k: string): void {
@@ -114,12 +270,16 @@ function remove(k: string): void {
 export function forgetSelfIdentity(userId: string, email?: string): void {
   remove(PREFIX + userId);
   if (!email || !email.trim()) return;
-  const k = BY_EMAIL + normalizeEmail(email);
-  if (decodeBinding(get(k))?.userId === userId) remove(k);
+  const k = bindingKey(email);
+  if (k !== null && decodeBinding(get(k))?.userId === userId) {
+    remove(k);
+    dropNotices(k.slice(BY_EMAIL.length));
+  }
 }
 
 /** Record the pin (and, with `email`, the email binding) once, from an unlock that passed; never overwritten. */
 export function recordSelfIdentityPub(userId: string, account: Account, email?: string): void {
   putOnce(PREFIX + userId, toB64(account.identityPub));
-  if (email && email.trim() && UUID_RE.test(userId)) putOnce(BY_EMAIL + normalizeEmail(email), `${userId}\n${toB64(account.identityPub)}`);
+  const k = email ? bindingKey(email) : null;
+  if (k !== null && UUID_RE.test(userId) && putOnce(k, `${userId}\n${toB64(account.identityPub)}`)) boundAfresh(k);
 }

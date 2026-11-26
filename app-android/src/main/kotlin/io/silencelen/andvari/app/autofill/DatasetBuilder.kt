@@ -62,15 +62,23 @@ object DatasetBuilder {
         items: List<VaultItem>,
         inlineRequest: InlineSuggestionsRequest?,
         trace: AutofillDebugLog.FillTrace? = null,
+        release: (String) -> VaultItem?,
     ): FillResponse? {
         trace?.pkg = form.appPackage.ifEmpty { null }
         trace?.setForm(form)
         trace?.setTrust(context, form)
         trace?.inline = inlineRequest != null
         if (!form.fillable) return null // no login fields and no PAN-anchored card form
-        return buildUnlockedResponse(context, items, form, TrustedBrowsers.isTrusted(context, form.appPackage), inlineRequest, trace)
+        // An authentication result: it travels through the requesting app.
+        return buildUnlockedResponse(context, items, form, TrustedBrowsers.isTrusted(context, form.appPackage), inlineRequest, trace, throughApp = true, release = release)
     }
 
+    /**
+     * [throughApp]: the response is an authentication RESULT, which travels through the requesting app's process
+     * ([FillPlan.resultRows]); false only for the service's direct response, which stays with the system ([FillPlan.rows]).
+     * [items] are offers ([ContentFill.offersFor]); [release] asks the shared code for one item's values, and is called
+     * only for a row that carries them (item 6: offers are not releases).
+     */
     fun buildUnlockedResponse(
         context: Context,
         items: List<VaultItem>,
@@ -78,22 +86,25 @@ object DatasetBuilder {
         trusted: Boolean,
         inlineRequest: InlineSuggestionsRequest?,
         trace: AutofillDebugLog.FillTrace? = null,
+        throughApp: Boolean,
+        release: (String) -> VaultItem?,
     ): FillResponse? {
-        val datasets = buildDatasets(context, items, form, trusted, inlineRequest)
+        val datasets = buildDatasets(context, items, form, trusted, inlineRequest, throughApp, release)
         trace?.let { annotate(it, items, form, trusted, datasets.size) }
         // Only offer "Save to andvari?" where the saved login could actually FILL later: a native app
         // (matches by package) or a TRUSTED browser. In an UNTRUSTED known browser the fill path nulls
         // the web host, so a saved `https://host` login would never match there — a dead item. Skipping
         // save keeps save/fill symmetric: the user trusts the browser once, then both work.
-        val offerSave = form.appPackage !in BrowserCertPins.TABLE || trusted
+        val offerSave = offersSave(form.appPackage, trusted, AutofillSave.takesSaves(context), isWebPage(form))
+        val fillCapable = form.appPackage !in BrowserCertPins.TABLE || trusted
         if (datasets.isEmpty()) {
             // Honest failure (never absolute silence): the form HAS fillable fields —
             // classified USERNAME/PASSWORD or CC_* fields only, the gate that keeps this
             // row off every plain text box — so offer a single "Open andvari" row instead
             // of vanishing. Bitwarden/1Password convention; tapping launches the app.
-            // A known-untrusted browser (== !offerSave) gets the "Trust {browser}" onboarding row
+            // A known-untrusted browser (== !fillCapable) gets the "Trust {browser}" onboarding row
             // instead of the generic "Open andvari" — surfaces the one-tap fix where the wall is.
-            val fallback = (if (!offerSave) trustBrowserDataset(context, form, inlineRequest) else openAppDataset(context, form, inlineRequest)) ?: return null
+            val fallback = (if (!fillCapable) trustBrowserDataset(context, form, inlineRequest) else openAppDataset(context, form, inlineRequest)) ?: return null
             val rb = FillResponse.Builder().addDataset(fallback)
             if (offerSave) saveInfoFor(form)?.let { rb.setSaveInfo(it) } // offer save even when nothing matched
             val response = runCatching { rb.build() }.getOrNull()
@@ -107,6 +118,26 @@ object DatasetBuilder {
         if (offerSave) saveInfoFor(form)?.let { b.setSaveInfo(it) }
         return b.build()
     }
+
+    /**
+     * A `SaveInfo` only while saving runs on the new code. It does now:
+     * a save is sealed and queued for the content ([AutofillSave]), never handed to the old confirm.
+     */
+    internal const val SAVING_RUNS_ON_NEW_CODE = true
+
+    /**
+     * Whether a response for [appPackage] offers "Save to andvari?": only while [SAVING_RUNS_ON_NEW_CODE], only while
+     * the session takes saves ([sessionTakes]: not under a copy the server signed out, nor a stopped server; see
+     * [AutofillSave.sessionTakesSaves]), and only where the saved login could fill later (a native app, or a trusted
+     * browser). Never for a web page shown inside an app that is not a verified browser
+     * ([webPage]: a field of the form carries a web domain); [AutofillSave.captureSite] refuses such a capture too.
+     */
+    internal fun offersSave(appPackage: String, trusted: Boolean, sessionTakes: Boolean, webPage: Boolean = false): Boolean =
+        SAVING_RUNS_ON_NEW_CODE && sessionTakes && (appPackage !in BrowserCertPins.TABLE || trusted) && (trusted || !webPage)
+
+    /** A2: the form belongs to a web page (a login or card field carries a web domain, or is an HTML field: A3). */
+    internal fun <I> isWebPage(form: FormOf<I>): Boolean =
+        (form.fields + form.ccFields).any { it.webDomain != null || it.isHtml }
 
     /** The ids that trigger the save UI, and the ids that merely ride along with it. */
     data class SaveTrigger<T>(val required: List<T>, val optional: List<T>)
@@ -234,12 +265,23 @@ object DatasetBuilder {
         }
     }
 
+    /** Item 6: a login row is built only from released values, never from an offer's stand-in ([ContentFill.UNRELEASED]). */
+    internal fun <I> carriesOnlyReleasedValues(row: FillRow.Login<I>): Boolean = row.values.none { it.second == ContentFill.UNRELEASED }
+
+    /**
+     * Item 6: each row that carries values names its item as the dataset's id, so the platform's own record of what
+     * was picked ([android.service.autofill.FillEventHistory], read at the next request: [FillPicks]) says which.
+     */
+    private fun datasetId(row: FillRow<*>): String? = row.itemId.takeIf { it.isNotEmpty() }
+
     private fun buildDatasets(
         context: Context,
         items: List<VaultItem>,
         form: ParsedForm,
         trusted: Boolean,
         inlineRequest: InlineSuggestionsRequest?,
+        throughApp: Boolean,
+        release: (String) -> VaultItem?,
     ): List<Dataset> {
         val specs = inlineSpecs(inlineRequest)
         val maxInline = if (Build.VERSION.SDK_INT >= 30 && inlineRequest != null) inlineRequest.maxSuggestionCount else 0
@@ -247,21 +289,26 @@ object DatasetBuilder {
         // they fill silently is decided once, here, from PackageManager (never the host's structure).
         val appGate = appGateFor(context, form)
         // Android review 1, ruling 1: WHAT each row holds is FillPlan's (pure, JVM-tested); this only
-        // turns each row into a Dataset. The same rows serve the direct response and the unlock's result.
-        val rows = FillPlan.rows(items, form, FillPlan.asker(form.appPackage, trusted, appGate?.verdict))
+        // turns each row into a Dataset. A result that travels through the app gets
+        // FillPlan.resultRows (generic rows for an app that is not a verified browser); the direct response FillPlan.rows.
+        val asker = FillPlan.asker(form.appPackage, trusted, appGate?.verdict)
+        val rows = if (throughApp) FillPlan.resultRows(items, form, asker, release = release) else FillPlan.rows(items, form, asker, release = release)
         val out = ArrayList<Dataset>()
         for (row in rows) {
             val spec = specForIndex(specs, out.size, maxInline)
             // Per-row rail: one row that fails to build is a skip, never a lost fill.
             val dataset = runCatching {
                 when (row) {
-                    is FillRow.Login -> buildDataset(context, row, spec)
+                    // Item 6: an offer's stand-in is never a value; a row that still holds one is not built.
+                    is FillRow.Login -> if (carriesOnlyReleasedValues(row)) buildDataset(context, row, spec) else null
                     // Not a system app, not Play-installed, not a confirmed (package, signer), or a lookup
                     // failed: the row carries no credential; the tap opens the one-tap confirm.
                     is FillRow.LoginConfirm -> appGate?.let { confirmDataset(context, row, form, it, spec) }
                     is FillRow.Card -> buildCardDataset(context, row, spec)
                     // Any app that is not a verified browser: no card value leaves until the card confirm.
                     is FillRow.CardConfirm -> appGate?.let { cardConfirmDataset(context, row, form, it, spec) }
+                    // A result through an app: one row that names nothing, opening andvari's own chooser.
+                    is FillRow.Choose -> appGate?.let { chooseDataset(context, row, form, it, spec) }
                 }
             }.getOrNull()
             if (dataset != null) out.add(dataset)
@@ -269,10 +316,17 @@ object DatasetBuilder {
         return out
     }
 
+    /**
+     * Card datasets (0.7.0): one per `type=="card"` item whose [CardFill.plan] fills anything on
+     * this form. Cards are deliberately NOT UriMatch-bound (wallet posture — any checkout in a
+     * trusted surface may summon the card list), which is exactly why the browser-trust gate must
+     * be EXPLICIT here: the login path's UriMatch would have nulled an untrusted browser's web
+     * host, but cards never consult it. A KNOWN browser that is not trusted gets ZERO card
+     * datasets; native apps (not in the pin table) and trusted browsers pass. The hostile-iframe
+     * zero-fill + LIST/TEXT type-pinning live in core (CardFill.plan, vector-tested).
+     */
     // The card rows themselves (which cards, which fields, which frame, and whether values ride them) are
-    // FillPlan.cardRows'; CardFill.plan is called there for the focused frame only. Cards are deliberately NOT
-    // UriMatch-bound (wallet posture), so the browser-trust gate is explicit there: a KNOWN browser that is not
-    // trusted gets ZERO card rows. The hostile-iframe zero-fill + LIST/TEXT type-pinning live in core.
+    // FillPlan.cardRows'; CardFill.plan is called there for the focused frame only.
 
     /**
      * [U20] the pure headroom rule (unit-tested — framework Datasets can't be constructed in a
@@ -306,10 +360,12 @@ object DatasetBuilder {
             val presBuilder = Presentations.Builder().setMenuPresentation(menu)
             if (inline != null) presBuilder.setInlinePresentation(inline)
             val b = Dataset.Builder(presBuilder.build())
+            datasetId(row)?.let { b.setId(it) }
             for ((id, av) in values) b.setValue(id, av)
             runCatching { b.build() }.getOrNull()
         } else {
             val b = Dataset.Builder(menu) // dataset-wide menu presentation (API 26+)
+            datasetId(row)?.let { b.setId(it) }
             val useInline = Build.VERSION.SDK_INT >= 30 && inline != null
             for ((id, av) in values) {
                 if (useInline) b.setValue(id, av, menu, inline!!) else b.setValue(id, av)
@@ -344,9 +400,9 @@ object DatasetBuilder {
         val menu = presentationRow(context, row.title, row.subtitle)
         val inline = if (inlineSpec != null) buildInline(context, row.title, row.subtitle, inlineSpec) else null
         return if (Build.VERSION.SDK_INT >= 33) {
-            buildDataset33(row.values, menu, inline)
+            buildDataset33(row.values, menu, inline, datasetId(row))
         } else {
-            buildDatasetLegacy(row.values, menu, inline)
+            buildDatasetLegacy(row.values, menu, inline, datasetId(row))
         }
     }
 
@@ -356,6 +412,7 @@ object DatasetBuilder {
         values: List<Pair<AutofillId, String>>,
         menu: RemoteViews,
         inline: InlinePresentation?,
+        datasetId: String?,
     ): Dataset? {
         if (values.isEmpty()) return null
         val presBuilder = Presentations.Builder().setMenuPresentation(menu)
@@ -363,6 +420,7 @@ object DatasetBuilder {
         // Dataset-wide presentations (menu + inline) via the constructor; there is no
         // setValue(id, value, Presentations) overload — values use the 2-arg setValue.
         val b = Dataset.Builder(presBuilder.build())
+        datasetId?.let { b.setId(it) }
         for ((id, value) in values) b.setValue(id, AutofillValue.forText(value))
         return runCatching { b.build() }.getOrNull()
     }
@@ -372,8 +430,10 @@ object DatasetBuilder {
         values: List<Pair<AutofillId, String>>,
         menu: RemoteViews,
         inlinePresentation: InlinePresentation?,
+        datasetId: String?,
     ): Dataset? {
         val b = Dataset.Builder(menu) // dataset-wide menu presentation (API 26+)
+        datasetId?.let { b.setId(it) }
         if (values.isEmpty()) return null
         val useInline = Build.VERSION.SDK_INT >= 30 && inlinePresentation != null
         for ((id, value) in values) {
@@ -415,7 +475,8 @@ object DatasetBuilder {
         inlineSpec: InlinePresentationSpec?,
     ): Dataset? = valuelessAuthDataset(
         context, row.title, row.subtitle, row.fieldIds, inlineSpec,
-        AppFillBinding.bake(FillBinding.bake(Intent(context, AppFillConfirmActivity::class.java), form), appGate, row.itemId),
+        // A row for a web page inside the app bakes that page, which the confirm names.
+        AppFillBinding.bake(FillBinding.bake(Intent(context, AppFillConfirmActivity::class.java), form), appGate, row.itemId, row.pageDomain),
     )
 
     /**
@@ -432,6 +493,22 @@ object DatasetBuilder {
     ): Dataset? = valuelessAuthDataset(
         context, row.title, row.subtitle, row.fieldIds, inlineSpec,
         AppFillBinding.bake(FillBinding.bake(Intent(context, CardFillConfirmActivity::class.java), form), appGate, row.itemId),
+    )
+
+    /**
+     * The one generic row of a result that travels through an app that is not a
+     * verified browser. No value, no name; the tap opens [FillChooserActivity], whose base intent carries the parsed
+     * form, the service's identity verdict for the app and the kind of item to choose (nothing the host delivers is read).
+     */
+    private fun chooseDataset(
+        context: Context,
+        row: FillRow.Choose<AutofillId>,
+        form: ParsedForm,
+        appGate: AppFillBinding.AppGate,
+        inlineSpec: InlinePresentationSpec?,
+    ): Dataset? = valuelessAuthDataset(
+        context, row.title, row.subtitle, row.fieldIds, inlineSpec,
+        FillChooserActivity.bake(AppFillBinding.bakeGate(FillBinding.bake(Intent(context, FillChooserActivity::class.java), form), appGate), row.kind),
     )
 
     /**
@@ -480,8 +557,8 @@ object DatasetBuilder {
      * host). Null when the item no longer matches this form or carries nothing to fill.
      */
     @Suppress("DEPRECATION") // 2-arg setValue (Dataset.Field is API 33+)
-    fun appLoginResultDataset(item: VaultItem, form: ParsedForm): Dataset? {
-        val values = FillPlan.appLoginResult(item, form) ?: return null
+    fun appLoginResultDataset(item: VaultItem, form: ParsedForm, pageDomain: String?): Dataset? {
+        val values = FillPlan.appLoginResult(item, form, pageDomain) ?: return null
         val b = Dataset.Builder()
         for ((id, value) in values) b.setValue(id, AutofillValue.forText(value))
         return runCatching { b.build() }.getOrNull()
@@ -564,8 +641,16 @@ object DatasetBuilder {
     @Suppress("DEPRECATION")
     private fun trustBrowserDataset(context: Context, form: ParsedForm, inlineRequest: InlineSuggestionsRequest?): Dataset? =
         runCatching {
-            val title = "Trust ${browserLabel(form.appPackage)} to fill here"
-            val subtitle = "Tap to let andvari fill & save in this browser"
+            // A pinned id that does not carry its pin is a warning (its card has no Trust button), and an
+            // approval made for another signer says so before it asks again.
+            val label = browserLabel(form.appPackage)
+            val observed = TrustedBrowsers.observedCertDigest(context, form.appPackage)
+            val offer = observed?.let { ApprovedBrowsers.offer(form.appPackage, it, ApprovedBrowsers.approvedDigest(context, form.appPackage)) }
+            val (title, subtitle) = when (offer) {
+                ApprovedBrowsers.Offer.PINNED_MISMATCH -> "This is not $label" to "andvari will not fill here — tap for details"
+                ApprovedBrowsers.Offer.SIGNER_CHANGED -> "$label's signer changed" to "Tap to check before andvari fills here"
+                else -> "Trust $label to fill here" to "Tap to let andvari fill in this browser"
+            }
             val menu = presentationRow(context, title, subtitle)
             val spec = inlineSpecs(inlineRequest).firstOrNull()
             val inline = if (Build.VERSION.SDK_INT >= 30 && spec != null) buildInline(context, title, subtitle, spec) else null
@@ -580,9 +665,12 @@ object DatasetBuilder {
             }
             // Root cause G: the refill after trusting uses the form baked HERE, never the structure the
             // host app delivers with the launch (FillBinding).
+            // Result-returning like the unlock and confirm rows, so NO NEW_TASK:
+            // an activity started into a new task has its result cancelled at once, so the refill never reached the
+            // browser's fill session and the person was left inside andvari. Started in the browser's own task, the
+            // translucent card returns the refreshed rows and finishing it leaves the person in the browser.
             val launch = FillBinding.bake(Intent(context, TrustBrowserActivity::class.java), form)
                 .putExtra(TrustBrowserActivity.EXTRA_PKG, form.appPackage)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) // fires from the browser's task; route to andvari's
             val pi = PendingIntent.getActivity(context, form.appPackage.hashCode(), launch, flags)
             val b = if (Build.VERSION.SDK_INT >= 33) {
                 val pres = Presentations.Builder().setMenuPresentation(menu)

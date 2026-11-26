@@ -1,0 +1,1602 @@
+{
+  "_about": [
+    "Operator recovery of design 2026-11-15-onboarding-trust \u00a74.5 and \u00a79.3, with the verdict strings and order of \u00a72.4. It applies to private instances; under variant R the public instance has none of it.",
+    "Hand-authored from the independent oracle in tools/vector-gen/oracle (Node WebCrypto and @noble; no andvari code). Regenerate with `npm run generate` there; `npm run check` fails on any difference. Seals use fixed ephemeral keys.",
+    "keys: three instance recovery keys. One seed gives the X25519 recovery key (crypto_box_seed_keypair) and the Ed25519 recovery-key signing key (crypto_sign_seed_keypair); fingerprint = hexLower(SHA-256(the X25519 public key)), the value a card carries as recoveryFp.",
+    "rotation: a 0x08 statement checked by a verifier whose current fingerprint is `currentFp` (its consent, the card's, or the fingerprint of the account's current escrow), on instance `instanceId`. Order: the parse verdicts; fp_mismatch (fromFp is not currentFp); signer_not_pinned_key (the signer does not map to the recovery key currentFp names, given as recoveryPubB64; equivalently SHA-256 of the signer's X25519 image is not currentFp); bad_signature; instance_mismatch. On ok the verifier's fingerprint becomes expect.toFp.",
+    "escrowRotations: the `rotations` array of PUT /escrow/self (FI-R1), by the names in `rotationFrames`: the chain from the fingerprint of the account's current escrow to `fingerprint`, oldest first. The server stores the new escrow only when every link verifies in order (each against the fingerprint the chain has reached) and the last toFp equals `fingerprint`; otherwise 409 escrow_not_due. expect.failedAt and expect.linkVerdict name the link that fails, where one does.",
+    "firstConsent (FS-R2, FC-2): when a person turns operator recovery on, the client walks the served card chain (`cardChains[cards]`) FROM CARD 0, whatever its pin root, with the served rotations. Every change of recoveryFp between two cards must be matched by a valid rotation from the old value to the new one, or by a chain of valid rotations that leads from the old value to the new one, whatever order they are served in (a card may jump from A to C while the rotations go A to B and B to C). expect.uncovered lists the changes that are not; expect.warning says whether the unsigned-change warning shows (with \"Only me\" preselected). `pin` is this device's pin and is there to show that it does not matter. A change to or from none can have no rotation.",
+    "requestCode: hexLower(SHA-256(\"andvari/v2|recovery-request|code|\" + b64url(rPub)))[0..24], shown as six groups of four.",
+    "assisted: the requesting device opens a fulfilled request. Inputs: `sealedB64` (crypto_box_seal to the request key; the request key pair is `requestKey`), the recovery public key that the pinned card's recoveryFp names, the request {instanceId, userId, requestId, requestKey}, and the served encryptedIdentitySeed (Envelope(UVK, seed, \"andvari/v1|idkey|{userId}\")) and identityPub. Order: unopenable; the parse verdicts; signer_not_pinned_key; bad_signature; request_mismatch; identity_mismatch (the seed does not open under the delivered UVK, or its X25519 key is not the served identityPub). A device that holds no userId, a fresh install, has request.userId null and skips the userId comparison: the seed's AD binds the payload's userId instead. On ok, expect.uvkB64.",
+    "veto: the 0x0A statement as the server verifies it, against the account's stored identity key, the session's userId and the request id of the path. Order: the parse verdicts; signer_not_pinned_key; bad_signature; user_mismatch; request_mismatch. On the wire (spec 03 \u00a718.3) signer_not_pinned_key, user_mismatch and request_mismatch all answer 400 bad_signer, and bad_signature is its own 400 bad_signature; the parse answers 400 bad_frame, 400 non_canonical or 400 bad_statement.",
+    "Not graded: PUT /escrow/self with an empty rotations array.",
+    "The extension handles none of this: it never seals an escrow and cannot verify a 0x08 statement (\u00a712.2)."
+  ],
+  "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+  "keys": {
+    "recoveryA": {
+      "seedB64": "VlNStoQosODdiGMVOXllMsvHLDOGo4Gxqr3qDljpztE",
+      "publicKeyB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "signPubB64": "YREHx41HjvS7tDY-xISES5evi14OvEmbmxepG_-hCro",
+      "fingerprint": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987"
+    },
+    "recoveryB": {
+      "seedB64": "j3MTn6JwxhxaVP68inPjzOIJu4_BGEbwalh0lrVwutI",
+      "publicKeyB64": "cgJW-OUfTMgUpnV4SN-AVkPh2RxcLjnxOn8WbOi4Yzk",
+      "signPubB64": "1cAVUl7LqXFY3MiR1s4V24RPHADswc9X8wMvftSk3ec",
+      "fingerprint": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed"
+    },
+    "recoveryC": {
+      "seedB64": "ZTDzj4dNLMIXxP23Wsa11N0aBwGQC80zF4AtnC1NOe0",
+      "publicKeyB64": "ZZmtflyPHbtYaD5jb8yXwuABjqb6w9DFKyC80u5a_Hk",
+      "signPubB64": "FvWKwGDPDMC-DpH8XHiT4KqRbl2nd8_atrRHyjb9oSs",
+      "fingerprint": "4d0c678d756472a81b3a23a62b216af8c178013dbcea88357aef3755e826bcb3"
+    },
+    "operator": {
+      "userId": "99999999-9999-4999-8999-999999999999",
+      "seedB64": "vuBjPWkq66XorPwQ29EhCLqdhrrWV7r1SjUZm8gwgpY",
+      "identityPubB64": "9bCo4oYJda6IeG04WiJHGhYmWlcEvU-WeCMEpXVpaxo",
+      "signPubB64": "veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc"
+    },
+    "alice": {
+      "userId": "11111111-1111-4111-8111-111111111111",
+      "seedB64": "DRQbIikwNz5FTFNaYWhvdn2Ei5KZoKeutbzDytHY3-Y",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "signPubB64": "nHq6JH1Lmot5tW6rGCV05fjNlUAomh-JWgaeAFtYs8o"
+    },
+    "bob": {
+      "userId": "22222222-2222-4222-8222-222222222222",
+      "seedB64": "oKOmqayvsrW4u77BxMfKzdDT1tnc3-Ll6Ovu8fT3-v0",
+      "identityPubB64": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM",
+      "signPubB64": "s6JVnClZbikPKKTc0Db3imvaLINlV0pXZiJiA_TrMQI"
+    }
+  },
+  "requestKey": {
+    "rSecB64": "rDBq5AmLBBJdxjxrXsz9kfkDkbWG-6bZn-RLdXCUpyg",
+    "rPubB64": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+  },
+  "rotation": [
+    {
+      "name": "signed-by-the-outgoing-seed",
+      "why": "A rotation from key A to key B, signed offline by the OUTGOING seed A. A verifier whose consent is A moves it to B.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-rotation\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"fromFp\":\"a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987\",\"toFp\":\"db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed\",\"issuedAt\":1763200800000}",
+      "frameB64": "YXZzAghhEQfHjUeO9Lu0Nj7EhIRLl6-LXg68SZubF6kb_6EKuu2eeuOKiWUoZId2lyNp16P8exJUgHdkf_JYuOX13M4C0qFz8zMiwkvNhXz3rmXfk0oNPx1ASAkURQY3BoHEZQp7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJmcm9tRnAiOiJhNzc3OWU0M2U4YjdkOTFlMGI0YWE2OTI2ZDA4NjU5NGQ5NTc4ZTUxNjY2ZWNlYmNlNThhNzVmZjA2NDBlOTg3IiwidG9GcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzIwMDgwMDAwMH0",
+      "currentFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "verdict": "ok",
+        "toFp": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed"
+      }
+    },
+    {
+      "name": "second-rotation",
+      "why": "The next rotation, B to C, for a verifier whose fingerprint is now B.",
+      "signer": "recoveryB",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-rotation\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"fromFp\":\"db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed\",\"toFp\":\"4d0c678d756472a81b3a23a62b216af8c178013dbcea88357aef3755e826bcb3\",\"issuedAt\":1763236800000}",
+      "frameB64": "YXZzAgjVwBVSXsupcVjcyJHWzhXbhE8cAOzBz1fzAy9-1KTd5w8g5JgnxoBP6A7zxZ4QhkehbciDBTTW9fMJcBZ2eJdUF7_o-K30a9tzAIZaKOqSJEAVErg6LObxAt652iMpTwB7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJmcm9tRnAiOiJkYjg3NDk0NGRhMDZlYWM1ZGQxOWQzNTIzNzIyZDQ3Mjk5NzE3ZGUzNTljNzJhNTAzNjQ1OThmYjNhYTY5OGVkIiwidG9GcCI6IjRkMGM2NzhkNzU2NDcyYTgxYjNhMjNhNjJiMjE2YWY4YzE3ODAxM2RiY2VhODgzNTdhZWYzNzU1ZTgyNmJjYjMiLCJpc3N1ZWRBdCI6MTc2MzIzNjgwMDAwMH0",
+      "currentFp": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed",
+      "recoveryPubB64": "cgJW-OUfTMgUpnV4SN-AVkPh2RxcLjnxOn8WbOi4Yzk",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "verdict": "ok",
+        "toFp": "4d0c678d756472a81b3a23a62b216af8c178013dbcea88357aef3755e826bcb3"
+      }
+    },
+    {
+      "name": "signed-by-the-incoming-seed",
+      "why": "Signed by the wrong seed: the new key B signs its own promotion. The signer must map to the key that fromFp names.",
+      "signer": "recoveryB",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-rotation\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"fromFp\":\"a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987\",\"toFp\":\"db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed\",\"issuedAt\":1763200800000}",
+      "frameB64": "YXZzAgjVwBVSXsupcVjcyJHWzhXbhE8cAOzBz1fzAy9-1KTd5-fVPPW4BZHMGt-XcHACKjlSVdimDttfBzTwuLVL3cDAS2Df5SkoG4bWAaUczOKjxJJImAvw6q_V7GzTwKtHvgF7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJmcm9tRnAiOiJhNzc3OWU0M2U4YjdkOTFlMGI0YWE2OTI2ZDA4NjU5NGQ5NTc4ZTUxNjY2ZWNlYmNlNThhNzVmZjA2NDBlOTg3IiwidG9GcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzIwMDgwMDAwMH0",
+      "currentFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "verdict": "signer_not_pinned_key"
+      }
+    },
+    {
+      "name": "signed-by-an-unrelated-seed",
+      "why": "Signed by a third recovery seed.",
+      "signer": "recoveryC",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-rotation\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"fromFp\":\"a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987\",\"toFp\":\"db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed\",\"issuedAt\":1763200800000}",
+      "frameB64": "YXZzAggW9YrAYM8MwL4OkfxceJPgqpFuXad3z9q2tEfKNv2hK7mlH9n6VKKJSoiqY4I8Qkewd4nKgt9boYXa0xs79-CVclQwInzVbDMdiJc806GFeiZQOqF8fT0RZKjA8q9_MgR7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJmcm9tRnAiOiJhNzc3OWU0M2U4YjdkOTFlMGI0YWE2OTI2ZDA4NjU5NGQ5NTc4ZTUxNjY2ZWNlYmNlNThhNzVmZjA2NDBlOTg3IiwidG9GcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzIwMDgwMDAwMH0",
+      "currentFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "verdict": "signer_not_pinned_key"
+      }
+    },
+    {
+      "name": "signed-by-the-operator-account",
+      "why": "Signed by the operator account's identity key: whoever holds the operator key and the server still cannot rotate the recovery key.",
+      "signer": "operator",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-rotation\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"fromFp\":\"a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987\",\"toFp\":\"db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed\",\"issuedAt\":1763200800000}",
+      "frameB64": "YXZzAgi94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x30bmMn3IPdRUCiYINunjK9vga4t-LBrasJncmkrlm2xc0kWT4LcX2UgX7GbTmsLwge13P5fFjnI-_XsSGIbfgN7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJmcm9tRnAiOiJhNzc3OWU0M2U4YjdkOTFlMGI0YWE2OTI2ZDA4NjU5NGQ5NTc4ZTUxNjY2ZWNlYmNlNThhNzVmZjA2NDBlOTg3IiwidG9GcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzIwMDgwMDAwMH0",
+      "currentFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "verdict": "signer_not_pinned_key"
+      }
+    },
+    {
+      "name": "from-fp-is-not-the-consented-one",
+      "why": "A valid rotation from B to C shown to a verifier whose consent is still A: it does not start from that fingerprint.",
+      "signer": "recoveryB",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-rotation\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"fromFp\":\"db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed\",\"toFp\":\"4d0c678d756472a81b3a23a62b216af8c178013dbcea88357aef3755e826bcb3\",\"issuedAt\":1763236800000}",
+      "frameB64": "YXZzAgjVwBVSXsupcVjcyJHWzhXbhE8cAOzBz1fzAy9-1KTd5w8g5JgnxoBP6A7zxZ4QhkehbciDBTTW9fMJcBZ2eJdUF7_o-K30a9tzAIZaKOqSJEAVErg6LObxAt652iMpTwB7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJmcm9tRnAiOiJkYjg3NDk0NGRhMDZlYWM1ZGQxOWQzNTIzNzIyZDQ3Mjk5NzE3ZGUzNTljNzJhNTAzNjQ1OThmYjNhYTY5OGVkIiwidG9GcCI6IjRkMGM2NzhkNzU2NDcyYTgxYjNhMjNhNjJiMjE2YWY4YzE3ODAxM2RiY2VhODgzNTdhZWYzNzU1ZTgyNmJjYjMiLCJpc3N1ZWRBdCI6MTc2MzIzNjgwMDAwMH0",
+      "currentFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "verdict": "fp_mismatch"
+      }
+    },
+    {
+      "name": "from-fp-is-the-new-key",
+      "why": "A rotation back from B to A, signed by B, for a verifier at A.",
+      "signer": "recoveryB",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-rotation\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"fromFp\":\"db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed\",\"toFp\":\"a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987\",\"issuedAt\":1763200800000}",
+      "frameB64": "YXZzAgjVwBVSXsupcVjcyJHWzhXbhE8cAOzBz1fzAy9-1KTd5yB-oITq5bvA6qzXl2qNPP-1eVCfJqhOJV3CuL3bpzmKZ_FK37Uoz1gvlQH1MKC-oLjt--S1vMzg01CZ0fOWfgR7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJmcm9tRnAiOiJkYjg3NDk0NGRhMDZlYWM1ZGQxOWQzNTIzNzIyZDQ3Mjk5NzE3ZGUzNTljNzJhNTAzNjQ1OThmYjNhYTY5OGVkIiwidG9GcCI6ImE3Nzc5ZTQzZThiN2Q5MWUwYjRhYTY5MjZkMDg2NTk0ZDk1NzhlNTE2NjZlY2ViY2U1OGE3NWZmMDY0MGU5ODciLCJpc3N1ZWRBdCI6MTc2MzIwMDgwMDAwMH0",
+      "currentFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "verdict": "fp_mismatch"
+      }
+    },
+    {
+      "name": "signature-flipped",
+      "why": "The rotation with one signature bit flipped.",
+      "signer": "recoveryA, then one signature bit flipped",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-rotation\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"fromFp\":\"a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987\",\"toFp\":\"db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed\",\"issuedAt\":1763200800000}",
+      "frameB64": "YXZzAghhEQfHjUeO9Lu0Nj7EhIRLl6-LXg68SZubF6kb_6EKuu2eeuOKiWUoZId3lyNp16P8exJUgHdkf_JYuOX13M4C0qFz8zMiwkvNhXz3rmXfk0oNPx1ASAkURQY3BoHEZQp7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJmcm9tRnAiOiJhNzc3OWU0M2U4YjdkOTFlMGI0YWE2OTI2ZDA4NjU5NGQ5NTc4ZTUxNjY2ZWNlYmNlNThhNzVmZjA2NDBlOTg3IiwidG9GcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzIwMDgwMDAwMH0",
+      "currentFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "verdict": "bad_signature"
+      }
+    },
+    {
+      "name": "to-fp-changed-after-signing",
+      "why": "toFp changed after signing (still canonical): the rotation would lead to another key.",
+      "signer": "recoveryA signed another statement",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-rotation\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"fromFp\":\"a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987\",\"toFp\":\"4d0c678d756472a81b3a23a62b216af8c178013dbcea88357aef3755e826bcb3\",\"issuedAt\":1763200800000}",
+      "frameB64": "YXZzAghhEQfHjUeO9Lu0Nj7EhIRLl6-LXg68SZubF6kb_6EKuu2eeuOKiWUoZId2lyNp16P8exJUgHdkf_JYuOX13M4C0qFz8zMiwkvNhXz3rmXfk0oNPx1ASAkURQY3BoHEZQp7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJmcm9tRnAiOiJhNzc3OWU0M2U4YjdkOTFlMGI0YWE2OTI2ZDA4NjU5NGQ5NTc4ZTUxNjY2ZWNlYmNlNThhNzVmZjA2NDBlOTg3IiwidG9GcCI6IjRkMGM2NzhkNzU2NDcyYTgxYjNhMjNhNjJiMjE2YWY4YzE3ODAxM2RiY2VhODgzNTdhZWYzNzU1ZTgyNmJjYjMiLCJpc3N1ZWRBdCI6MTc2MzIwMDgwMDAwMH0",
+      "currentFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "verdict": "bad_signature"
+      }
+    },
+    {
+      "name": "made-for-another-instance",
+      "why": "A rotation the outgoing seed really signed, for another instance (one seed serving two instances): refused last.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-rotation\",\"instanceId\":\"ffffffff-ffff-4fff-8fff-ffffffffffff\",\"fromFp\":\"a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987\",\"toFp\":\"db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed\",\"issuedAt\":1763200800000}",
+      "frameB64": "YXZzAghhEQfHjUeO9Lu0Nj7EhIRLl6-LXg68SZubF6kb_6EKup0hoIIdBG4TkizWgGAiSF9sYqUFlS2TVnC6iQ8Nvvjnr7WG8GSvIHJdxKLqM4btL_KaFa2huecMash9IrcnYgN7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJmZmZmZmZmZi1mZmZmLTRmZmYtOGZmZi1mZmZmZmZmZmZmZmYiLCJmcm9tRnAiOiJhNzc3OWU0M2U4YjdkOTFlMGI0YWE2OTI2ZDA4NjU5NGQ5NTc4ZTUxNjY2ZWNlYmNlNThhNzVmZjA2NDBlOTg3IiwidG9GcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzIwMDgwMDAwMH0",
+      "currentFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "verdict": "instance_mismatch"
+      }
+    },
+    {
+      "name": "assisted-recovery-frame",
+      "why": "A 0x09 frame where a rotation is expected.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763272800000}",
+      "frameB64": "YXZzAglhEQfHjUeO9Lu0Nj7EhIRLl6-LXg68SZubF6kb_6EKuuEdyxBIZbLMyn79Wo1Zn3VTj-NvHxeBz1fxSvEVWATPBFSwwm1z-EFCdZSxoClytFHinpTZbp_tyUIj2tIKrwZ7InYiOjIsInB1cnBvc2UiOiJhc3Npc3RlZC1yZWNvdmVyeSIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJyZXF1ZXN0SWQiOiJrZXZzeVptZ0NWUE84VFRsLTFvcUtRIiwicmVxdWVzdEtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJ1dmsiOiJ2VVIxczNPWlZGMldLdUZWSVhiaktzYWU5dkQtajJXeTBGVHQ4eUdURU5JIiwiaXNzdWVkQXQiOjE3NjMyNzI4MDAwMDB9",
+      "currentFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "verdict": "bad_frame"
+      }
+    },
+    {
+      "name": "not-canonical",
+      "why": "A signed rotation with a space after a colon.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-rotation\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"fromFp\": \"a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987\",\"toFp\":\"db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed\",\"issuedAt\":1763200800000}",
+      "frameB64": "YXZzAghhEQfHjUeO9Lu0Nj7EhIRLl6-LXg68SZubF6kb_6EKup-PRXw1wYkUPPxwEwgAb672CEdi8P3CXJO365iccN0o1K4lRdm1MYz8MTwpOq2t3dVcFuEWpzb7TXqZtxh4jAJ7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJmcm9tRnAiOiAiYTc3NzllNDNlOGI3ZDkxZTBiNGFhNjkyNmQwODY1OTRkOTU3OGU1MTY2NmVjZWJjZTU4YTc1ZmYwNjQwZTk4NyIsInRvRnAiOiJkYjg3NDk0NGRhMDZlYWM1ZGQxOWQzNTIzNzIyZDQ3Mjk5NzE3ZGUzNTljNzJhNTAzNjQ1OThmYjNhYTY5OGVkIiwiaXNzdWVkQXQiOjE3NjMyMDA4MDAwMDB9",
+      "currentFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "verdict": "non_canonical"
+      }
+    },
+    {
+      "name": "to-fp-none",
+      "why": "toFp \"none\": both fingerprints are hex64, so no rotation statement can turn operator recovery off or on.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-rotation\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"fromFp\":\"a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987\",\"toFp\":\"none\",\"issuedAt\":1763200800000}",
+      "frameB64": "YXZzAghhEQfHjUeO9Lu0Nj7EhIRLl6-LXg68SZubF6kb_6EKutCGRlWHkp8GXCo_7jx4flUawfruRy2gysfJXLswAHcqXKyycKETCm9ETzVWiR9LFO_8Tdwrd6UlO6FmAOeLWgB7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJmcm9tRnAiOiJhNzc3OWU0M2U4YjdkOTFlMGI0YWE2OTI2ZDA4NjU5NGQ5NTc4ZTUxNjY2ZWNlYmNlNThhNzVmZjA2NDBlOTg3IiwidG9GcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzIwMDgwMDAwMH0",
+      "currentFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "verdict": "non_canonical"
+      }
+    },
+    {
+      "name": "version-3",
+      "why": "A signed, canonical rotation with \"v\":3.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"recovery-rotation\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"fromFp\":\"a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987\",\"toFp\":\"db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed\",\"issuedAt\":1763200800000}",
+      "frameB64": "YXZzAghhEQfHjUeO9Lu0Nj7EhIRLl6-LXg68SZubF6kb_6EKujXmCRFcCd4o24D1zjUZsS0xhVBviV2fmmArG990u48kGf2VJVZbmPeRBF58AseRGnrNAvd5TmzvqUR5k3mBHw57InYiOjMsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJmcm9tRnAiOiJhNzc3OWU0M2U4YjdkOTFlMGI0YWE2OTI2ZDA4NjU5NGQ5NTc4ZTUxNjY2ZWNlYmNlNThhNzVmZjA2NDBlOTg3IiwidG9GcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzIwMDgwMDAwMH0",
+      "currentFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "verdict": "bad_statement"
+      }
+    },
+    {
+      "name": "order-parse-before-fp",
+      "why": "Not canonical, and from another fingerprint.",
+      "signer": "recoveryB",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-rotation\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"fromFp\": \"db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed\",\"toFp\":\"4d0c678d756472a81b3a23a62b216af8c178013dbcea88357aef3755e826bcb3\",\"issuedAt\":1763236800000}",
+      "frameB64": "YXZzAgjVwBVSXsupcVjcyJHWzhXbhE8cAOzBz1fzAy9-1KTd5xgANxaimRPsSTYvjHu8RlfOZM2b43S0fti3LKitY5WMWUyylIZWt7WBMseEaAUjXBNYgc18ogvKSoK-x9czMgR7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJmcm9tRnAiOiAiZGI4NzQ5NDRkYTA2ZWFjNWRkMTlkMzUyMzcyMmQ0NzI5OTcxN2RlMzU5YzcyYTUwMzY0NTk4ZmIzYWE2OThlZCIsInRvRnAiOiI0ZDBjNjc4ZDc1NjQ3MmE4MWIzYTIzYTYyYjIxNmFmOGMxNzgwMTNkYmNlYTg4MzU3YWVmMzc1NWU4MjZiY2IzIiwiaXNzdWVkQXQiOjE3NjMyMzY4MDAwMDB9",
+      "currentFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "verdict": "non_canonical"
+      }
+    },
+    {
+      "name": "order-fp-before-signer",
+      "why": "From another fingerprint (B), and signed by a seed that is not B either.",
+      "signer": "recoveryC",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-rotation\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"fromFp\":\"db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed\",\"toFp\":\"4d0c678d756472a81b3a23a62b216af8c178013dbcea88357aef3755e826bcb3\",\"issuedAt\":1763200800000}",
+      "frameB64": "YXZzAggW9YrAYM8MwL4OkfxceJPgqpFuXad3z9q2tEfKNv2hK30_Uf1y8H7cYpQdYTXQBHxoYAG2sNbNFu97_6ceGTrUWTtyMeYaJCTkBTMZjWjE_o8f1LYvXEUVuOfykKku8wd7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJmcm9tRnAiOiJkYjg3NDk0NGRhMDZlYWM1ZGQxOWQzNTIzNzIyZDQ3Mjk5NzE3ZGUzNTljNzJhNTAzNjQ1OThmYjNhYTY5OGVkIiwidG9GcCI6IjRkMGM2NzhkNzU2NDcyYTgxYjNhMjNhNjJiMjE2YWY4YzE3ODAxM2RiY2VhODgzNTdhZWYzNzU1ZTgyNmJjYjMiLCJpc3N1ZWRBdCI6MTc2MzIwMDgwMDAwMH0",
+      "currentFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "verdict": "fp_mismatch"
+      }
+    },
+    {
+      "name": "order-signer-before-signature",
+      "why": "Signed by the incoming seed, with the signature broken as well.",
+      "signer": "recoveryB, then one signature bit flipped",
+      "frameB64": "YXZzAgjVwBVSXsupcVjcyJHWzhXbhE8cAOzBz1fzAy9-1KTd5-fVPPW4BZHMGt-WcHACKjlSVdimDttfBzTwuLVL3cDAS2Df5SkoG4bWAaUczOKjxJJImAvw6q_V7GzTwKtHvgF7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJmcm9tRnAiOiJhNzc3OWU0M2U4YjdkOTFlMGI0YWE2OTI2ZDA4NjU5NGQ5NTc4ZTUxNjY2ZWNlYmNlNThhNzVmZjA2NDBlOTg3IiwidG9GcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzIwMDgwMDAwMH0",
+      "currentFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "verdict": "signer_not_pinned_key"
+      }
+    },
+    {
+      "name": "order-signature-before-instance",
+      "why": "For another instance, with a broken signature.",
+      "signer": "recoveryA, then one signature bit flipped",
+      "frameB64": "YXZzAghhEQfHjUeO9Lu0Nj7EhIRLl6-LXg68SZubF6kb_6EKup0hoIIdBG4TkizXgGAiSF9sYqUFlS2TVnC6iQ8Nvvjnr7WG8GSvIHJdxKLqM4btL_KaFa2huecMash9IrcnYgN7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJmZmZmZmZmZi1mZmZmLTRmZmYtOGZmZi1mZmZmZmZmZmZmZmYiLCJmcm9tRnAiOiJhNzc3OWU0M2U4YjdkOTFlMGI0YWE2OTI2ZDA4NjU5NGQ5NTc4ZTUxNjY2ZWNlYmNlNThhNzVmZjA2NDBlOTg3IiwidG9GcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzIwMDgwMDAwMH0",
+      "currentFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "verdict": "bad_signature"
+      }
+    }
+  ],
+  "rotationFrames": {
+    "A-to-B": "YXZzAghhEQfHjUeO9Lu0Nj7EhIRLl6-LXg68SZubF6kb_6EKuu2eeuOKiWUoZId2lyNp16P8exJUgHdkf_JYuOX13M4C0qFz8zMiwkvNhXz3rmXfk0oNPx1ASAkURQY3BoHEZQp7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJmcm9tRnAiOiJhNzc3OWU0M2U4YjdkOTFlMGI0YWE2OTI2ZDA4NjU5NGQ5NTc4ZTUxNjY2ZWNlYmNlNThhNzVmZjA2NDBlOTg3IiwidG9GcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzIwMDgwMDAwMH0",
+    "B-to-C": "YXZzAgjVwBVSXsupcVjcyJHWzhXbhE8cAOzBz1fzAy9-1KTd5w8g5JgnxoBP6A7zxZ4QhkehbciDBTTW9fMJcBZ2eJdUF7_o-K30a9tzAIZaKOqSJEAVErg6LObxAt652iMpTwB7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJmcm9tRnAiOiJkYjg3NDk0NGRhMDZlYWM1ZGQxOWQzNTIzNzIyZDQ3Mjk5NzE3ZGUzNTljNzJhNTAzNjQ1OThmYjNhYTY5OGVkIiwidG9GcCI6IjRkMGM2NzhkNzU2NDcyYTgxYjNhMjNhNjJiMjE2YWY4YzE3ODAxM2RiY2VhODgzNTdhZWYzNzU1ZTgyNmJjYjMiLCJpc3N1ZWRBdCI6MTc2MzIzNjgwMDAwMH0",
+    "A-to-B-signed-by-B": "YXZzAgjVwBVSXsupcVjcyJHWzhXbhE8cAOzBz1fzAy9-1KTd5-fVPPW4BZHMGt-XcHACKjlSVdimDttfBzTwuLVL3cDAS2Df5SkoG4bWAaUczOKjxJJImAvw6q_V7GzTwKtHvgF7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJmcm9tRnAiOiJhNzc3OWU0M2U4YjdkOTFlMGI0YWE2OTI2ZDA4NjU5NGQ5NTc4ZTUxNjY2ZWNlYmNlNThhNzVmZjA2NDBlOTg3IiwidG9GcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzIwMDgwMDAwMH0",
+    "B-to-C-signed-by-A": "YXZzAghhEQfHjUeO9Lu0Nj7EhIRLl6-LXg68SZubF6kb_6EKuknT4B_bYriR1cSX0bWgb81OXb8_VIQDUJIoTQ8cg8Ty5AGJwkzVK-DDbj-Q3f6-uSOLaxlGMiBCTm0pdQGWugp7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJmcm9tRnAiOiJkYjg3NDk0NGRhMDZlYWM1ZGQxOWQzNTIzNzIyZDQ3Mjk5NzE3ZGUzNTljNzJhNTAzNjQ1OThmYjNhYTY5OGVkIiwidG9GcCI6IjRkMGM2NzhkNzU2NDcyYTgxYjNhMjNhNjJiMjE2YWY4YzE3ODAxM2RiY2VhODgzNTdhZWYzNzU1ZTgyNmJjYjMiLCJpc3N1ZWRBdCI6MTc2MzIzNjgwMDAwMH0",
+    "A-to-B-for-another-instance": "YXZzAghhEQfHjUeO9Lu0Nj7EhIRLl6-LXg68SZubF6kb_6EKup0hoIIdBG4TkizWgGAiSF9sYqUFlS2TVnC6iQ8Nvvjnr7WG8GSvIHJdxKLqM4btL_KaFa2huecMash9IrcnYgN7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJmZmZmZmZmZi1mZmZmLTRmZmYtOGZmZi1mZmZmZmZmZmZmZmYiLCJmcm9tRnAiOiJhNzc3OWU0M2U4YjdkOTFlMGI0YWE2OTI2ZDA4NjU5NGQ5NTc4ZTUxNjY2ZWNlYmNlNThhNzVmZjA2NDBlOTg3IiwidG9GcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzIwMDgwMDAwMH0",
+    "A-to-C": "YXZzAghhEQfHjUeO9Lu0Nj7EhIRLl6-LXg68SZubF6kb_6EKun6UoT1pooeL4O1svKGY2GdqT2tt4Ke5t5atOJ7WDG8vFTztBiID67cbEOFXoYuG6fMnNX2S-LNWf8Z0lERmeQ57InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJmcm9tRnAiOiJhNzc3OWU0M2U4YjdkOTFlMGI0YWE2OTI2ZDA4NjU5NGQ5NTc4ZTUxNjY2ZWNlYmNlNThhNzVmZjA2NDBlOTg3IiwidG9GcCI6IjRkMGM2NzhkNzU2NDcyYTgxYjNhMjNhNjJiMjE2YWY4YzE3ODAxM2RiY2VhODgzNTdhZWYzNzU1ZTgyNmJjYjMiLCJpc3N1ZWRBdCI6MTc2MzIwMDgwMDAwMH0"
+  },
+  "escrowRotations": [
+    {
+      "name": "one-rotation",
+      "why": "The account's escrow is sealed to A; the client re-seals to B with the one rotation that leads there.",
+      "currentEscrowFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "rotations": [
+        "A-to-B"
+      ],
+      "fingerprint": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "accepted": true
+      }
+    },
+    {
+      "name": "chain-of-two",
+      "why": "Consent followed two rotations: the chain A to B, B to C, oldest first, and a blob sealed to C.",
+      "currentEscrowFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "rotations": [
+        "A-to-B",
+        "B-to-C"
+      ],
+      "fingerprint": "4d0c678d756472a81b3a23a62b216af8c178013dbcea88357aef3755e826bcb3",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "accepted": true
+      }
+    },
+    {
+      "name": "chain-in-the-wrong-order",
+      "why": "The same two rotations newest first: the first link does not start from the current escrow's fingerprint.",
+      "currentEscrowFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "rotations": [
+        "B-to-C",
+        "A-to-B"
+      ],
+      "fingerprint": "4d0c678d756472a81b3a23a62b216af8c178013dbcea88357aef3755e826bcb3",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "accepted": false,
+        "wire": "409 escrow_not_due",
+        "failedAt": 0,
+        "linkVerdict": "fp_mismatch"
+      }
+    },
+    {
+      "name": "chain-stops-short",
+      "why": "One rotation, but the new blob claims to be sealed to C: the last toFp is not the fingerprint.",
+      "currentEscrowFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "rotations": [
+        "A-to-B"
+      ],
+      "fingerprint": "4d0c678d756472a81b3a23a62b216af8c178013dbcea88357aef3755e826bcb3",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "accepted": false,
+        "wire": "409 escrow_not_due"
+      }
+    },
+    {
+      "name": "chain-overshoots",
+      "why": "Two rotations for a blob sealed to B.",
+      "currentEscrowFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "rotations": [
+        "A-to-B",
+        "B-to-C"
+      ],
+      "fingerprint": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "accepted": false,
+        "wire": "409 escrow_not_due"
+      }
+    },
+    {
+      "name": "second-link-signed-by-the-wrong-seed",
+      "why": "The second link is signed by A, not by the key it rotates away from.",
+      "currentEscrowFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "rotations": [
+        "A-to-B",
+        "B-to-C-signed-by-A"
+      ],
+      "fingerprint": "4d0c678d756472a81b3a23a62b216af8c178013dbcea88357aef3755e826bcb3",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "accepted": false,
+        "wire": "409 escrow_not_due",
+        "failedAt": 1,
+        "linkVerdict": "signer_not_pinned_key"
+      }
+    },
+    {
+      "name": "first-link-signed-by-the-incoming-seed",
+      "why": "The only link is signed by the incoming key.",
+      "currentEscrowFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "rotations": [
+        "A-to-B-signed-by-B"
+      ],
+      "fingerprint": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "accepted": false,
+        "wire": "409 escrow_not_due",
+        "failedAt": 0,
+        "linkVerdict": "signer_not_pinned_key"
+      }
+    },
+    {
+      "name": "link-for-another-instance",
+      "why": "A rotation made for another instance.",
+      "currentEscrowFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "rotations": [
+        "A-to-B-for-another-instance"
+      ],
+      "fingerprint": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "accepted": false,
+        "wire": "409 escrow_not_due",
+        "failedAt": 0,
+        "linkVerdict": "instance_mismatch"
+      }
+    },
+    {
+      "name": "gap-in-the-chain",
+      "why": "The chain skips a key: after A to B the next link must start at B, not at A again.",
+      "currentEscrowFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "rotations": [
+        "A-to-B",
+        "A-to-C"
+      ],
+      "fingerprint": "4d0c678d756472a81b3a23a62b216af8c178013dbcea88357aef3755e826bcb3",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "accepted": false,
+        "wire": "409 escrow_not_due",
+        "failedAt": 1,
+        "linkVerdict": "fp_mismatch"
+      }
+    },
+    {
+      "name": "escrow-already-at-the-new-key",
+      "why": "The account's escrow is already sealed to B: a chain that starts at A does not start from it.",
+      "currentEscrowFp": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed",
+      "rotations": [
+        "A-to-B"
+      ],
+      "fingerprint": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed",
+      "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "expect": {
+        "accepted": false,
+        "wire": "409 escrow_not_due",
+        "failedAt": 0,
+        "linkVerdict": "fp_mismatch"
+      }
+    }
+  ],
+  "cardChains": {
+    "never-changed": {
+      "why": "recoveryFp is A from card 0 on.",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xw0rTKni4H_li-B2Tqwrvd2bl_P5VBikgczYBOoMoaHWqra_wDt8LW3EiEE4MfXuuv1wRkT2uP-cVNSnbq5b_wF7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImE3Nzc5ZTQzZThiN2Q5MWUwYjRhYTY5MjZkMDg2NTk0ZDk1NzhlNTE2NjZlY2ViY2U1OGE3NWZmMDY0MGU5ODciLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x15Z578Pa8lPL1EwGqrCA8d1vku_idSsdPlGquyXEuHH2tTshG64AxI5efJovYnpXawzJXkmtxwXLRmE7LaEMgt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6IjIwOTdiMDRkNjU2ZDNmMWVlZTFmYTQ2NDYzODBiY2Q1YzUyNGJhMDc5NTRlNDk1YjcwZGU1MmZjODA4Zjg1MTUiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImE3Nzc5ZTQzZThiN2Q5MWUwYjRhYTY5MjZkMDg2NTk0ZDk1NzhlNTE2NjZlY2ViY2U1OGE3NWZmMDY0MGU5ODciLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0"
+      ],
+      "recoveryFps": [
+        "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+        "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987"
+      ]
+    },
+    "rotated-once": {
+      "why": "A at cards 0 and 1, B from card 2.",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xw0rTKni4H_li-B2Tqwrvd2bl_P5VBikgczYBOoMoaHWqra_wDt8LW3EiEE4MfXuuv1wRkT2uP-cVNSnbq5b_wF7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImE3Nzc5ZTQzZThiN2Q5MWUwYjRhYTY5MjZkMDg2NTk0ZDk1NzhlNTE2NjZlY2ViY2U1OGE3NWZmMDY0MGU5ODciLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x15Z578Pa8lPL1EwGqrCA8d1vku_idSsdPlGquyXEuHH2tTshG64AxI5efJovYnpXawzJXkmtxwXLRmE7LaEMgt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6IjIwOTdiMDRkNjU2ZDNmMWVlZTFmYTQ2NDYzODBiY2Q1YzUyNGJhMDc5NTRlNDk1YjcwZGU1MmZjODA4Zjg1MTUiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImE3Nzc5ZTQzZThiN2Q5MWUwYjRhYTY5MjZkMDg2NTk0ZDk1NzhlNTE2NjZlY2ViY2U1OGE3NWZmMDY0MGU5ODciLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xzHcTJ8t95IASJfyc-oDUzyANM_iwHmkve762JqoZQFR8UgRAjEgmeHllveV3mrXsKnMhIS277VO-R6v9Tq0twd7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MiwicHJldiI6IjdhMjA5YmJlNDFmYmVlZDJjNzUwOWIzNDYwMjhlYmMxNWMxNjhhNDA1MDFhNWE3ODE3MDQ5Y2ZkYzYwM2FkZGYiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzE3MjAwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x-wMf2qWzDE--0TRl2AYaadct0IZdKhb-tPXezN6hqtqH13lVriRsihT_LK0varwgVqf20G8E6yHlK9BCOtriw17InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MywicHJldiI6Ijk0NDBiODVmZjNiN2IxNmFhMTA4YmU1MTBlODFhMzQ1MDE0NWRkM2NlOGVlZTlmNTkyMjM3NDI0OTllZmI2OTkiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzE3NTYwMDAwMH0"
+      ],
+      "recoveryFps": [
+        "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+        "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+        "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed",
+        "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed"
+      ]
+    },
+    "rotated-twice": {
+      "why": "A at card 0, B at card 1, C at card 2.",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xw0rTKni4H_li-B2Tqwrvd2bl_P5VBikgczYBOoMoaHWqra_wDt8LW3EiEE4MfXuuv1wRkT2uP-cVNSnbq5b_wF7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImE3Nzc5ZTQzZThiN2Q5MWUwYjRhYTY5MjZkMDg2NTk0ZDk1NzhlNTE2NjZlY2ViY2U1OGE3NWZmMDY0MGU5ODciLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x8ddzknwHJF_wlOK_PqB1a7QsL--V65Crl21QFZ9p9Cby4EISjZ82qhXFwe1dScbO-yeXKrDmIK_SAdmCZmL0Q57InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6IjIwOTdiMDRkNjU2ZDNmMWVlZTFmYTQ2NDYzODBiY2Q1YzUyNGJhMDc5NTRlNDk1YjcwZGU1MmZjODA4Zjg1MTUiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x9R5GtFPeEI-TU9EA3a3_L8FjYUbcnc5T6OFVJhAZrrXVIfPI2q3N-ZPM63Izekr1Bq4etC3GVpuiDq0uiyungV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MiwicHJldiI6IjQ1YjY3NDQ3YTVlNzhkYjJiMWM1Y2NhMTk3ZjE0NGIyOTUxOTEzZDFmMDI0NGMzOWQ3NDgyMjkyYTZiMzI1Y2MiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6IjRkMGM2NzhkNzU2NDcyYTgxYjNhMjNhNjJiMjE2YWY4YzE3ODAxM2RiY2VhODgzNTdhZWYzNzU1ZTgyNmJjYjMiLCJpc3N1ZWRBdCI6MTc2MzE3MjAwMDAwMH0"
+      ],
+      "recoveryFps": [
+        "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+        "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed",
+        "4d0c678d756472a81b3a23a62b216af8c178013dbcea88357aef3755e826bcb3"
+      ]
+    },
+    "turned-on-later": {
+      "why": "No operator recovery at card 0; card 1 names key A.",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x-K7_YKt8pL9xWi6NGhoPqN1VG7FAOICYeee4_UYa8WZS-Ua6wzuat57mNuEIjJX3whAm1Vzc69J99c5hSKfrAJ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImE3Nzc5ZTQzZThiN2Q5MWUwYjRhYTY5MjZkMDg2NTk0ZDk1NzhlNTE2NjZlY2ViY2U1OGE3NWZmMDY0MGU5ODciLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x87TtshF0XxmDrDM1OgnnAgHbdwIPTi66ZZtXzKcpvuK8OebGGpXmAypdZV2GMkJavjWhcD2JPNP83wObEtMhAV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MiwicHJldiI6IjYzNzQ0NjkzMmMyZDY3MDc1MjMwNDg0NTlkZWMxNDY3ZTdjYzMxZmQzZGY3ZmUzOGY3MmY0NGVlNWZlZmZkMzciLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImE3Nzc5ZTQzZThiN2Q5MWUwYjRhYTY5MjZkMDg2NTk0ZDk1NzhlNTE2NjZlY2ViY2U1OGE3NWZmMDY0MGU5ODciLCJpc3N1ZWRBdCI6MTc2MzE3MjAwMDAwMH0"
+      ],
+      "recoveryFps": [
+        "none",
+        "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+        "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987"
+      ]
+    },
+    "off-and-on-again": {
+      "why": "A at card 0, none at card 1, B at card 2.",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xw0rTKni4H_li-B2Tqwrvd2bl_P5VBikgczYBOoMoaHWqra_wDt8LW3EiEE4MfXuuv1wRkT2uP-cVNSnbq5b_wF7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImE3Nzc5ZTQzZThiN2Q5MWUwYjRhYTY5MjZkMDg2NTk0ZDk1NzhlNTE2NjZlY2ViY2U1OGE3NWZmMDY0MGU5ODciLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x4DvES08qcJT6dt2pqwnDZjeV9KSg0ZvnU0JjNZSUqe9zWiAb1j177cJYX5c3t-zV2M_mWpQmCoKwt1l8Nr_pwl7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6IjIwOTdiMDRkNjU2ZDNmMWVlZTFmYTQ2NDYzODBiY2Q1YzUyNGJhMDc5NTRlNDk1YjcwZGU1MmZjODA4Zjg1MTUiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x1fpz5DYmV9e4yBZDrMQv7cSFDqO0bkEBaHBw1vGXkUU86UlWARqmQskSFEZ5qzGZwKEX0y_7fi58H6krqT7Bw97InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MiwicHJldiI6IjRmNjBiOGQ1NDIwY2Y4Nzg1YmE1OGI0NGM4NTc3MzhkNzM0OWM3YjdmZDFmNTRlMTQxNDI3ZGI0YjhjYmM1ZjAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzE3MjAwMDAwMH0"
+      ],
+      "recoveryFps": [
+        "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+        "none",
+        "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed"
+      ]
+    },
+    "jumped": {
+      "why": "A at card 0, C at card 1: the card jumps over key B.",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xw0rTKni4H_li-B2Tqwrvd2bl_P5VBikgczYBOoMoaHWqra_wDt8LW3EiEE4MfXuuv1wRkT2uP-cVNSnbq5b_wF7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImE3Nzc5ZTQzZThiN2Q5MWUwYjRhYTY5MjZkMDg2NTk0ZDk1NzhlNTE2NjZlY2ViY2U1OGE3NWZmMDY0MGU5ODciLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x8YBehh4n8X8KjHUCnLBjhpM5V4ByiAgW9alCT3umOHwfrxEYs-FSZ6hldWx-QqD2hMx5l73pRFbXo0eIQd3AwR7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6IjIwOTdiMDRkNjU2ZDNmMWVlZTFmYTQ2NDYzODBiY2Q1YzUyNGJhMDc5NTRlNDk1YjcwZGU1MmZjODA4Zjg1MTUiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6IjRkMGM2NzhkNzU2NDcyYTgxYjNhMjNhNjJiMjE2YWY4YzE3ODAxM2RiY2VhODgzNTdhZWYzNzU1ZTgyNmJjYjMiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0"
+      ],
+      "recoveryFps": [
+        "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+        "4d0c678d756472a81b3a23a62b216af8c178013dbcea88357aef3755e826bcb3"
+      ]
+    }
+  },
+  "firstConsent": [
+    {
+      "name": "no-change",
+      "why": "The key never changed: nothing to cover, no warning.",
+      "cards": "never-changed",
+      "rotations": [],
+      "pin": {
+        "root": "baked",
+        "seq": 0,
+        "cardHash": "2097b04d656d3f1eee1fa4646380bcd5c524ba07954e495b70de52fc808f8515"
+      },
+      "expect": {
+        "warning": false,
+        "uncovered": []
+      }
+    },
+    {
+      "name": "change-covered",
+      "why": "One change, A to B, and the rotation the outgoing seed signed is served with the chain.",
+      "cards": "rotated-once",
+      "rotations": [
+        "A-to-B"
+      ],
+      "pin": {
+        "root": "baked",
+        "seq": 0,
+        "cardHash": "2097b04d656d3f1eee1fa4646380bcd5c524ba07954e495b70de52fc808f8515"
+      },
+      "expect": {
+        "warning": false,
+        "uncovered": []
+      }
+    },
+    {
+      "name": "change-not-covered",
+      "why": "A chain with a recoveryFp change that no rotation covers: the unsigned-change warning, with \"Only me\" preselected.",
+      "cards": "rotated-once",
+      "rotations": [],
+      "pin": {
+        "root": "kit",
+        "seq": 0,
+        "cardHash": "2097b04d656d3f1eee1fa4646380bcd5c524ba07954e495b70de52fc808f8515"
+      },
+      "expect": {
+        "warning": true,
+        "uncovered": [
+          {
+            "seq": 2,
+            "from": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+            "to": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed"
+          }
+        ]
+      }
+    },
+    {
+      "name": "link-offer-pin-newer-than-the-change",
+      "why": "FC-2: this device's pin came from a link offer whose cardHash is card 3, AFTER the change at card 2. The walk still starts at card 0, so the uncovered change is found.",
+      "cards": "rotated-once",
+      "rotations": [],
+      "pin": {
+        "root": "link_offer",
+        "seq": 3,
+        "cardHash": "de2e3935f0cbf3ee2e93b50f6b8a9b12e5fa3fbf1a34a39475a12639c4c0de63"
+      },
+      "expect": {
+        "warning": true,
+        "uncovered": [
+          {
+            "seq": 2,
+            "from": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+            "to": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed"
+          }
+        ]
+      }
+    },
+    {
+      "name": "trust-gate-pin-newer-than-the-change",
+      "why": "The same for a Trust Gate pin made at card 3.",
+      "cards": "rotated-once",
+      "rotations": [],
+      "pin": {
+        "root": "trust_gate",
+        "seq": 3,
+        "cardHash": "de2e3935f0cbf3ee2e93b50f6b8a9b12e5fa3fbf1a34a39475a12639c4c0de63"
+      },
+      "expect": {
+        "warning": true,
+        "uncovered": [
+          {
+            "seq": 2,
+            "from": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+            "to": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed"
+          }
+        ]
+      }
+    },
+    {
+      "name": "setup-pin",
+      "why": "The same chain on the operator's own setup pin.",
+      "cards": "rotated-once",
+      "rotations": [],
+      "pin": {
+        "root": "setup",
+        "seq": 0,
+        "cardHash": "2097b04d656d3f1eee1fa4646380bcd5c524ba07954e495b70de52fc808f8515"
+      },
+      "expect": {
+        "warning": true,
+        "uncovered": [
+          {
+            "seq": 2,
+            "from": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+            "to": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rotation-signed-by-the-incoming-seed",
+      "why": "A \"rotation\" for the change exists, but the incoming key signed it: it does not cover the change.",
+      "cards": "rotated-once",
+      "rotations": [
+        "A-to-B-signed-by-B"
+      ],
+      "pin": {
+        "root": "baked",
+        "seq": 0,
+        "cardHash": "2097b04d656d3f1eee1fa4646380bcd5c524ba07954e495b70de52fc808f8515"
+      },
+      "expect": {
+        "warning": true,
+        "uncovered": [
+          {
+            "seq": 2,
+            "from": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+            "to": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed"
+          }
+        ]
+      }
+    },
+    {
+      "name": "rotation-for-another-instance",
+      "why": "The rotation was made for another instance.",
+      "cards": "rotated-once",
+      "rotations": [
+        "A-to-B-for-another-instance"
+      ],
+      "pin": {
+        "root": "baked",
+        "seq": 0,
+        "cardHash": "2097b04d656d3f1eee1fa4646380bcd5c524ba07954e495b70de52fc808f8515"
+      },
+      "expect": {
+        "warning": true,
+        "uncovered": [
+          {
+            "seq": 2,
+            "from": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+            "to": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed"
+          }
+        ]
+      }
+    },
+    {
+      "name": "two-changes-both-covered",
+      "why": "Two changes and both rotations (served in any order).",
+      "cards": "rotated-twice",
+      "rotations": [
+        "B-to-C",
+        "A-to-B"
+      ],
+      "pin": {
+        "root": "enrol",
+        "seq": 2,
+        "cardHash": "c4c036540f13f598c4f95eb2b99994e69c5ac51680acde48eaf08c193832e2c6"
+      },
+      "expect": {
+        "warning": false,
+        "uncovered": []
+      }
+    },
+    {
+      "name": "two-changes-second-not-covered",
+      "why": "Two changes; only the first has a rotation.",
+      "cards": "rotated-twice",
+      "rotations": [
+        "A-to-B"
+      ],
+      "pin": {
+        "root": "baked",
+        "seq": 0,
+        "cardHash": "2097b04d656d3f1eee1fa4646380bcd5c524ba07954e495b70de52fc808f8515"
+      },
+      "expect": {
+        "warning": true,
+        "uncovered": [
+          {
+            "seq": 2,
+            "from": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed",
+            "to": "4d0c678d756472a81b3a23a62b216af8c178013dbcea88357aef3755e826bcb3"
+          }
+        ]
+      }
+    },
+    {
+      "name": "two-changes-shortcut-rotation",
+      "why": "A rotation straight from A to C does not cover the two steps the chain took.",
+      "cards": "rotated-twice",
+      "rotations": [
+        "A-to-C"
+      ],
+      "pin": {
+        "root": "baked",
+        "seq": 0,
+        "cardHash": "2097b04d656d3f1eee1fa4646380bcd5c524ba07954e495b70de52fc808f8515"
+      },
+      "expect": {
+        "warning": true,
+        "uncovered": [
+          {
+            "seq": 1,
+            "from": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+            "to": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed"
+          },
+          {
+            "seq": 2,
+            "from": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed",
+            "to": "4d0c678d756472a81b3a23a62b216af8c178013dbcea88357aef3755e826bcb3"
+          }
+        ]
+      }
+    },
+    {
+      "name": "turned-on-after-card-0",
+      "why": "Operator recovery was turned on after card 0 (none to A). recoveryFp changed and no rotation statement can cover a change from none, so the warning shows: only a key named by card 0 needs none.",
+      "cards": "turned-on-later",
+      "rotations": [],
+      "pin": {
+        "root": "baked",
+        "seq": 0,
+        "cardHash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82"
+      },
+      "expect": {
+        "warning": true,
+        "uncovered": [
+          {
+            "seq": 1,
+            "from": "none",
+            "to": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987"
+          }
+        ]
+      }
+    },
+    {
+      "name": "off-and-on-again",
+      "why": "A, then none, then B: two changes, neither of which a rotation can cover. Turning operator recovery off and on is not a way around the outgoing seed's signature.",
+      "cards": "off-and-on-again",
+      "rotations": [
+        "A-to-B"
+      ],
+      "pin": {
+        "root": "baked",
+        "seq": 0,
+        "cardHash": "2097b04d656d3f1eee1fa4646380bcd5c524ba07954e495b70de52fc808f8515"
+      },
+      "expect": {
+        "warning": true,
+        "uncovered": [
+          {
+            "seq": 1,
+            "from": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+            "to": "none"
+          },
+          {
+            "seq": 2,
+            "from": "none",
+            "to": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed"
+          }
+        ]
+      }
+    },
+    {
+      "name": "jump-covered-by-a-chain",
+      "why": "The card jumps from A to C while the served rotations go A to B and B to C: a chain of rotations that leads from the old value to the new one covers the change. No warning.",
+      "cards": "jumped",
+      "rotations": [
+        "A-to-B",
+        "B-to-C"
+      ],
+      "pin": {
+        "root": "baked",
+        "seq": 0,
+        "cardHash": "2097b04d656d3f1eee1fa4646380bcd5c524ba07954e495b70de52fc808f8515"
+      },
+      "expect": {
+        "warning": false,
+        "uncovered": []
+      }
+    },
+    {
+      "name": "jump-covered-by-a-chain-served-newest-first",
+      "why": "The same two rotations served in the other order: the order they are served in does not matter.",
+      "cards": "jumped",
+      "rotations": [
+        "B-to-C",
+        "A-to-B"
+      ],
+      "pin": {
+        "root": "kit",
+        "seq": 0,
+        "cardHash": "2097b04d656d3f1eee1fa4646380bcd5c524ba07954e495b70de52fc808f8515"
+      },
+      "expect": {
+        "warning": false,
+        "uncovered": []
+      }
+    },
+    {
+      "name": "jump-covered-by-one-rotation",
+      "why": "The same jump with one rotation straight from A to C.",
+      "cards": "jumped",
+      "rotations": [
+        "A-to-C"
+      ],
+      "pin": {
+        "root": "baked",
+        "seq": 0,
+        "cardHash": "2097b04d656d3f1eee1fa4646380bcd5c524ba07954e495b70de52fc808f8515"
+      },
+      "expect": {
+        "warning": false,
+        "uncovered": []
+      }
+    },
+    {
+      "name": "jump-with-the-first-rotation-only",
+      "why": "Only A to B is served: nothing leads on to C, so the jump is not covered. The warning shows.",
+      "cards": "jumped",
+      "rotations": [
+        "A-to-B"
+      ],
+      "pin": {
+        "root": "baked",
+        "seq": 0,
+        "cardHash": "2097b04d656d3f1eee1fa4646380bcd5c524ba07954e495b70de52fc808f8515"
+      },
+      "expect": {
+        "warning": true,
+        "uncovered": [
+          {
+            "seq": 1,
+            "from": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+            "to": "4d0c678d756472a81b3a23a62b216af8c178013dbcea88357aef3755e826bcb3"
+          }
+        ]
+      }
+    },
+    {
+      "name": "jump-with-the-second-rotation-only",
+      "why": "Only B to C is served: nothing leads from A.",
+      "cards": "jumped",
+      "rotations": [
+        "B-to-C"
+      ],
+      "pin": {
+        "root": "baked",
+        "seq": 0,
+        "cardHash": "2097b04d656d3f1eee1fa4646380bcd5c524ba07954e495b70de52fc808f8515"
+      },
+      "expect": {
+        "warning": true,
+        "uncovered": [
+          {
+            "seq": 1,
+            "from": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+            "to": "4d0c678d756472a81b3a23a62b216af8c178013dbcea88357aef3755e826bcb3"
+          }
+        ]
+      }
+    },
+    {
+      "name": "jump-chain-with-a-link-signed-by-the-wrong-seed",
+      "why": "A to B is valid, but the B to C link is signed by A, not by the key it rotates away from: the chain does not reach C.",
+      "cards": "jumped",
+      "rotations": [
+        "A-to-B",
+        "B-to-C-signed-by-A"
+      ],
+      "pin": {
+        "root": "baked",
+        "seq": 0,
+        "cardHash": "2097b04d656d3f1eee1fa4646380bcd5c524ba07954e495b70de52fc808f8515"
+      },
+      "expect": {
+        "warning": true,
+        "uncovered": [
+          {
+            "seq": 1,
+            "from": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+            "to": "4d0c678d756472a81b3a23a62b216af8c178013dbcea88357aef3755e826bcb3"
+          }
+        ]
+      }
+    }
+  ],
+  "requestCode": [
+    {
+      "why": "the request code the person reads to the operator: 96 bits of the request key's hash, six groups of four",
+      "rPubB64": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+      "inputUtf8": "andvari/v2|recovery-request|code|LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+      "code": "8b4a7232bdf718e6e3a0e81e",
+      "grouped": "8b4a 7232 bdf7 18e6 e3a0 e81e"
+    },
+    {
+      "why": "another request key gives another code, which is how recovery-cli assist catches a swapped rPub",
+      "rPubB64": "cMrbMNvJYWVl4VNSpRInL_QmqBQJgOUunvHjlZehDAY",
+      "inputUtf8": "andvari/v2|recovery-request|code|cMrbMNvJYWVl4VNSpRInL_QmqBQJgOUunvHjlZehDAY",
+      "code": "335250aee80b44ea71234eab",
+      "grouped": "3352 50ae e80b 44ea 7123 4eab"
+    }
+  ],
+  "assisted": [
+    {
+      "name": "valid",
+      "why": "The operator's answer: a 0x09 statement signed by the recovery-key signing key, sealed to the request key. The signer maps to the key the pinned card's recoveryFp names, the request fields match, and the identity seed opens under the delivered UVK to the served identityPub.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "ndkcKoQppAIheB-cfUfV75mU_dLnuk5Ne9nNZKGfp0bhixjAXv9G8Bu7Xm4XJfNP9j-Icg8MRoHM9kN0KyoKe3hKrH1lRQFEpvlmV34Egx9hOq2pakEzW3Tj0VcBO1IMjkirD0skCovwaX1aCjKkTcBvz23D1_RMxfXyGl-T12J1BgIjVw3qmQQYu4weEPc4Utw63u2n4x8KXvZ2k0gZ4ibCdgshdg7m9qLVKHLWY75UypOYRcOVXbS58x-a1T9XdByq2W_mKkg8HPnTpb2wsn9OF91rn2eqLc1kFtn17582pcCMgO5SbP5Q9AoZc7jZN34pKeTvFYUudTBLhpGw6I4vmAI6DcGem81Uq4GKeluty65fWBGsjMBDdJE6Mk6Nk-JcQj3chf8846MGK405RUFPXzbVqxfjnk12IVelrPNmgabj7jJhpolJ0Ds_3RXyuauB7Vgw6_vMSIRu9FdijEcz1q92q_NnlU9hwDcv_vWn_oHxyMF7H-MONfdieC1rJ5tI81VDZqAsGhL9GDrsQYtl_jrxAGXZPIdP_xZNhuuY-vvzV5H5MfXYCgMr_uVKofs-ZjwDN6G7GHadPwztKZcK10eq9HFtYKhx",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "ok",
+        "uvkB64": "vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI"
+      }
+    },
+    {
+      "name": "sealed-to-another-key",
+      "why": "The seal was made to another request key.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "OEf7TPqjdYN2Xo4E0Z1KKpFwxaoDZfmb260jgSfOJ0MxzdL8njZAFl1s_UeulCCxhFn30hftYI7tlgRDuFsHYnRs8SsHVihkh89k2VebW2szrZvWA0R4ZdSUy_LQ0Eh6gAmEMqAsXGxsLRbQUlEsA15RQvf9w_W8VvnPFu6Bp8VEBwqPoA710GtRUAhSi-ADu41abkrlZ0ZorL3S0cWZt2NIZ8FUEg63sdgYZiuiL69OKpvCHu6g1XjLOFtlEpyRyi3YIx0iuuA3nCGg1XHhAAsKEDq3U_nYwPJbOATMZ1lGTPcbNl7KvV8RXIXXre7swPXW3meZf7dh9bj6Xh1_ybMq5v4eYuuCGnV5Ze-haeKqHZ62fekDE-yrXk3z6evx66Ahls3w4eFdzobneK7dxmziNS5Ox0RzU9AsbiYC-WIskNlvtD1dD__lG5Hmqb-up0_0Z5UqVKGplEijZppNweD_5AdXol24uor0WGAeas-Xjaqa71qiN4oNIdB3TL8Vnyc_ABR8H1cYsfHQQqgzKcBCdSihdZD7fYQ-SySGRm0R_Bz5PshDUOdwouhg0UYKDe95suKgHfYMTZnQB7hnnpCjX0-Sv6xpbhIs",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "unopenable"
+      }
+    },
+    {
+      "name": "seal-truncated",
+      "why": "The first 40 bytes of a seal.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "_v_VGVT63FKHfDR4a2tRYih2cydl2-ek_Tnxe_GZp1nsDBkKoY1v-g",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "unopenable"
+      }
+    },
+    {
+      "name": "rotation-frame-inside",
+      "why": "The seal opens to a 0x08 frame.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-rotation\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"fromFp\":\"a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987\",\"toFp\":\"db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed\",\"issuedAt\":1763200800000}",
+      "sealedB64": "NwvEOF16WeTWIWEB5wBN1JggfxlEMBacxWDvHixhLlB8IxHbetOuATEuFpbT_Xc1v8LbVZJEQmzsV-TyrwzghpZw4C3iOGGwYDx-eVs_mb3HNjg09OjML5wjAsH2yCyOE1MzP0bzFn95x_3_gl5lAexJHbQVx1Y9IE0kaTdPVmIgx-q_E2SMRL-1i8JWv_MqgTfTM8KunniTKqZ0edh3OT-E3aogmlFeq9CRGv5W0N-wpK2IgiiOcwK4yGE5DOWdMuS-S_lSGfbbO0H1YiW9huERWsqPCRz3ClE-bCzdhyuK0MbyqfUeMRWfeIfNCQ3Y27EiNf9hoTY7EjzD8u8kd-WR3_YrG_2qiV29nqDEH8e_YcDzUejXiXwWRRB67u8ZeZXn9xHpk8GKVcJ4ODCZf1dPMZ6hztFbtk-vLGJHSGnHAj0DxNI6bPIVmxq_6XdPWRudxvDLtSRfd0syB6k-eWOJB1geWs6O0LZO3qNxeaIZKPF61dCMEQug34SU7VYSdtt5la6HMbm8DziAvrrL_uV-BOfqp9uUPFL8U1o",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "bad_frame"
+      }
+    },
+    {
+      "name": "bare-json-inside",
+      "why": "The seal opens to a bare JSON statement, not a frame.",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "Xtf6DwGK3kwtRADxfyOf6ozZ00u3HZ54gaW5xP1rOUp_AyL4aagqZf6pAQwud23rByMwm8UaA3X8U0ImQKn7Xj-Un8L0TrTCmvbRF_Eljjm8wkWnbuaCAUFcypavKuPHitvOcioyl9u5IF8zAgYxkwXf3Fx1wD9T7vXj8vnbSrX--z_Fcf1R1BAr4avIVFRSa09BoMDY-kK1RfF6HHE3sLPP7S89O_NtN7WftLkSBYvCaRgjUrwv2WrjUFkAGouCmdajKYCVAJslLr4ZorC-Ewv12Y5COGxyXlm_7TxSTC8FQYxfV76NdiBXKDM78VoKi4yFIYKgCKuQNTdCkfFsIxNJDE0PRjaaBtmZ2oeMzMwSTIPeQmRQSWJFYe56RZyWHwAnXcwEDoW8k9bUpJ0dS0G6iWc7Wi4qM6whOeG5bSmdjymlkqfWzduvgVQLBdioW6iFDVXOfCbf-Uv6lAjCIGfQWsdWsQ",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "unknown_format"
+      }
+    },
+    {
+      "name": "not-canonical",
+      "why": "A signed payload with a space after a colon.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\": \"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "utvQF_QpkS0Xt2G_xk1HlzlijPh1_qpFIn63xoPfaxqHJOdUdiYWYs5p-baszUq7kHaaYeOr_DrFhklJF7RwpB9ClpIDs5-NqI1sZRgasnfIiIxBwEde7jOEVgTKqHA5BldUF1Cp4Af72Iu1u8EOqJrdCL7x7zNg7svBIUbtQIsf_VZ7kUR05NnUHSbUmw4A_63YXKtvet75pXYcO8ySjBZKUw9Mhh9pHnZhb6En1sbtAeBCeOqWr4fzQVR6rTdylu2Ekj85ATMjvDFORHVIiH_iYbuC5s5_fB4pq0P8L0ODzQvAIqSk2yDNWXSn44RpL6T6x1CuwGP2kjHU2OqTMLGiYn8Wd_6pLLcav5OSadwPBZ4bH1vhWW1BRndq9cuv7AZ9zzUVKAzxKVALuvO-hoCqb_B-ZXaIky9inBHzHomx0uWiVOgEIqlrtkvpMLp0jxdbKeVNumj6gAj1gLEaXnf-dYirsPqOdhaJ3CkzpHBoY8yY4beDt1zVFD4O0ex6ZnArFi4_QncXaIWA1x1RgUcA0g0HqcpunWVbVeCK2ly_Wk_gE0xGNRkkTNd4YXVYvkdcjcJLPC5j-7mXWGyPVaBR-1U2pyscoNkEfg",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "non_canonical"
+      }
+    },
+    {
+      "name": "request-id-of-32-bytes",
+      "why": "FI-B13: requestId is b64_16; a 32-byte value fails its type.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "V5LAJkJifVsIGmoHmGa-L6r9rpMkllu40y4HksAdUVcDTPODGv3Vts13jo1fMlQfPVeYjzRJUMAc6QEGyhdBdtr4b3iRA8CBpeTDWKWsqlUp1LNWzBDFTgyf2J5Z4YwO6H45NJ5gs2D09wydK4z4TEh87MuxenIvPFb8L1l6tflV3Uk9Lacz3LnWYKipSDNtjJUP_-0D2uJwissn_2j_xZNARmh_t8vPwEweyoyQNbGUDUr2Zj0uEgkvVnkdOMiq3uvPXp-a2gWbMJR-H9ejlrNi4yama0sdL00S99VGydNW4NiCjM7_w2hBhhVPc8I3wuDKOwK4owsFdpomdCI1zyMq55Wj6wGRHV0-tAPH_MXbfpYeZGBZzNQvJr1vIFZrOn3llJMp_gmN6NeXvomrGGViMCbfgJQf5lHT05rzMBnGfnR2jEEQ-ipDwwSRcUg-7y2DU1kmiRkniNpI90sTO08iMrnKTFsJ4Qxv1BfZz91X6Dfi3IQ50IPNTT2cM-fGIiIM_6Uo-n6Cftv86uqakFsgP_n8quGmuQf8IzKjcVzbqTmIiRqZ6X6tK6N18sN-Kx1CwNvtEV3a0aEcF1LhXhj5YqbvpMzRI5KJVPxxGFAmGNWpN7gw17sM3Cjxvw0V",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "non_canonical"
+      }
+    },
+    {
+      "name": "signed-by-an-identity-key",
+      "why": "Signed by an identity key instead of the recovery key: a server that holds no recovery key (here with the operator account's key) cannot make a payload the app accepts.",
+      "signer": "operator",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "qUWP7caDyubShk3szfqMtByjYZivF6Y0N5DQ8ukZ2GExPwY89S3uFmmF0RRIFjd1Z_tWTNFKItPg0tOKytW1k-te7Ar0DfRKmwprB8-jaJzvQvwTM2SBA9e0ISWuGQ2ue3AMqEIaO7_rRUSoymuG_XyrpUGV380L_JRXp6f9kUiiKpyg6wGTULN7ubTF6WuK2VhupzHUrFfNIVmw73JwI44VCp59N5P9v8ZVTdpJx7RvrcuuawIebpLdtedNGOgYSoNN49--Hf0SWsnbg6aPwlc2lq7y88EBrgcu3C7cVxHD9gtujw6dsJA6BfG4qAcgSyby67RaeEyJseVcH8gSPNd0eQT8-8QVszrDc9rAkTHjzxAn42aeghgrc3Wp_jvAyWXel5CRTqzq_J6WVwu9U-vvCurUoAYf5iRG_bjsJC5pNyBbSCNmvL3rneVlfkILb1UmQKN_xtq53e6ZVjgyFCse4fD3TAQ10xBoaAfHbSHqNhh0q2oO9u64VNWg3PVS4_nCv6R0Dh6PaXzjw2feVBgLghQjcOMt7XidywJ77x0xnGDOrkYXmAl5pZu4Um6tv6Fdu8CfCZcKcsQwMtMlRBQPIq-3UtKree9C",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "signer_not_pinned_key"
+      }
+    },
+    {
+      "name": "signed-by-the-account-itself",
+      "why": "Signed by the account's own identity key.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "7usCA4GIx9zOQqrot3TYYnqOByKHZXqEj_Xb-Zn8oUcEngbZKZEoKC4XTgSYT-P9ZYZQe7D2YE5UpfLi7MJiS3x3bjIKTJFEXFT1IldubUJC0AyvA45jqvITbcqWCav_msmK3oK6v6vjAqM2WpAoqzJRgjYEr55MedSEMjEf06yOyRHdX3pAWZXAs7PnOJBWfc_ndEBHhFqPzhjmNYoJdz0gJ8T35fb8iv6lrSNr0ohuopCR6MG3__5YARrYj_N6ezgK7z7RUvQ4b0VTLHwTMs3k_OgrnQymvdH3fGMFcWTzXH4rvldG11QORTsnTAQUUKGsEjDz9Ho8p-zL_pd-ZQvn02bm2D5-pEs6glZGuEXkt_Y9fInje2v7SuosOVRmr2RHmx1uVp5_6ihIDD1NftaQJsxYSu37DE2KgXBqLs7hSXN4iXqi8rUYXqkr9aTB_aiSVQKCyYMIu4PRP-ENe_uyg7ESHYUNYuf2cXUx0whpouccZC9YrUzTdLQ8z-hDMIRV1SiBvAgQf8WiMOwK3DcYFQ8JtyU1HAUA3rCPlEpweUgwI35nuEGWKxNdRtxsKuyQ7-bzVqTptLL8sLHwCSS3ut0LG4eE48Vr",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "signer_not_pinned_key"
+      }
+    },
+    {
+      "name": "signed-by-another-recovery-seed",
+      "why": "Signed by a recovery seed that is not the one the pinned card names.",
+      "signer": "recoveryB",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "0AwVin1052h1yc7zJXXmGoyjyFVVGtcacoh9KGmIPHBybcONVjTTKqjdH-7rYfQKkzDgU7xa-Qd8Z0eh1ee4mDLq2M2uVaSUTCijrh2vF4oH5H0_kPvg0JhIsSyo3XjBIlFiadvSsBw4TRGBNY1UI02qeyjbQQkhkkFB4qqYU5-oP3zYY6vs1H67hdpdSLi67VeVlMMYQNzHsaEvtAb-33y8qy5FScTvXsp85GAM2sZ8FyggNQuNiPe5_QP1NlVkskTkqBCwh-JE0W9WUeN5m_uV0SWjwMEAxTKfsmoWMBV-Hlt0UfHCVXVubD5KSCGXDgO_Q8dZjDon5wXIKSd41PMECfh0c6xUko8l9iAq9qtfYCpfsRp5EtUl9Fnlh5tfENf5JMwRRY08GgtQkATmd7U18O1tHNrp5_UB3Zyelyhf0Msc0Ttp0_2DMD0lIrKxXAetuMF-TvFCuDgTJqb1YGqcKT_VSwgSz6zo-y19y6hfOPdyDt0engDUZ6_fGu111AAeqW6BzOtNcZ26lU3wRwZ-Z-31onYes8VnjWdtD65EDB7EDXcx2np0IbyaXgiYuAGfeHc2YO1s0bU3wXKKvnRQPSjrxNGdlYd6",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "signer_not_pinned_key"
+      }
+    },
+    {
+      "name": "card-names-another-key",
+      "why": "The payload is the valid one, but this device's pinned card names recovery key B.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "luWYb7UE_TB7h9WaJW8C_AJ6-195REtRo9H4n7h8qACJgqrkcefqjuwCgPJDNUb9OSptDcIFSfp_GNxw-hqyTkNMDM4vjueK0HXwbH6vfm8f_JZwxyQiJdV3ljkqVmVvJ2dBsTKAK9qz5KOvXc2tS2UY4hQ-wZNO9dgR4F4YJo3TAOCjvLQWIeJbSr6i_89JeurH10Qit49fFGkogT3A4Q6CLLehjHQ0vxJ3g_geahjkIh1X845iuD9Jdn_RUuQUminl4tfznM8kcpC3tZwRW14z9i6z6kvA4RQohHfTQQofs7TNa0NsyE4dW4W16_KeGn1XLniLdPDE_PeQAoLz-JmKpqqxaTgFhtfnjCfDjv5pB04brtmA7h8yKrVahRq9Gd2Mq_mxN2K9N1LRN6FQitBq94cMVdxCjVlVkSL_6U1_5_oyZnGWbzSnic1PqV7mBSdwLXNWplRCru7hFF2dQuDRsnes9wRlz2tZPvgKLGfHKNk3LKedPdEUV9_8QcsAw8Hyfis6bMNUw5nh7UiCVyWRY1PkUrS1mkdgoYKRBm22vlyVGgYbk8POB36jSiVYW4xGKTk2mG3FrR8Jp8OZRnc5GEioXbYd2bHW",
+      "cardRecoveryFp": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed",
+      "recoveryPubB64": "cgJW-OUfTMgUpnV4SN-AVkPh2RxcLjnxOn8WbOi4Yzk",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "signer_not_pinned_key"
+      }
+    },
+    {
+      "name": "signature-flipped",
+      "why": "The payload with one signature bit flipped.",
+      "signer": "recoveryA, then one signature bit flipped",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "AE1KU8aHeoFNwaKYQ4bYrGTMaXjJosgOBiQLT_S3qmiPykrBxdMpDU7lz7KiTgJj3swVL9V9c_lrcCxDk1UnsbktfW3hfUAkje5cnIs5nYwHR9DeqbweVCp8Co4aL4GkSVkr5vDEKA1c1oNIjSqsdNtac2TLpqOBm2ptczwZDCKdSZpUPQfd9L1n7snaH8L5AQhpRdU0dqsTdRCG7wCroxPJsUg744u67eJXaWutrvsRlDr8999aC_vWm8sdwmp1F3HPYalp4j6duyxsSkaEXBohQ_OHq_IQ-L3tz7RxNaNyUrlzkX7eWOdt_PnWPIrq1UzSs8TthGzeeo94f_s2_cQFo8gYbs7ma0fSeoFUrJbStvmCSeyExcKAUwDOEm7pHb5OXhNMlc44hIBg1HYO3xVr1lMfqMz7u1yiDF37Qn_ISKDJ8fqE2_qp-4vksZOksM8QR2qSLLKfm2zI43ND-f_xWqVGx2HEf5meCLK6G8wJ9_7DVKsrTsr9MMu_9oBYYB5TEIPdJHGA9kZNcHLwGcjxRpofHqu-B_wjelZArah_y2yqCmJJDzuczPEG16RLQWJxEXBsrhlZu7AsdI7m4PfULIuFDxYAv1C2",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "bad_signature"
+      }
+    },
+    {
+      "name": "request-key-differs",
+      "why": "A requestKey that differs from the request: the recovery key really signed it, for another device's request key.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"cMrbMNvJYWVl4VNSpRInL_QmqBQJgOUunvHjlZehDAY\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "rdLhL1OFAWwBj0vvWRXqikhl7-5vL4RPa2ANMCdx1DkVl7d1Yodt8_pf0pwlnTqRJGe79EKm0qKv_u6Ij4LcGox0OCA1py0x7ARBNQjqLnn0b03JfeuVn0VOZgbwfMB2X4X5zOvzcErO2mkP3YeyIRSkt8cuDedbvY-vcXc90dtE3wIsyD3aaed3zUhMwHoWpvw63nug32ZS-U8CqFnILSXPVUEBRVsBHxKRJHFcR2oNbDvgqoo0tMwbYph5TdzP2o8z7IQpnPu-8cQlsOD29jwp1XDrDTrv4Tcx-FdDnopVV_0_YOnFilOHhsUSVHOPJxy8xDrNcXUKqgkvScZO7dJkHf_LVPHz6Lb8uAPIx1f7oBMnks8C_noyavaGd2-veiaxJ7hVMoecg8F7KfCaasvOeUHIhfh_VwelsxlKB3UrQTnTqkoX17weNejDZZgfEJvdhbvHZJUYbLJWgVsl8psLYACsYWdz6bS_OrzLaxZ6epcRdllVWgf-zxh6bGU5_tzSaBZ3zoOKdsONH01e9rrXE5PQwBU28L998n1S3s6xRU_8Dug5JpB8lw6MO-EjEjnLaPJ8Ae3rMdWaCk5-0579RdWMUIukv42V",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "request_mismatch"
+      }
+    },
+    {
+      "name": "request-id-differs",
+      "why": "Another requestId.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"h7QK7pJ1BOq3-NTF4Q7XFg\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "fDOh6EKpnu605XM38RrhsVq0bAUr6LM0genXbxDeEA-6JunomZYz18IVrW6PvZqY7-b68kZDhebqLx3RXOIC9-8irbXvRG3i3kuqw_5QeNN9l3kvbKuFS_lnS_K64hN6gPrh4cO8eku772GxvnhhoOfZLv0uMkYnW5ZWRSdoTB6TgSUTQPBVc7e3o0apGIuUQEc8pmDaicTCedbZeo7pUcriEOh-KD1w1Hz--Z52_u6Xujs_N1iaNthGxW4W__d_ruFI7Ifmtr9DtmpLURJQM-7a79gB9JOoF_7jC3tbdzKDAg2ugnpZ8PjPJUUi9GxOOyduLjTjw60dDIG8V7uJM0vx6HLrmPGGHz7r7_m7AhQIKJjFd8XjtzDVE8lLO6nVql4no_4ZbeCX6vbePqj7KdGwOUM_UY6XrmcZg1nxeEm8k6mg5T-cLPl1FjJFWFrQqThqa9YuVI5xV3RTvFJQwGCL_TLBkWQOUdi8CATRByJdQzllluyE9fjAwhy4Jy2ybWIYqX4L6HtvMdCB0S4Gugl-HOzH-aCQzUasjc5OKD6jRG2W6Y8288s2-pRpPIJzI3YV1QzmDGrbKlMFCwX6GMxUTTpdcmQzbYh7",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "request_mismatch"
+      }
+    },
+    {
+      "name": "instance-differs",
+      "why": "Another instanceId.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"ffffffff-ffff-4fff-8fff-ffffffffffff\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "-66ktHV1INppNGgJBaXBqVWEqhBXTQRcEMyXVnXFvyDFZECQJBfEmDkrvRuY02vUPboWgz2KyOPO1T8O5jWkw57g19QoKi8JyTr04O34H895hAKWKY_77vWqInc2EDggpJcG810yFYK0e9zjq9DxBQSFcLW4a4UT386MqMIBszU9-XKvs9LGLHDcc3v7hVjLZS7BXsOTR__DDjSd4zV4YYOAUIlg3kV3zA1q587_toAe35VT_uyc9TctUFhnLs7LdfzKb1VxxJwRceJ-11RqQlK2xgH35ypbSC64YRI5I1Ud1RQD-UmvOMLApBfExv9q7JHAMk1TFLFGeznyurCDv5L6GcYsKi1N3O6wH-3OXrg3iJWnwgm2OcvfLHi5QODSgf0g8uz5O94YRWxibXoQcoC0NAjem2vrIggqKR6LIEtwd6CkUitjxmBEdlFhN_79JjPDWK3OcTCjiQC78vt3XE8FFqpLuNQUFRv34PcQVYBbNotypEM-3LE51Yb31tmVy1NaUKYq_ewvb_TaIM39suIVNjr2j37QXIpwYudMwfKfp9cOHulRkXbcqaF_8v7fhjYrTuShnxvCn27B1DpPTMDAvaw1K_1g9CLh",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "request_mismatch"
+      }
+    },
+    {
+      "name": "user-differs",
+      "why": "Another userId than the request is for.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"22222222-2222-4222-8222-222222222222\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "chub0B6sMviCNtSmUVJ--h8UXy78nR4I3lpeOrPMN17gVkcyLS7Vkc9FJT4yr7qlloZxAhg0cDtuBD16ZicJiI5z8mGMXzFl4IF1VEVgodxA6lKW3prQJSA7Y2koAmGnqBaRSqmcfkOJiRmzY7eYaIwc7Mt0UhV9cO4EWVRUBEpT8bJmbvdV8ttnPOapY1pQ8BAXmVTsUqx4bJL7vMUkWuWGu95tLb49Ejl-u58hyBWADPgOp_BqCtLTB2HYnDQpQSBFbk3-DG4bEzEiF2HQhSGo3M7VGN6PdXFpHll5Hw4qw_RBnhR5VBVMlhSZ0emzxkNcfSmV-5yyJuUrkrwfi7dPxv3sxKC6UpjNLwDWshUoVWc0Fq7Wnrl3Qw6oDr1m2V7PkrCfqohuCHCT082h5l9jygiexooR8iabbBtLoI-PbvEpBoGDxjv9-JcfrR5Ex_vlQSgwVElSFF8pj_ePfvYPT5S5W4TXK8FjE2hIiOnGirbdtO304C6J8i7IgXKZMyN33AaHr1JIZJ0-W1NJi5OteMs6S43h8v1EdXa4ui8nNU7CuEGskrsCpjqL_I9xM1nKOhwwY_-HXcwx6Bj84tFegKBxKQRtE5-U",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "request_mismatch"
+      }
+    },
+    {
+      "name": "served-identity-key-is-another",
+      "why": "The seed opens under the delivered UVK, but the identityPub the server serves is another key.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "-tM9UctrH217QiYnKeQj5id0ODLVNFrgmdIH5qwxV3o_TGskF3JQDdwfoSRiENZJg1LfgC0Nv-dPy4M3rkC_JZze7z6Akfbm0oYVyS-_GnNgQGSlY0-r9QyBmIokC3d3SzeOPr-j4eDEgVBZK84cKxQD7RIw9YdfcfEHMSKXbJsoZNZsuEiEjgkmwfOW2VytAc0S_88UNJfFBHsI1nkkUxpGSZo6CPmsPj9A4GEp97mlutcF4qE27Suz2zydAZgLAUOtSEM6CGKPzgdo9Z-IWJpPUegNGI2qzSDzovmiNU6jBWCt0XUsIHFyHqN8lEkRX5iHi2rlS6kQ-moIVD1OE5ufaVUbRvNbsdyOZ10gTOAg2a-S4r1V4BFJzGQwDU2t-msrhm-w9S3qojYt0yIBHimZb2L-0K9zHINpk4qfghSTZMY4259YIykYlKAGLRzcEaZ6QDbmQUV-S6kb8sRfxEz6EMEaEsZAKYlhPawz0uwy_oBu1vWt2_Xe7tvA8Qt0UOmav0JZTb40uHHFMjbX4dXblMJ2DarWomeLt2g_rgmCpJjgdTV2c3-0-oBj8EiSFp9ACBScWIw_GZDSPA45Mo0SZXWNIfxnY_24",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM",
+      "expect": {
+        "verdict": "identity_mismatch"
+      }
+    },
+    {
+      "name": "seed-is-another-identity",
+      "why": "The served seed envelope opens under the delivered UVK to ANOTHER seed than the one behind the served identityPub.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "xWBLMvAYr1BU8l1yYBdxONMFu8hHdN8b2xo1pzFW9BALPtuy6csnLN1h4kUZ2UzXEvzyink1MQDF-8R_rvqSWiyra8gqeroPgVk_3IfzWjaCyNyhH4X5vquy__e82C-nWJ8uDPO7zZQ1aD27m2EfEbj5CfAnn7QXWYKMXne9YYgvUphdtFcmsf18G6t83tTZpveQUGVG3niKiLWIj6Sa2E7N6nIuRrUKhaY7ujB2CPIk6lvyIlf4jWqheEA4gKlZPgO_LqoID7uYOPU88MSThO21kzVLtX6E6YYRsImg0uUGQ4OfXdHo0g-Zj30TeJZrzMAXLE54_F_aHyNnIgsUE1v5K5dtBc-7nHtAGblQ72uuBemizO7-tAfcdxhpmfIA6ZpruCpHztt0MkPQZu6Opd8hL4tf6-LVFfSiq5rFpKz-D86usXTm9ND-SFNPljOUErB6fqt0_lCqIWkUDnDDD4CLSUjU_pyIjU_5EeBx1b-HL-icdxCzvBV1gMAyZ9_OQG8g3ku_tZBoI117zs9u4P5OgcR1Sid3Ghp-oZjuYI2S0tuKkJh6v1MFnnqFqTEBG1xyJoEN6bWuC9_X8v8tiwSqXfz47mZ_WxkH",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdAutIxab-5WujzuyoGRsKRCtX9KwJ11sKcHAcRv8oq_bVLqv09cwD1WjWE-R0IkE6s",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "identity_mismatch"
+      }
+    },
+    {
+      "name": "seed-does-not-open",
+      "why": "The served identity-seed envelope does not open under the delivered UVK (it was sealed under another key): identity_mismatch too.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "S0iCEXKqLPxhZWmu13fbFntcemJxbFTN0bWyN0rbti8zMGDyCiNTxLjT2tGvuZRL43NMsuKECyvpDg5zELWcCz1ya4G8D_vXqNt7pQWpGMdGNbSx1X3qH_lsmM6afvEcwP2aXvEgFluFF3n6EPeLzkXOC-LeIntVL3i9a6qWhXAj77WiiTV1j3DSmypPbcQsYUlLWBnP9uKlJ9EFK59PFlLi72gN8wtTms1SxG3E2BLajIV9rjnWyMjiQsP9t_riutov7yXEZXw5L82w0ph-2y37Dk4vW2wbGcZW7lEGs5DkVBRqWcKF_n58ysa5pmZ2CDJXDWohVWehMRxcp-vKpe10BdQEvfDOWqO577NAjAthE0tUPNDqCj6ZDkw5dZ6Kc-uIBMrFzyShlwZuL_6PgK0mU_I6WhqOkYqS3Pw2gqfccl-mC8tZbhDkX3LxZ1XoZSmqDdSy4bxX1KdyCQ06Yk80f9d4McHIfkT_8Y_DnwZkUWLZNm082Bi7ubtoqNp694Pkg7Y1M06L4zMFuX0E11NkhR2975d7gfn20SjecSbtbsuWWJUqfhIxmrZYba1NY9oSo77frj4srEDtJU2_rUKjE55ccz7U7PQL",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdDm69Z1rPid2NwZvNK4i1gMD2XcDTwBQfKEUlev9CWNsW7lwyHMmU17VZhVIEyUX3Y",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "identity_mismatch"
+      }
+    },
+    {
+      "name": "seed-sealed-for-another-account",
+      "why": "The served envelope is sealed under the delivered UVK but for another account's userId: its AD does not match, so it does not open.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "xtsmMhYVOMCYObG16Cyfd1cIGu9Cmtg5CltL7ajAb0QWF-PaboO4GLh8naIhy93GW-lF9gWF3KwJoCSUHlhig8aca-IgB79UH1OlhRBszlU4lBQFMsXPDlNPwqfTJlxe4bp1qe24GA25H9-e7vsJgN-BIQHOl6qOtxK3pyE7mFvqUor0PPQ8DW-oyRJCr-LDAk0fJnHhxONZmo1HdWqoi2k0_YkAmhCfkDZ-kMfg1-WYPcMgIgxiNqk8FYi2cwKoFjVGeUt1Nmqd4tBIn6yKCt-U8s3-yTy6QE0istJ1Fb2ZdpJVwW9ttmTv72eiTVYQzrVmlKh4pYmy9-76b-PecFxwBljB1z7y5gRpb8O_laMd-QmUox3qIipDq2zInJlroHdKLeWDSYtpA5jvQjxo2csAvGDE_X9iHqwCFAkcPsu3nkw58vfyOLWFb57K6dzghMhhs5-a2PPdKkCZ4CCuDjo8HI7_TQODxUYYLrZ28sfNNrrhACg1AHH6x5HlUDGzuIKSG7eIJyxjw87yDQGeykr7_ap_VtnTc-LBMoQ9X7gH2gSRMCNqF-B7HxiKoR0jCE7PAJVdTytKzxSfAJ4mzLaETV2V-gv3dhKJ",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16WadgENImZE0kR8kO4BVHFrfgY",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "identity_mismatch"
+      }
+    },
+    {
+      "name": "fresh-install",
+      "why": "A fresh install holds no userId (request.userId is null): it skips the userId comparison. The seed's AD binds the payload's userId, and the seed opens to the served identityPub.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "iXuWmJZAwZfVYdg1VrTDDW-ZFxiFrptJUmz7KqBvRngDjwB8S_4HPGicuVvyes1kWduUCWkxfYtsCTfKjRw2ZISnTWGbgrWZl2Wu-EvrT4ylyWSap1CDaU0rwcIAneJzCJjIjtOZgeI8dMaaTd5E1twMlBBJ9qUSzoEtmFToTMZUbgIGFt-vfK20PG1onGP-vDBztgxQwHyYGpK1UtUxbJOJIl9ul-iQZueigAhOzP18l-Cyu16jsevzHf8lrpOdwn65GrTxDWCBwXGAgY1F08MGA841WOU9awplDEbPnrcBw8EmORWhMbFEkG_gVYt3BdUYhD-3kkhTU_ncJnuON0RaTnidXA93bFi6wD6P8s8VYc3EtO_ihQhmjmvfQTXs0o0K6SjQtka1f3UqleUvy1bAXArcmhiAIiXxuMce2HFbMLGtpKP-1c2Xx1mbk2NMZQ27fQfdYeiHS1LMIzo4MRgUxy08kuLvfdpets_IZQVfLzbWIst2tEaM0dtEKHstipxzl_J0oEnIrCfo84BFABsvuuWkP0hk4epdemxCbR_XFyCTJhSddQQTe5XvKSgp7YZauti1iu_MM4foIZfop5KO7ivF2NtB_4Dq",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": null,
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "ok",
+        "uvkB64": "vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI"
+      }
+    },
+    {
+      "name": "user-differs-on-a-fresh-install",
+      "why": "The payload of the row user-differs, opened by a fresh install. There is no userId to compare, so it is not request_mismatch; the served seed, sealed for the account this request was made for, does not open under the AD of the payload's userId: identity_mismatch.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"22222222-2222-4222-8222-222222222222\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "3Nzy9AGzeutr5vOpWCQAUFq88IQpXBn6yIHahSdBgHlqcdYDLZm_nrOQLcuLnIjZax46ENWz346JUGNeySmzJiJkv4hdLheljfWcHzsMjm6zFt2Upe2yCbpohvn2shXeBvOzySJ4utFsUKI3-PQTrIMEDY3vwBsPhqeu0ZykN9LtTRA-zMrumdsAIMG1-1Sxiv6GAwsNJn7B_ohUi-u1NoNiN-p9R7d-VPYVEOOk7v-qdyCYrBiaCI6mRulGpth2fw7lEtTO0gUJO-62vc9wAllQOFVeC6OZleQitlmorsthl359IwF3czqSbEhpsKEgG1cLGUozm3R7kWgzvwGOdunJEFwIm_g5pZdHU5HhJvTBzKYPTyrYGAeKvp67Yima3wGDuPU-4fuQ_iT3SVkYVzUpZt5VsewR9l9EGs3n0sYlhhzE678-qrRs5ZF2o_lAkFhVRPriP31doqTEvTj4rgIqTlcbUN1pEu7dbtLbR8YOzD_M2YZXfG08Xfree26upcT16MQttNYuqryfefe7tl-BFKoR5cBIa8gYc8plU0pciMU1iahsyPqTqKKzNqlV-3ETBPjIo00FUGiG8PnJG-ILUJI6kfZbRXjN",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": null,
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "identity_mismatch"
+      }
+    },
+    {
+      "name": "order-signer-before-signature",
+      "why": "Signed by an identity key, with the signature broken as well.",
+      "signer": "operator, then one signature bit flipped",
+      "sealedB64": "jUrbb1IbI9WaTgdzuY1nPiviSdSv9Y1mBdrp62zU122aKRR6pFjlnvyaYWgfWgH6UCOWtpXXiTtwOOnfRz9jhbU5RnLRqye1FBAgIFHy9JM9r5MbZep0MrTGLPPEVM_Z6LVaX10AeQpZfcujwV75H-nyOib5BPxeoBxoOCCPtLNQpACdDs2pu_rY_dZQsRAOyg-BC9sh57kqyZDxD99JT11GYEwhMreuH-sG4koFZbQdg3oVeyFFZhF03ZPxOLeHFM4JPWLL5IzB3UIqlaBfdy2YFQs1uVKE6dTucaegqJE0AXlE-gYc6M1xYuhD2Qk2cuQn76kgc4CT_DpBQzt7CqN5vMjQ0Hy29A7WteKzBdFXET7PWTIEGk1jP8hN70mhev5aWaj5bRYeTcpsGEletxRe2lGrc4m4NTB6vEFXugFqcrKszBe6vETkRgRNifDWnVWXFxsKiOAOzkeX6zM8ndl2hc62je6hlDaLzXqQKzuomdzUeoPj4jD3HD2Ay33FRHLKe6rE9AacVdP8rQZ1bDttX33k-iII3Viw173cV2LbJdYnMa_uv9xWHpeINf1kIb8XRbvpiv0r8Ir2bXXrexz2l897kZFv156n",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "signer_not_pinned_key"
+      }
+    },
+    {
+      "name": "order-signature-before-request",
+      "why": "Another requestKey under a broken signature.",
+      "signer": "recoveryA, then one signature bit flipped",
+      "sealedB64": "MWe1ZTP1xhK6_9liIFBqZgvdoStqF3C-4mYf5ki8SBFXMX4kIR9QSLusPQV6LAB4OLwt3B9siW8QRJLXLFcOJdX5fG0sgdwVAF9ac5GJkm8YP6y9sZ-Rx_LSJPhtUOcrnrOEZPogcoU5_YNBR2aJl6K_w2OCTgY6sxZ8vQkvOc8dyK77GEAacTOemnA4pi0yLE2Wxc6V0nCo3lvdZGj2GcMv17PsT9Gd2IuCDnGTAeGmrHvPYRJxCsPGJqyA0Bslux9IxLA3ePdQcpMxIyDys1Q5ToNP2gqOp7XV5fzcaHInDJ5AE2sZITz0dqGpvwGVvnVATz_g5EwdzYXyIc8LCwGDLtD4l1MdyYrHIoXBppcEtsglZ8TN7w-bnyevy4oEjLBVGMD5k1gYlmblMA0viGgakaEueAlx4quWmOfM1a_YXswMzGQxCztOSiVkiXrEQak84YyToZaBxaaJ_SBAnrkEO3r-CI3mjz8m5kIys8SRMwIxgQ-nyhXMdBFcGgAfkMLlZ_4sRV2CoP9Ibwvnuvxk_digURTPgZnQEWfQQymNl27Iff1XU3vZme97CebT8uGdCotb8WWUUsBFQNiDhWRWoYhbO0s05btl",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "bad_signature"
+      }
+    },
+    {
+      "name": "order-request-before-identity",
+      "why": "Another requestId, and the served identityPub is another key.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"h7QK7pJ1BOq3-NTF4Q7XFg\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "o8ggAf53s1RGdrHTw7TJT-1DIcj-Ge_xlips41dqKT8mws0vGuzPExsrjo87kXTLxNR7xC3Oy0ClkwFgx30uMgKfI--Z3p-vRhjr91tI6GSj3RJmvCIZEzJCIq5RvGbpPuQ_619nt6AvL0C9umuquf0uDA4Kw9Frdytg9ZIg29ttYz6z1N0Oqm3C-ORMEppqkS_UtYcAScK50AVayVSnFVHmr6kSL459D1ndLSt7C9V5oFNu6w8N8M9IieYmGj6S36n0NNCuXL3C2SKB0niEo1ORDG8a0dPC3U1ChxOtMQMBCucV5lo-zeH3ZeddAj2jd5UD22W_QpNoBOZaisVsQIr1Rnhg9fhE63H5VBUd4vsDJIzmEzCXTpEhFnY-t8P5M1uS4AfBLq5rfGX2eDbDqfjPa_bnEOHuJJkm6tjXGaPafbaHuugc1ZdKElbGjZWDP9AaSRIUuiD8v_eUQvmW-WcUITHxRA0Fp68hc9Rsg674BWzd3VXarbAs8Us_-XBvMFD7qpytmJgrV6DERC97sDxHGan1SnmTgWxsB8vWnXk_yVi5a4NDASLhk3yijvtpA2L1MJ84VXwTMD3MylBABsl-_wfMWRWWpPj7",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM",
+      "expect": {
+        "verdict": "request_mismatch"
+      }
+    }
+  ],
+  "veto": [
+    {
+      "name": "valid",
+      "why": "A signed-in device of the account cancels the request: a 0x0A statement signed by the account key, checked by the server against the identity key it stores.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-veto\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"issuedAt\":1763704800000}",
+      "frameB64": "YXZzAgqcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyqj4v6wWv3w-4POyrfDiIic0sGHFp9lfogNsjhuqY--Gj1sGGP5AfEuqYQZIqUogYBU2ULZejZZC2Ri2p3QQWgR7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS12ZXRvIiwicmVxdWVzdElkIjoia2V2c3labWdDVlBPOFRUbC0xb3FLUSIsInVzZXJJZCI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImlzc3VlZEF0IjoxNzYzNzA0ODAwMDAwfQ",
+      "storedIdentityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+      "expect": {
+        "verdict": "ok"
+      }
+    },
+    {
+      "name": "signed-by-another-account",
+      "why": "The statement names alice, but bob's key signed it.",
+      "signer": "bob",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-veto\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"issuedAt\":1763704800000}",
+      "frameB64": "YXZzAgqzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAltEKIesXRwT-lCPLb0QRE6Lwjoq5c3YFkHTPvcnAvcKsyxlA6jjfP_wiHZX0XfSO8_rfzVthVlD2XWWFRBGXQ17InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS12ZXRvIiwicmVxdWVzdElkIjoia2V2c3labWdDVlBPOFRUbC0xb3FLUSIsInVzZXJJZCI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImlzc3VlZEF0IjoxNzYzNzA0ODAwMDAwfQ",
+      "storedIdentityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+      "expect": {
+        "verdict": "signer_not_pinned_key"
+      }
+    },
+    {
+      "name": "signature-flipped",
+      "why": "The veto with one signature bit flipped.",
+      "signer": "alice, then one signature bit flipped",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-veto\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"issuedAt\":1763704800000}",
+      "frameB64": "YXZzAgqcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyqj4v6wWv3w-4POzrfDiIic0sGHFp9lfogNsjhuqY--Gj1sGGP5AfEuqYQZIqUogYBU2ULZejZZC2Ri2p3QQWgR7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS12ZXRvIiwicmVxdWVzdElkIjoia2V2c3labWdDVlBPOFRUbC0xb3FLUSIsInVzZXJJZCI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImlzc3VlZEF0IjoxNzYzNzA0ODAwMDAwfQ",
+      "storedIdentityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+      "expect": {
+        "verdict": "bad_signature"
+      }
+    },
+    {
+      "name": "names-another-user",
+      "why": "alice signed a veto whose userId is another account's; the session is hers.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-veto\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"userId\":\"22222222-2222-4222-8222-222222222222\",\"issuedAt\":1763704800000}",
+      "frameB64": "YXZzAgqcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izygGK1HwFKwzNoVGU31A4W92JC0IZHtB05coP5BjiGFDSrm1bRlgFL5rilZ8U5Otmx-OeMd1tQKCILRqI9af_WQ97InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS12ZXRvIiwicmVxdWVzdElkIjoia2V2c3labWdDVlBPOFRUbC0xb3FLUSIsInVzZXJJZCI6IjIyMjIyMjIyLTIyMjItNDIyMi04MjIyLTIyMjIyMjIyMjIyMiIsImlzc3VlZEF0IjoxNzYzNzA0ODAwMDAwfQ",
+      "storedIdentityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+      "expect": {
+        "verdict": "user_mismatch"
+      }
+    },
+    {
+      "name": "names-another-request",
+      "why": "A veto alice really signed, for another request than the one in the path.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-veto\",\"requestId\":\"h7QK7pJ1BOq3-NTF4Q7XFg\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"issuedAt\":1763704800000}",
+      "frameB64": "YXZzAgqcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyvLPg_TWDq5EWetgb5TiU9iYdKeWQRPlInMXRV3-rNUcAEU4QTiOugDeBeSaMcf56yd-PTdMsEimtaeu2uvjVAh7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS12ZXRvIiwicmVxdWVzdElkIjoiaDdRSzdwSjFCT3EzLU5URjRRN1hGZyIsInVzZXJJZCI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImlzc3VlZEF0IjoxNzYzNzA0ODAwMDAwfQ",
+      "storedIdentityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+      "expect": {
+        "verdict": "request_mismatch"
+      }
+    },
+    {
+      "name": "rotation-frame",
+      "why": "A 0x08 frame where a veto is expected.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-rotation\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"fromFp\":\"a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987\",\"toFp\":\"db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed\",\"issuedAt\":1763200800000}",
+      "frameB64": "YXZzAghhEQfHjUeO9Lu0Nj7EhIRLl6-LXg68SZubF6kb_6EKuu2eeuOKiWUoZId2lyNp16P8exJUgHdkf_JYuOX13M4C0qFz8zMiwkvNhXz3rmXfk0oNPx1ASAkURQY3BoHEZQp7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS1yb3RhdGlvbiIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJmcm9tRnAiOiJhNzc3OWU0M2U4YjdkOTFlMGI0YWE2OTI2ZDA4NjU5NGQ5NTc4ZTUxNjY2ZWNlYmNlNThhNzVmZjA2NDBlOTg3IiwidG9GcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzIwMDgwMDAwMH0",
+      "storedIdentityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+      "expect": {
+        "verdict": "bad_frame"
+      }
+    },
+    {
+      "name": "not-canonical",
+      "why": "A signed veto with a space after a colon.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-veto\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"userId\": \"11111111-1111-4111-8111-111111111111\",\"issuedAt\":1763704800000}",
+      "frameB64": "YXZzAgqcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izytjDkUAI2Cna9GCfX4j29wLZybgiqV7EtanD_-v1nAXte_qGsxY5IOP-Cpevo3Cg4dFZ0r-qi0_AKvLhwp35UQ57InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS12ZXRvIiwicmVxdWVzdElkIjoia2V2c3labWdDVlBPOFRUbC0xb3FLUSIsInVzZXJJZCI6ICIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpc3N1ZWRBdCI6MTc2MzcwNDgwMDAwMH0",
+      "storedIdentityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+      "expect": {
+        "verdict": "non_canonical"
+      }
+    },
+    {
+      "name": "version-3",
+      "why": "A signed, canonical veto with \"v\":3.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"recovery-veto\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"issuedAt\":1763704800000}",
+      "frameB64": "YXZzAgqcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izypBlJ6AHiPJ-xYlU2vHIpy8xcQVLyICtvBJnctRmPNEK8_516Vq3wrQF1QhY5i0xtNyvGl3J8gmGhhHshzgjKgt7InYiOjMsInB1cnBvc2UiOiJyZWNvdmVyeS12ZXRvIiwicmVxdWVzdElkIjoia2V2c3labWdDVlBPOFRUbC0xb3FLUSIsInVzZXJJZCI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImlzc3VlZEF0IjoxNzYzNzA0ODAwMDAwfQ",
+      "storedIdentityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+      "expect": {
+        "verdict": "bad_statement"
+      }
+    },
+    {
+      "name": "order-signer-before-signature",
+      "why": "Signed by bob, with the signature broken as well.",
+      "signer": "bob, then one signature bit flipped",
+      "frameB64": "YXZzAgqzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAltEKIesXRwT-lCOLb0QRE6Lwjoq5c3YFkHTPvcnAvcKsyxlA6jjfP_wiHZX0XfSO8_rfzVthVlD2XWWFRBGXQ17InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS12ZXRvIiwicmVxdWVzdElkIjoia2V2c3labWdDVlBPOFRUbC0xb3FLUSIsInVzZXJJZCI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImlzc3VlZEF0IjoxNzYzNzA0ODAwMDAwfQ",
+      "storedIdentityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+      "expect": {
+        "verdict": "signer_not_pinned_key"
+      }
+    },
+    {
+      "name": "order-signature-before-user",
+      "why": "Another userId under a broken signature.",
+      "signer": "alice, then one signature bit flipped",
+      "frameB64": "YXZzAgqcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izygGK1HwFKwzNoVGV31A4W92JC0IZHtB05coP5BjiGFDSrm1bRlgFL5rilZ8U5Otmx-OeMd1tQKCILRqI9af_WQ97InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS12ZXRvIiwicmVxdWVzdElkIjoia2V2c3labWdDVlBPOFRUbC0xb3FLUSIsInVzZXJJZCI6IjIyMjIyMjIyLTIyMjItNDIyMi04MjIyLTIyMjIyMjIyMjIyMiIsImlzc3VlZEF0IjoxNzYzNzA0ODAwMDAwfQ",
+      "storedIdentityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+      "expect": {
+        "verdict": "bad_signature"
+      }
+    },
+    {
+      "name": "order-user-before-request",
+      "why": "Another userId and another requestId.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"recovery-veto\",\"requestId\":\"h7QK7pJ1BOq3-NTF4Q7XFg\",\"userId\":\"22222222-2222-4222-8222-222222222222\",\"issuedAt\":1763704800000}",
+      "frameB64": "YXZzAgqcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyobHyEg-wWvxzmuiNDZJ2ZCPJNV2dXnwRhUDzlePStF8WHLv5NjlXEhBj_B8K4Ib7Nrmrxtf8HOoYJv4bWvjXQt7InYiOjIsInB1cnBvc2UiOiJyZWNvdmVyeS12ZXRvIiwicmVxdWVzdElkIjoiaDdRSzdwSjFCT3EzLU5URjRRN1hGZyIsInVzZXJJZCI6IjIyMjIyMjIyLTIyMjItNDIyMi04MjIyLTIyMjIyMjIyMjIyMiIsImlzc3VlZEF0IjoxNzYzNzA0ODAwMDAwfQ",
+      "storedIdentityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+      "expect": {
+        "verdict": "user_mismatch"
+      }
+    }
+  ]
+}

@@ -63,13 +63,14 @@ test("our pages never touch chrome.storage or IndexedDB, and never read or write
       assert.ok(!c.includes(call), `${f} calls ${call} — pages ask the worker (serverInfo / setServerUrl messages)`);
     }
   }
-  // …and they do ask it: the options page commits through the message, the popup reads through it.
-  assert.match(src("options.ts"), /send\(\{ type: "setServerUrl", url: canonical \}\)/);
+  // …and they do ask it: the options page chooses and confirms through the messages, the popup reads through it.
+  assert.match(src("options.ts"), /send\(\{ type: "chooseServer", choice: "own", origin: canonical \}\)/);
+  assert.match(src("options.ts"), /send\(\{ type: "confirmServer", origin: canonical, hash \}\)/);
   assert.match(src("options.ts"), /send\(\{ type: "serverInfo" \}\)/);
   assert.match(src("popup.ts"), /ask\(\{ type: "serverInfo" \}\)/);
 });
 
-test("the worker reads chrome.storage.local only through the one-time migration, and only removes from it otherwise", () => {
+test("the worker touches chrome.storage.local only to delete: the first-launch wipe and the purge", () => {
   const bg = code(src("background.ts"));
   assert.ok(!/storage\s*\.\s*onChanged/.test(bg), "no storage.onChanged listener: a write there is not a server switch any more");
   const localLines = bg.split("\n").filter((l) => /storage\s*\.\s*local\b/.test(l));
@@ -85,38 +86,18 @@ test("the worker reads chrome.storage.local only through the one-time migration,
   for (const t of legacyLines) {
     const approved =
       t === "const legacyLocal = chrome.storage.local as unknown as KvArea;" ||
-      t === "const outcome = await migrateTrustState(legacyLocal, trusted, () =>" || // worker start (F2: attested only)
-      t === "const outcome = await migrateTrustState(legacyLocal, trusted, async () => null);" || // a late install event
-      t === "const st = await loadServerState(outcome, trusted, legacyLocal);" || // F1: block-only read, no store
-      t === "if (!(await forgetPendingServer(dialBlock, trusted, legacyLocal))) return { ok: false };" || // "Not mine"
-      t === "await purgeOriginRecords(originKey, [trusted, legacyLocal, sessionSeal.purgeArea()]);";
+      t === "const storeOutcome = await wipeOldFormatOnce(trusted, [legacyLocal, sessionRaw], [coKeyDb, sealKeyDb]);" || // §12.4: delete, once
+      t === "await purgeOriginRecords(originKey, [trusted, legacyLocal, sessionSeal.purgeArea()], opts.keepTrust === true ? isTrustRecord : null);";
     assert.ok(approved, `legacyLocal reached code this fence has not approved: ${t}`);
   }
-  assert.equal(legacyLines.length, 6);
+  assert.equal(legacyLines.length, 3);
 });
 
-test("the server state reads storage.local only to block — with no trusted store, or (A16 review R3) after a start that skipped the migration — only its serverUrl; it never writes there", () => {
+test("nothing adopts a value from storage.local: the server state reads the trusted store only, and the wipe only deletes", () => {
   const ss = code(src("serverstate.ts"));
-  const reads = ss.match(/legacy\.get\(/g) ?? [];
-  assert.equal(reads.length, 1, "one read");
-  const one = ss.slice(ss.indexOf("async function previousServer(legacy: KvArea): Promise<string | null> {"));
-  assert.ok(one.startsWith("async function previousServer(") && one.includes("return otherServer((await legacy.get(SERVER_URL_KEY))[SERVER_URL_KEY]);"), "of serverUrl alone, in one helper");
-  // Its callers: the no-trusted-store branch and the unattested branch, and each turns the answer into a block that cannot
-  // be confirmed (never adopted, never offered for connecting).
-  assert.equal((ss.match(/await previousServer\(legacy\)/g) ?? []).length, 2);
-  const unavailable = ss.slice(ss.indexOf('if (outcome.kind === "unavailable") {'), ss.indexOf('if (outcome.kind === "failed")'));
-  assert.ok(unavailable.includes("await previousServer(legacy)"), "inside the no-trusted-store branch");
-  assert.ok(unavailable.includes('{ kind: "confirm", origin: previous, keepable: false }'), "as a block that cannot be confirmed (never adopted)");
-  const unattested = ss.slice(ss.indexOf('if (outcome.kind === "skipped" || mark === true) {'));
-  assert.ok(unattested.indexOf("await previousServer(legacy)") > -1, "inside the unattested branch");
-  assert.ok(unattested.indexOf('block: { kind: "confirm", origin: previous, keepable: false }') > unattested.indexOf("await previousServer(legacy)"), "as the same read-only block");
-  assert.ok(!/legacy\.set\(/.test(ss), "never a write");
-  assert.equal((ss.match(/legacy\.remove\(/g) ?? []).length, 1, "the one removal: 'Not mine' for a block read from storage.local");
-  // The migration leaf: storage.local is read in exactly one place, the owed run.
-  const tm = code(src("trustmigrate.ts"));
-  assert.equal((tm.match(/legacy\.get\(/g) ?? []).length, 1);
-  const owedRun = tm.slice(tm.indexOf("async function runOwedMigration("));
-  assert.ok(owedRun.includes("all = await legacy.get(null);"), "inside the owed run only");
+  assert.ok(!/legacy/.test(ss), "the server state takes no storage.local area at all");
+  const fw = code(src("formatwipe.ts"));
+  assert.ok(!/\.set\(/.test(fw.replace("await trusted.set({ [FORMAT_KEY]: STORE_FORMAT });", "")), "the wipe writes only its own marker");
 });
 
 // ---- A16 (security review 2026-10): storage.session holds only sealed records and the plain inventory ----
@@ -133,11 +114,12 @@ test("A16: every storage.session write in the worker goes through the seal or th
   for (const t of rawLines) {
     const approved =
       t === "const sessionRaw = chrome.storage.session as unknown as KvArea;" ||
-      t === "const sessionSeal = new SessionSeal({ session: sessionRaw, keys: idbKv(() => (globalThis as { indexedDB?: IDBFactory }).indexedDB, SEAL_DB_NAME), originKey: () => serverReady.then(() => currentOriginKey) });" ||
-      t === "const plainSession = plainSessionArea(sessionRaw);";
+      t === "const sessionSeal = new SessionSeal({ session: sessionRaw, keys: afterFormatWipe(sealKeyDb), originKey: () => serverReady.then(() => currentOriginKey) });" ||
+      t === "const plainSession = plainSessionArea(sessionRaw);" ||
+      t === "const storeOutcome = await wipeOldFormatOnce(trusted, [legacyLocal, sessionRaw], [coKeyDb, sealKeyDb]);"; // §12.4: delete, once
     assert.ok(approved, `sessionRaw reached code this fence has not approved: ${t}`);
   }
-  assert.equal(rawLines.length, 3, "the declaration and the two wrappers");
+  assert.equal(rawLines.length, 4, "the declaration, the two wrappers and the first-launch wipe");
   // No other alias of the area: nothing assigns `chrome.storage` (or a property of it) to a name.
   assert.ok(!/=\s*chrome\s*\.\s*storage\s*;/.test(bg), "no alias of chrome.storage itself");
 
@@ -150,7 +132,9 @@ test("A16: every storage.session write in the worker goes through the seal or th
     assert.match(arg, /^plainSession\s*\.\s*set\(\{ \[/, `a plain write is an object literal with computed keys this fence can read: ${l.trim()}`);
     const keys = [...arg.matchAll(/\[\s*([A-Za-z_]+)\s*\]\s*:/g)].map((k) => k[1]!);
     assert.ok(keys.length > 0, l.trim());
-    for (const k of keys) assert.ok(["NKEY", "kQuiet", "kLast"].includes(k), `plainSession.set writes ${k}, which is not in the plain inventory`);
+    // kFork: the per-origin `forkSeen` marker. LOST_KEY: `capturesLost`, the number of
+    // captures a lock nobody was asked about deleted (design §4.4, decided on 2026-11-17).
+    for (const k of keys) assert.ok(["NKEY", "kQuiet", "kLast", "kFork", "LOST_KEY"].includes(k), `plainSession.set writes ${k}, which is not in the plain inventory`);
   }
   assert.equal((bg.match(/plainSession\s*\.\s*set\(/g) ?? []).length, plainSets.length, "one plain write per line");
   // Every write through the seal names a sealed kind, as a literal.

@@ -7,6 +7,12 @@
     <!-- A14 review N6: the app-fill confirm hides other apps' overlay windows while it is shown
          (Window.setHideOverlayWindows, API 31+). A normal permission, granted at install. -->
     <uses-permission android:name="android.permission.HIDE_OVERLAY_WINDOWS" />
+    <!-- The in-app QR scanner (onboarding and trust design §12.1): asked only when the person opens a scanner. A phone
+         without a camera still installs the app and pastes the link instead, so the camera is not required. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+    <!-- The CAMERA permission makes stores infer a REQUIRED back camera unless it is declared otherwise. -->
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <!-- Package visibility (API 30+). Still no QUERY_ALL_PACKAGES (that carries Play-policy weight
          and isn't needed here); three narrower grants instead:
@@ -59,7 +65,7 @@
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
-        android:label="andvari"
+        android:label="${appLabel}"
         android:networkSecurityConfig="@xml/network_security_config"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
@@ -74,10 +80,30 @@
             android:exported="true"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|density|uiMode|locale|fontScale"
             android:windowSoftInputMode="adjustResize"
+            android:launchMode="singleTask"
+            android:taskAffinity=""
             android:theme="@style/Theme.Andvari">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Onboarding and trust design §12.1, §0.3: the ONE app link, https://andvaripass.com/l (invites and
+                 connect links). There is deliberately no /d filter: a tapped device link must only reach the
+                 scriptless page (T2-B1). The host and path are spec/public-instance.json's appLinks.android, pinned
+                 by AppLinkManifestTest. singleTask: the activity is always the root of
+                 andvari's own task, so no app can start it inside its own task and lay a look-alike over it, and a link
+                 tapped while the app is open still reaches onNewIntent. The file pickers and Custom Tabs are started
+                 from it into its task; the autofill activities are separate activities in the requesting app's task.
+                 An empty taskAffinity: on Android 10 an app can create a task under
+                 another app's affinity ahead of time, and a singleTask activity with the package's affinity would be
+                 started into it; with none, andvari's task is found only by this activity itself. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
+                <data android:host="andvaripass.com" />
+                <data android:path="/l" />
             </intent-filter>
         </activity>
 
@@ -87,7 +113,7 @@
         <service
             android:name="io.silencelen.andvari.app.autofill.AndvariAutofillService"
             android:exported="true"
-            android:label="andvari"
+            android:label="${appLabel}"
             android:permission="android.permission.BIND_AUTOFILL_SERVICE">
             <intent-filter>
                 <action android:name="android.service.autofill.AutofillService" />
@@ -102,7 +128,7 @@
             android:excludeFromRecents="true"
             android:noHistory="true"
             android:windowSoftInputMode="adjustResize"
-            android:theme="@style/Theme.Andvari.Translucent" />
+            android:theme="@style/Theme.Andvari.FillWindow" />
         <!-- "Save to andvari?" confirm/unlock overlay (autofill onSaveRequest). -->
         <activity
             android:name="io.silencelen.andvari.app.autofill.SaveConfirmActivity"
@@ -110,7 +136,7 @@
             android:excludeFromRecents="true"
             android:noHistory="true"
             android:windowSoftInputMode="adjustResize"
-            android:theme="@style/Theme.Andvari.Translucent" />
+            android:theme="@style/Theme.Andvari.FillWindow" />
         <!-- Security review 2026-10, A14 (F7): the one-tap confirm before an androidapp:// login fills
              an app that is neither a system app nor Play-installed. Result-returning dataset auth. -->
         <activity
@@ -118,7 +144,7 @@
             android:exported="false"
             android:excludeFromRecents="true"
             android:noHistory="true"
-            android:theme="@style/Theme.Andvari.Translucent" />
+            android:theme="@style/Theme.Andvari.FillWindow" />
         <!-- Android review 1, ruling 1: the confirm before a payment card fills an app that is not a verified
              browser. Result-returning dataset auth, like the app-fill confirm. -->
         <activity
@@ -126,14 +152,29 @@
             android:exported="false"
             android:excludeFromRecents="true"
             android:noHistory="true"
-            android:theme="@style/Theme.Andvari.Translucent" />
+            android:theme="@style/Theme.Andvari.FillWindow" />
+        <!-- Andvari's own chooser, opened by the one generic row a result carries for
+             an app that is not a verified browser; the names, and the confirm, are shown here. Result-returning
+             dataset auth, like the confirms. -->
+        <activity
+            android:name="io.silencelen.andvari.app.autofill.FillChooserActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@style/Theme.Andvari.FillWindow" />
         <!-- "Trust {browser} to fill here" confirm, launched from the autofill dropdown row. -->
         <activity
             android:name="io.silencelen.andvari.app.autofill.TrustBrowserActivity"
             android:exported="false"
             android:excludeFromRecents="true"
             android:noHistory="true"
-            android:theme="@style/Theme.Andvari.Translucent" />
+            android:theme="@style/Theme.Andvari.FillWindow" />
+
+        <!-- The clipboard's clear when the process was ended before its timer ran
+             (an inexact alarm, no permission). Not exported: only this app's own PendingIntent reaches it. -->
+        <receiver
+            android:name="io.silencelen.andvari.app.ClipboardClearReceiver"
+            android:exported="false" />
 
         <!-- ProfileInstaller auto-init runs in the androidx.startup provider BEFORE
              Application.onCreate and has caused immediate startup crashes on some Android 15

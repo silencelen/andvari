@@ -39,3 +39,11 @@ tasks.shadowJar {
     archiveClassifier.set("")
     mergeServiceFiles() // same as :server — keep ServiceLoader metadata intact when deps merge
 }
+
+// The zero-key tripwire on this module's tests: test machinery, in the
+// test source set only, never in the jar.
+kotlin.sourceSets.getByName("test") {
+    kotlin.srcDir(rootProject.file("core/src/jvmTripwire/kotlin"))
+    resources.srcDir(rootProject.file("core/src/jvmTripwire/resources"))
+}
+apply(from = rootProject.file("gradle/zero-key-tripwire.gradle.kts"))

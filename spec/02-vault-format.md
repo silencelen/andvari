@@ -82,9 +82,19 @@ JSON (not canonical — round-trips freely), `type` inside the ciphertext:
   },
   "attachments": [                       // mirrors attachmentIds; holds the SECRET half
     { "id": "uuid", "name": "scan.pdf", "size": 12345, "fileKey": "base64url(32B)" }
-  ]
+  ],
+  "logHead": { "seq": 12, "hash": "…64 hex…" }   // optional, items in shared vaults only (§10.5)
 }
 ```
+
+**`logHead` (gossip of the vault log).** A writer SHOULD put the shared vault's verified log head
+(§10.5) into every item it writes. Only key holders can read it and the server cannot change it.
+It is a **hint to fetch, never a verdict**: any writer, or a removed member working with the
+server, can put any value there. A reader that decrypts an item whose `logHead.seq` is above its own
+verified head, or whose hash differs at a position it has verified, fetches the log; if nothing new
+comes, the vault's details note "An item mentions history the server hasn't shown" and, while that
+hint is unresolved, the member list is marked "may be incomplete". The vault's state never changes on
+an item head alone. Clients that do not know the field preserve it as an unknown key.
 
 **`login.passwordHistory` — two writers (amendments 2026-08-18, 2026-11-11); otherwise reserved.** The
 shape above is fixed (so the field could be adopted without a formatVersion bump) and every
@@ -355,93 +365,38 @@ Vault { id uuid, type "personal"|"shared", rev, createdAt, metaBlob base64url }
 ```
 `metaBlob` = envelope under VK with AD `andvari/v1|vaultmeta|{vaultId}`, plaintext
 `{"name":"Family","icon":"…","metaV":N}` — vault display names are ciphertext; the server
-knows vaults only as ids. `metaBlob` is **owner-rewritable** (rename, spec 03 §11) under the
+knows vaults only as ids. `metaBlob` is **owner-rewritable** (rename, spec 03 §11.3) under the
 same VK/AD; its plaintext carries a monotonic `metaV` counter (clients warn-and-keep-newer
-when a delivered metaBlob's counter regresses); the AD deliberately excludes `rev`. Grants
-(per member): `{ vaultId, userId, role "owner"|"writer"|"reader", rev, revokedAt,
-revokedReason, wrappedVk XOR sealedVk }` per spec 01 §6 — normally exactly one of
-`wrappedVk` (owner/personal, under UVK) or `sealedVk` (member, `crypto_box_seal` to the
-member identityPub) is set; the other is empty (a post-transfer owner grant MAY carry both).
-`revokedReason ∈ member_remove|member_leave|vault_delete` (NULL, pre-v4, reads as
-`member_remove`); vault RESTORE resurrects only `vault_delete` revocations made at the
-matching `deletedAt`. Vault rows also carry lifecycle state:
-`deletedAt/purgeAt/purgedAt/deletedBy/deleteId/deleteProof/restoreProof` (soft-delete +
-grace + purge — vault rows are NEVER hard-deleted; `vaultId` is never recycled, normative; an
-account deletion, spec 03 §13, purges the vaults the account alone held without a grace, and
-their rows stay too)
-and `transferSeq/pendingOwnerId/pendingOfferId/pendingOfferProof/pendingOfferExpiresAt/
-pendingOfferSetAt/lastTransferOfferId/lastTransferAcceptProof`. Roles are
-**server-enforced only** (crypto cannot stop a reader who has VK from encrypting; the
-server rejects writes without writer role). Membership (which userId holds which role on
-which vaultId) is server-visible via the grants row; membership-management audit events
-record only ids and roles, never names or decrypted content.
+when a delivered metaBlob's counter regresses); the AD deliberately excludes `rev`.
 
-**`type` is a SERVER label, and it MUST NOT choose the personal vault (security review 2026-10,
-root cause A §4, superseding the 2026-09-13 H64 amendment below).** The personal vault is the vault
-named by the UVK-authenticated `AccountKeys.personalWrap` (spec 01 §6) and nothing else. The
-`type` label is ignored for every decision: the default save destination, the usage-ledger key,
-copy-to-Personal, the import target, the "(shared)" tag (now `vaultId != personalVaultId`) and the
-sort order. An account with no openable wrap has no personal vault (no default destination, usage
-paused, a banner saying so).
+**Grants** (per member): `{ vaultId, userId, role "owner"|"writer"|"reader", rev, addedAt, revokedAt,
+revokedReason, wrappedVk, signedGrant }` (spec 01 §6). An owner grant carries `wrappedVk` (the owner
+wrap under the UVK); a member grant carries `signedGrant` (the sealed 0x01 grant of its `add`) and,
+once the member posted a self-wrap, also `wrappedVk`. `revokedReason ∈ member_remove | member_leave |
+vault_delete`; a `restore` re-activates exactly the grants still revoked with `vault_delete`, and a
+`leave` during the grace rewrites the leaver's `vault_delete` to `member_leave` (spec 03 §10.3).
 
-**Once-per-account designation (root cause A §8.5, as amended by the A5 review, H-1, and re-review,
-A5b).** There is NO automatic pick. A client keeps the wrap it last authenticated in its own local
-device state (it is UVK-sealed, so caching it is safe), which MUST outlive the offline cache: an
-in-memory cache, an org-forbid policy, a policy-flip or revocation purge and a sign-out leave it in place
-(native: a file in the (origin, user) namespace beside the self-identity pin; web: localStorage; the
-extension: its own IndexedDB, since A15; storage.local before, which content scripts can write). When the server serves no wrap:
-- and the device has a cached wrap: the wrap was WITHHELD — an anomaly the client surfaces; the cached
-  wrap stands, and no question is asked and no label consulted;
-- and the device has none: the client asks "Which vault is your Personal vault?", offering EVERY held
-  vault whose VK opened from a UVK wrap on the caller's own grant row (no seal on the row), with the
-  vault this device last used first and the rest by `vaultId`. The server's label and role neither
-  filter nor order the choices, and only the human's CONFIRMED answer mints the wrap (`PUT
-  /account/personal-wrap`, no reauth while none is stored; `409 personal_wrap_exists` sends the human to
-  the reauthed re-designation).
+**Shared vault rows** carry the log head (`logSeq`, `logHash`), the lifecycle state (`deletedAt`,
+`purgeAt`, `purgedAt`, `deletedBy`, `deleteId`; after the purge the tombstone `finalHead`), and the
+pending ownership offer (`pendingOfferId`, `pendingOwnerId`, `pendingOfferExpiresAt`). Every one of
+these mirrors the vault's signed log (§10), which is what clients act on; the columns exist for the
+server's own checks. Vault rows are NEVER hard-deleted (a purged vault's log rows go a year after
+its purge; its row stays), and `vaultId` is never recycled (normative). Roles are **server-enforced** on writes (crypto
+cannot stop a reader who has VK from encrypting; the server rejects writes without writer role).
+Membership is server-visible via the grants rows and the log; audit events record only ids and roles,
+never names or decrypted content.
 
-Every option, in the question and in the Settings re-designation list, shows who else the server reports
-as holding the vault (`GET /vaults/{id}/members`, minus the caller) and whether this account created it or
-received it by transfer (the vault row's `lastTransfer.newOwnerUserId` is the caller), and marks the vault
-this device already had. Choosing is two steps: the client describes the choice (no mint), then the human
-confirms a screen that names the vault and every co-holder; only that confirmation mints, once. The
-co-holder list and the transfer record are server-reported: they inform the human and decide nothing.
-
-When the server DOES serve a wrap:
-- it opens and names the vault this device cached (or the device has none): that is the personal vault,
-  and the device caches it;
-- it opens but names a DIFFERENT vault than the cached one (a re-designation on another device, or the
-  server replaying an older wrap): the device does NOT switch. The cached wrap stays in force and the
-  client shows a notice naming both vaults; the human either confirms the change (the served wrap, already
-  UVK-authenticated, becomes the cached one; nothing is minted) or keeps the current vault through the
-  reauthed re-designation, which replaces the server's copy;
-- it does not open: an anomaly. A cached wrap that opens stays in force (junk never discards a valid
-  local copy) and the client says so; with none, there is no personal vault until a re-designation.
-The design's original auto rule ("one vault labelled personal, own wrap, named Personal") was removed:
-whenever the server withheld the wrap it let the label decide again, and the client then minted a
-genuine wrap for that pick. Re-designation (`PUT /account/personal-wrap` with `currentAuthKey`, owner
-decision Q9) repairs a wrong answer. Vectors: `spec/test-vectors/personalwrap.json` (`migration`).
-
-**Historical (2026-09-13 amendment, audit H64), kept for the record.** `type` is plaintext in the vault row and is bound into no AD — the
-vaultMeta AD is `andvari/v1|vaultmeta|{vaultId}` and nothing else — so after enrollment nothing a
-client holds authenticates WHICH vault is its own: `personalVaultId` is rebuilt on every unlock
-from the first row the server labels `personal` whose key that client happens to hold. A client
-MUST therefore **refuse to adopt as its personal vault any vault whose VK arrived by MEMBER grant
-(`sealedVk`)**, whatever the server calls it. The asymmetry is the whole argument: a `sealedVk` is
-ANONYMOUS — anyone holding the member's public identity key can mint one — and the key inside it
-is by construction one that at least one other person already has; a `wrappedVk` opens only under
-that member's own UVK with AD `andvari/v1|vk|{vaultId}|{userId}`, which is unforgeable evidence
-that the client itself sealed that key for itself. A personal vault is always wrapped (minted
-locally at enrollment, re-wrapped and never re-sealed at password change), so the refusal costs an
-honest account nothing. Fail-closed: when every held candidate is member-granted the client keeps
-NO personal vault — §8.2's ledger then degrades to "—" (never an error) and a save with no
-explicit destination fails loudly rather than filing the user's item into somebody else's shared
-vault. Without the rule, a hostile server that withheld the real personal row and relabelled a
-shared vault would have moved the §8.2 usage key onto a VK every other member of that vault holds.
-
-> **Residue CLOSED (security review 2026-10, root cause A, branch A5).** The H64 rule could not
-> tell an OWNER-CREATED SHARED vault (or a member self-wrap whose seal the server stripped and whose
-> role it relabelled `owner`) from a personal one. The personal wrap closes it without touching the
-> vaultMeta plaintext: a `vk-personal` wrap exists only for the vault the account itself designated.
+**The personal vault.** The account genesis (spec 01 §5.4) names it (`personalVaultId`) forever, and
+the personal wrap (spec 01 §6.1) carries its key. It never has members and has no log: the server
+refuses members on it, and no client builds a log entry for it. `type` is a SERVER label and MUST NOT
+choose the personal vault: the default save destination, the usage-ledger key, copy-to-Personal, the
+import target, the "(shared)" tag (`vaultId != personalVaultId`) and the sort order all follow the
+genesis and the wrap. A served wrap that opens and names `personalVaultId` is in force on any device
+with no question; a withheld or unopenable wrap leaves "no personal vault" with an anomaly (no default
+destination, usage paused, a banner saying so), and a device's cached wrap (device state that outlives
+the offline cache) still stands. Exactly one personal wrap ever exists, so no superseded wrap can be
+replayed, and the genesis vault's key has never been given to anyone. Vectors:
+`spec/test-vectors/personalwrap.json`, `accountgenesis.json`.
 
 ## 5. Server-visible plaintext — the zero-knowledge contract
 
@@ -451,41 +406,173 @@ spec violation.
 
 | Surface | Fields |
 |---|---|
-| users | userId, email, displayName, kdfSalt, kdfParams, verifier(argon2id str), **wrappedUvk** (UVK ciphertext under the master key — opaque to the server, stored so a fresh device can unlock), identityPub, **encryptedIdentitySeed** (identity-seed ciphertext under the UVK — same story), isAdmin, status, mustChangePassword, **recoveryConfirmed** (boolean flag, plaintext metadata — the durable, cross-device capture-confirmation signal, design §F.9; not a secret; 0 until the user confirms saving their recovery phrase), **escrowPolicy** ('required'\|'waived'\|NULL pre-v8 — the member's enforced recovery posture, persisted from the invite at register; plaintext metadata for admin reconciliation, design §F.4), createdAt, server-TOTP columns (totpSecret, totpPendingSecret, totpEnrolledAt, totpLastStep — a server-side authenticator secret by design, never vault data; spec 03 §2). An account deletion (spec 03 §13) deletes the row, after every row that references it |
-| invites | tokenHash, **invitee email in plaintext** (a person who may not have an account yet — accepted: invites are short-lived and admin-created), isAdmin, createdAt, expiresAt, usedAt, **escrowPolicy** ('required'\|'waived' — the admin's per-invite recovery posture, plaintext metadata; read server-side at register, design §F.4). An account deletion deletes every row naming the account's address, used or not, and the unused rows it minted |
-| devices | deviceId, userId, platform, **name (user-chosen device label, plaintext)**, clientVersion, createdAt, lastSeenAt, revokedAt |
-| sessions | sessionId, userId, deviceId, hashed access+refresh tokens, access/refresh expiries, refreshConsumedAt, createdAt, revokedAt |
-| vaults | vaultId, type, rev, createdAt (names/icons are ciphertext); **lifecycle** — deletedAt/purgeAt/purgedAt/deletedBy/deleteId, transferSeq, pendingOwnerId/pendingOfferId/pendingOfferExpiresAt/pendingOfferSetAt/lastTransferOfferId (ids + epoch times), and opaque VK-derived MACs deleteProof/restoreProof/pendingOfferProof/lastTransferAcceptProof (PRF outputs — reveal nothing about VK) |
-| grants | vaultId, userId, role, addedAt (join time, epoch ms; NULL on pre-v3 rows, COALESCEd to 0 in summaries), wrapped/sealed VK ciphertext, signedGrant (schema v14, security review 2026-10: the member's sealed v2 grant, opaque like sealedVk — the server learns only that one exists, which it already knows from the call), rev, revokedAt, revokedReason (revoked rows are retained — the server sees WHEN and WHY a member lost access: remove / leave / vault-delete), and removeProof/removeNonce (opaque VK-derived MAC + nonce, stored on a removal or — v2, branch A7 — a leave for durable relay to the target's devices — reveal nothing about VK), removeProofV/removeIssuedAt (schema v15: the proof version and the actor's clock bound into a v2 proof; the server learns when the actor's client says it acted, which it already sees as revokedAt) |
-| removal_nonces | vaultId, nonce, usedAt (schema v15, branch A7): every removal/leave nonce a vault ever stored, kept across re-adds so the server can refuse a reused one (hygiene only); nonces are random and reveal nothing about VK |
-| retired_ids | idHash (schema v16, account deletion, spec 03 §13): lowercase-hex SHA-256 of a deleted account's userId and of the pseudonym its retained audit rows carry, so register can refuse both for good. A digest of a random id, no date: it tells only someone who already holds an id that the id was retired |
+| users | userId, email (`emailNorm`), displayName, kdfSalt, kdfParams, verifier(argon2id str), **wrappedUvk** (UVK ciphertext under the master key — opaque to the server, stored so a fresh device can unlock), identityPub, **encryptedIdentitySeed** (identity-seed ciphertext under the UVK — same story), **genesis** (the account genesis frame, spec 01 §5.4: public, signed), **personalVaultId** (the account's one personal vault, copied at register from the verified genesis, spec 03 §14.3: a mirror for the server's own use, as `recovery` is, and public in the genesis anyway), role (`operator`\|`member`, the operator unique), status (`active`\|`disabled`), disabledAt, **recovery** (`private`\|`operator`: the server's mirror of the posture, spec 03 §3.1), requireLink, **recoveryConfirmed** (boolean flag, plaintext metadata — the durable, cross-device capture-confirmation signal; not a secret), quota overrides, ageConfirmed (a boolean, nothing more), createdAt, **registeredVia** (`ticket`\|`link`\|`enrol`\|`setup`: the `auth` kind the account registered with; the daily account maximum of spec 03 §14.4 counts from it, not from audit rows), server-TOTP columns (totpSecret, totpPendingSecret, totpEnrolledAt, totpLastStep — a server-side authenticator secret by design, never vault data; spec 03 §2). An account deletion (spec 03 §13) deletes the row, after every row that references it |
+| devices | deviceId, userId, platform (the kind the row was made as, set once when the row is made and never changed; a row made as `web` is a browser's row, whose tabs each hold a session of their own, and the one-session rule of a sign-in reads this, not what the caller says, spec 03 §2), **name (user-chosen device label, plaintext)**, clientVersion, how (`registered`\|`password`\|`linked`\|`recovered`), linkedFrom, **deviceSecretHash** (hex SHA-256 of the device's own secret, spec 03 §16.8; cleared by a revoke), createdAt, lastSeenAt, revokedAt, signedOutAt |
+| sessions | sessionId, userId, deviceId, hashed access+refresh tokens, access/refresh expiries, refreshConsumedAt, **clientPlatform** (the `X-Andvari-Client` platform of the request that minted the session: every operator route refuses a `web` session, spec 03 §1), **passwordAt** (set when a password login minted the session, and carried over by a refresh; until 2026-11-17 it opened a ten-minute window in which a first two-step setup needed no password proof, and since then no rule reads it: every setup carries the proof, spec 03 §2), createdAt, revokedAt |
+| session_chains | sessionId, chainId: the refresh chain a session a refresh made belongs to, named by the id of the session a sign-in, registration, recovery commit or pickup minted at the chain's start, so that a sign-in naming the session it replaces by an older token of that chain ends the chain as it stands now (spec 03 §2). A session with no row is a chain of its own (every chain's first session, and one made before 2026-11-17 or by a server that does not keep the table). No reference to `sessions`; a row whose session is gone is removed by the janitor, and an account deletion removes its sessions' rows |
+| vaults | vaultId, type, rev, createdAt, metaBlob (ciphertext); for shared vaults the log head (with **logAt**, the head entry's `at`), lifecycle (deletedAt/purgeAt/purgedAt/deletedBy/deleteId, and the tombstone's head as **finalSeq**, **finalHash**, **finalAt**, copied from the log head at the purge) and the pending offer (ids + epoch times), all mirrors of the signed log (§4); **logState**, the server's cached state of the verified log, so an append need not replay the log from genesis |
+| vault_log | vaultId, seq, hash, frame, actor, kind, at, storedAt (§10): every signed entry, in the clear. The server sees the full membership history — who added, removed, offered, accepted, deleted, restored or left, and when by both the signer's and its own clock. Rows outlive the vault's purge by one year (spec 03 §11.1) |
+| grants | vaultId, userId, role, addedAt, wrappedVk (ciphertext under the holder's UVK), signedGrant (the member's sealed 0x01 grant, opaque), rev, revokedAt, revokedReason (revoked rows are retained — the server sees WHEN and WHY a member lost access: remove / leave / vault-delete) |
+| connections | a, b (userIds, `a < b`), createdAt: who has connected with whom through a link (spec 03 §15.8). Kept until either account is deleted |
+| links | linkId, kind, creatorUserId, createdAt, expiresAt, offer (envelope, opaque), tokenHash, boundEmailHash (the keyed hash of the address an enrol link was minted for, or NULL), state, answererUserId, answer (envelope, opaque), answeredAt, deliveredAt, reveal (the creator's code nonce, public by design), **stateChangedAt** (when the row left `open`: the janitor deletes it 30 days after that, spec 03 §15.8). The server sees who made a link, who answered and when, never `s` or the offer's or answer's contents |
+| device_links | linkId, userId, **deviceId** (the existing device E that created the link, recorded as the new device's `linkedFrom`, spec 03 §16.6), state, expiresAt, the claim (nPub, name, platform, commitN, mac), nonceE, nonceN, proofHash, outer and inner (opaque), approveMac, **approvedBy** (the device whose session approved the link: the pickup requires it, and the creating device, to be unrevoked, and revoking either deletes the link, spec 03 §16.6, §16.7), timestamps. Deleted at pickup, cancel, timeout, or the revoke of the device that created or approved it |
+| instance_setup | instanceId and the setup name (one row): written by `andvari setup`, or created at first boot if setup never ran (spec 03 §17.5); served in `GET /instance`'s setup block until card 0 is stored |
+| instance_cards, recovery_rotations | the instance card frames and the 0x08 rotation statements (public, signed), with their hashes and storedAt; on each card **operatorId**, **name** and **recoveryFp**, mirrors of the verified card's fields for the server's own checks and notices; on each rotation **fromFp** and **toFp**, mirrors of the verified statement, for the rotation-chain check of spec 03 §17.3 |
+| signup_codes | emailHash (the address's **keyed hash**, below), codeMac, expiresAt, attempts — never the address or the code |
+| signup_tickets | ticketHash, emailHash (the keyed hash), expiresAt, usedAt |
+| recovery_requests | requestId, userId (NULL on a decoy, spec 03 §18.1), emailHash (the keyed hash, a decoy's too; read back by nothing), rPub, pollHash, platform, codeMac, **codeExpiresAt** (the emailed code's expiry, spec 03 §18.1), attempts, state, createdAt, verifiedAt, holdEndsAt, sealed (the operator's sealed 0x09 answer, opaque), **commitHash** (the `hex64` hash of the answer's commit value, uploaded beside it, spec 03 §18.6; served in the poll's `ready` answer), **cancelledAt** (when the account's owner cancelled a request whose mailed code was not entered: a password change, the recovery setting switched to `private`, or a recovery; the state stays `unverified`, so the poll answers as before, and the cancel is told at the code step, spec 03 §18.2; added 2026-11-17) — private instances only. An account's deletion leaves its requests whose code was not entered as decoys (userId, codeMac and cancelledAt cleared) until they expire, so their polls answer as before; it deletes the others. Wrong commit values are audited, never counted (rule of 2026-11-16: the value is 32 random bytes, so a limit of attempts protects nothing, and it let a damaged upload or anyone who saw a poll secret cancel the request), so there is no count column |
+| recovery_mailbox_values | **valueHash** (`hexLower(HMAC-SHA-256(serverSecret, "andvari/v2\|recovery-mailbox-value\|" + emailHash + "\|" + value))`, the key of spec 03 §18.1's code MAC; never the value), **emailHash** (the keyed hash of the address whose code mail carried the value), **expiresAt** (seven days after that mail) — private instances only (spec 03 §18.1, added 2026-11-17). A row is stored only beside a real request's code mail, so a decoy stores none. It goes when its value is used, when it expires (the janitor; an expired value is refused before then), and with every other row of its address when that address's account is deleted (by its owner or by the operator), its recovery (kit or assisted) completes, or it switches to the private posture; a password change keeps them. Its rows tell how many code mails went to an address in the last seven days and were not used |
+| mail_outbox | id, template, **recipient address**, rendered subject, text and **html** (the HTML alternative, spec 03 §14.5), createdAt, attempts, nextAttemptAt, lastErrorClass, **discardAt** (when the row is given up unsent). A queued mail's body can contain a code, and a recovery request's code mail also its mailbox value (spec 03 §18.1): both are in clear in the row until the mail is sent or its code expires (15 minutes), so the row, body included, is deleted on delivery or on give-up: the moment a message is sent; a code message unsent when its code expires; nothing stays past 24 hours. The `account_deleted` message keeps a deleted account's address here until it is sent (spec 05 R31) |
+| retired_ids | idHash (account deletion, spec 03 §13): lowercase-hex SHA-256 of a deleted account's userId and of the pseudonym its retained audit rows carry, so register can refuse both for good. A digest of a random id, no date: it tells only someone who already holds an id that the id was retired |
 | items | the Item row of §1 — ids, rev, server timestamps, flags, formatVersion, attachmentIds, ciphertext blob, ciphertext byte size |
 | item_versions | itemId, rev, blob, formatVersion, archivedAt (bounded to the newest 10 per item, §7) |
 | changes | rev, kind, entityId, vaultId, at — the global sync feed (pure metadata; reveals per-vault write timing/volume) |
-| mutations | (deviceId, mutationId) → resultJson, createdAt, userId — idempotency replay cache; resultJson holds per-mutation status/rev/reason and, for a conflict, the stored item's ids and revs, no vault content (rows written before 0.30.0 may still hold the item until they age out); at most the device's newest 1,000 rows. userId (schema v17, indexed) is the pushing account: the janitor prunes a device row long before its journal rows, and an account deletion (spec 03 §13) must still find them |
+| mutations | (deviceId, mutationId) → resultJson, createdAt, userId — idempotency replay cache; resultJson holds per-mutation status/rev/reason and the ids the mutation named, no vault content (a replayed conflict reads its item at answer time, spec 03 §5); at most the device's newest 1,000 rows. userId (indexed) is the pushing account, so an account deletion (spec 03 §13) still finds rows of a pruned device |
 | attachments | attachmentId, itemId, vaultId, ciphertext size, sha256(ciphertext), header, createdAt (filenames + file keys are inside item ciphertext) |
-| escrow | userId, sealed blob, fingerprint (of the recovery key), updatedAt |
+| escrow | userId, sealed blob, fingerprint (of the recovery key), updatedAt — operator-posture accounts on private instances only. Only the version-3 form is stored (spec 04 §3): every route that stores a copy refuses one whose size is not `455 + E` bytes, `E` the length of the unpadded base64url of the account's `emailNorm` (`400 escrow_wrong_form`, spec 03 §3.1, §3.2, §14.3). A row an earlier development build stored in the old form is left as it is at start: the server cannot open a copy, and the offline tool and the fleet check name it |
+| account_state | userId, sealedState (UVK ciphertext, §9), seq (the compare-and-set counter), **updatedAt** (when the blob was last written: an operational timestamp like `escrow.updatedAt`, served by no route; the server sees each write as it happens anyway) |
+| personal_wrap | userId, vaultId, wrappedVk (UVK ciphertext) |
 | usage_ledger | userId, **sealedUsage** (the per-user "last used" map sealed under the VK(personal)-derived usageKey (§2/§8.2) — ciphertext, opaque; AD `andvari/v1\|usage\|{userId}`, §2), updatedAt — the staleness-ranking input (§8.2). ONE aggregate blob by design, never per-item rows: the server sees THAT a user's ledger changed and its size, never WHICH login |
-| member_recovery | userId, **recoveryWrappedUvk** (the UVK sealed under the member's recovery-secret-derived wrap key — ciphertext, opaque; AD `andvari/v1\|recovery-uvk\|{userId}`, §2), **recoveryVerifier** (one-way `crypto_pwhash_str(recoveryAuthKey)` — a DB leak is not a replayable recovery, exactly as the login verifier), **pieceId** (opaque random id of the current piece — rotation/confirm binding, spec 03 §12; not a secret), **setupDeviceId** (which device committed it — legacy-confirm scoping), updatedAt — the per-member self-service recovery row (spec 04 §per-member / design §F); ZK-clean, the symmetric counterpart to `escrow` |
-| audit | event type, userId, deviceId, ip, timestamp, coarse metadata (never names, URIs, emails of existing users, or any decrypted content). After an account deletion (spec 03 §13) the account's retained security rows, and its activity rows about vaults that outlive the deletion, carry a random **pseudonym** in place of its userId (a UUIDv4 naming no user, not derived from the userId or email, its mapping stored nowhere; purged 90 days after the deletion), its rows about vaults the deletion purged and its lookups are gone, other rows' meta names the pseudonym, and a row written later for the gone userId carries no userId (meta prefixed `deleted_account`) |
-| policies | org policy JSON (min versions, KDF policy, lock timeouts…) |
-| meta | key/value operational markers (schemaVersion, lastPublicRequestAt…) |
+| member_recovery | userId, **recoveryWrappedUvk** (the UVK sealed under the member's recovery-secret-derived wrap key — ciphertext, opaque; AD `andvari/v1\|recovery-uvk\|{userId}`, §2), **recoveryVerifier** (one-way `crypto_pwhash_str(recoveryAuthKey)` — a DB leak is not a replayable recovery, exactly as the login verifier), **pieceId** (opaque random id of the current kit, spec 03 §12; not a secret), **setupDeviceId**, updatedAt — the recovery-kit row (spec 04 §6); ZK-clean |
+| audit | event type, userId, deviceId, ip, timestamp, coarse metadata (never names, URIs, emails, or any decrypted content). After an account deletion (spec 03 §13) the account's retained security rows, and its activity rows about vaults that outlive the deletion, carry a random **pseudonym** in place of its userId (a UUIDv4 naming no user, not derived from the userId or email, its mapping stored nowhere; purged 90 days after the deletion), its rows about vaults the deletion purged are gone, other rows' meta names the pseudonym, and a row written later for the gone userId carries no userId (meta prefixed `deleted_account`) |
+| policies | the operator policy JSON (min versions, KDF policy, lock timeouts, quota defaults, the tightened sign-up values) |
+| meta | key/value operational markers (schemaVersion…) |
+
+**The keyed hash of an address** (rule of 2026-11-17, kept since 2026-11-18). Every record the server
+keeps of an address a person typed, other than an account's own `email` and a queued mail's recipient,
+is `hexLower(HMAC-SHA-256(K, "andvari/v2|address|" + emailNorm))` with
+`K = HMAC-SHA-256(enumSecret, "andvari/v2|address-record-key")` and `enumSecret` the bytes of
+`ANDVARI_ENUM_SECRET` (the 0600 env file `andvari host init` writes): the `emailHash` of `signup_codes`,
+`signup_tickets`, `recovery_requests` and `recovery_mailbox_values`, the `boundEmailHash` of `links`, and the
+`addr=` prefix of the `signup_start`, `signup_verify_fail` and `login_wait` audit rows and their journal lines. The same
+address gives the same value, so rows still tie together; without the secret, a guessed address
+confirms nothing. K is a key of its own, so the value shares nothing with the fake salts the same secret
+makes for `prelogin`, which anyone can ask for. Rows written under an earlier secret (a restore beside
+another env file, or a changed secret) no longer tie to new rows; nothing else changes. Rows written
+before 2026-11-18 keep the plain `hex SHA-256(emailNorm)` until they expire; the server still finds a
+mailbox value (seven days) and an enrol link's binding (the link's own life) in that form, and lets a
+sign-up code or ticket in flight at the upgrade (fifteen and thirty minutes) be asked for again.
+
+**Audit types** (ids only, never an email). This is the whole list: the server serves it, sorted, as
+`GET /admin/status`'s `auditKinds` (spec 03 §7.3), and a test reads the server's source to pin that it
+writes exactly these. Sessions and sign-in: `register`, `login`, `login_fail`, `logout`, `session_end`,
+`refresh_grace` (a replaced refresh token presented again within the sixty-second grace and answered with the
+same pair; one row per answer, the account, the device and the caller's address only), `refresh_reuse`,
+`reauth_fail`; a refusal by a back-off, **one row per key per fifteen minutes, never one per refused request**
+(rule of 2026-11-17; the first refusal in each period writes it, the others write nothing):
+`login_wait` (a sign-in or a device-link pickup refused by its address's back-off; the account when the address
+has one, the caller's address, meta `addr=` and the first 8 hex characters of the address's keyed hash, then
+` at=login` or ` at=pickup`), `reauth_wait` (a password proof refused by its device's back-off; the account, the
+device, meta `route=` and the route's row), `totp_verify_wait` (a two-step code on a session refused by its
+device's back-off; meta: where, as `totp_verify_fail`'s); credentials and the second factor: `password_change`,
+`password_change_fail`, `totp_enroll`, `totp_rotate`, `totp_disable`, `totp_verify_fail`,
+`totp_setup_reauth_fail`, `require_link_set`; self-recovery: `recovery_self_verify_fail`,
+`recovery_self_commit`, `recovery_self_setup`, `recovery_self_setup_fail`, `recovery_self_confirm`,
+`recovery_self_confirm_stale`, `recovery_self_confirm_unbound`; the account: `account_delete`,
+`account_delete_denied`, `account_delete_reauth_fail`, `account_delete_stale` (a deletion refused
+`409 account_delete_log_stale` because a vault's log moved on; once per account per hour, never per try; meta
+`vaults=` and how many vaults the refusal named), `account_recovery_change`,
+`account_device_revoke`, `escrow_self_reseal`, `push_denied`; the operator: `operator_disable`,
+`operator_disable_denied`, `operator_enable`, `operator_delete`, `operator_delete_denied`,
+`operator_device_revoke`, `device_revoke_denied`, `operator_quota`, `operator_policy`,
+`operator_escrow_read`, `operator_recovery_fulfil`, `instance_card_update`,
+`recovery_rotation_stored`, `instance_identity_reset`; sign-up and links: `signup_start` (meta
+`addr=` and the first 8 hex characters of the address's keyed hash), `signup_verify_fail` (the same meta), `enrol_link_mint`, `link_create`, `link_answer`,
+`link_revoke`, `device_link_create`, `device_link_claim`, `device_link_reveal`,
+`device_link_approve`, `device_link_pickup`, `device_link_pickup_denied`; assisted recovery:
+`recovery_request_create` (every accepted request, a decoy included; the account only for a real
+request, so a decoy's row has the same shape; meta `mailbox=used` when the request named a mailbox value
+that took it past the address's five of its window, which only an account in the operator posture can have, `mailbox=not_used` when it named one that did not, and none when it
+named none, spec 03 §18.1), `recovery_request_verify` (meta `cancelled` when the right
+code came after the owner cancelled the request), `recovery_request_verify_fail` (every refused
+code; the account only for a real request, so a decoy's row has the same shape), `recovery_request_veto`,
+`recovery_request_commit`, `recovery_request_commit_mismatch` (meta `at=check` or `at=commit`);
+vaults and items: `vault_log_append` (meta: the kind), `vault_rename`, `vault_grant_self_wrap`,
+`vault_purge`, `item_restore`, `item_purge`, `attachment_upload`, `attachment_cross_vault`; mail:
+`email_sent` (meta: the template name), `email_failed`, `email_dropped`.
+Retention: 365 days, and a deleted account's pseudonymised rows 90 days (spec 03 §13).
 
 Traffic analysis (who syncs when, item counts, sizes) is visible to the server by
-nature and accepted (spec 05). This table describes **schema v11 exactly** — adding any
-table or plaintext column requires updating it in the same change. (v6 = design 2026-07-12
-§F: the `member_recovery` table + the `invites.escrowPolicy` column. v7 = design 2026-07-12
-§F.9: the `users.recoveryConfirmed` capture-confirmation flag. v8 = design 2026-07-13:
-`users.escrowPolicy` (admin posture reconciliation) + `member_recovery.pieceId`/`setupDeviceId`
-(confirm piece-binding). v9 = design 2026-08-22: the `usage_ledger` table. v10: the
-`devices.signedOutAt` stamp. v11 = security review 2026-10: the `hibp_cache` table is DROPPED,
-with secure_delete on so its pages are zeroed — a cache row's `fetchedAt` lined up with the
-`register` / `password_change` audit row and gave a DB holder 20 bits of that account's
-master-password SHA-1; the relay keeps no state now, spec 03 §8.)
+nature and accepted (spec 05). This table describes the **fresh baseline schema** of the
+onboarding-and-trust cut-over exactly — adding any table or plaintext column requires updating it
+in the same change. The server creates that schema on an empty database and **refuses to start** on
+a database created by a pre-cut-over build ("This database is from andvari 0.x; restore its export
+into a new account instead"); no forward migration from an older schema exists (spec 07 §3). No
+table caches HIBP results: the relay keeps no state (spec 03 §8).
+
+### 5.1 Changing the baseline before the first release
+
+The server of this design has not been released, so its baseline (`Db.SCHEMA`, marker `meta.baseline`,
+now `onboarding-trust-1`) is edited in place. Databases that development builds made exist all the same
+(the owner's test server holds one), and a change to the baseline that reaches none of them breaks them
+quietly: the server starts and then a route fails on the column it lacks. Until the first release, **every
+change to the baseline does one of these two things, in the same commit, and never neither**:
+
+1. **It changes the marker.** A database that carries an earlier marker is then refused at start with
+   "This database was made by an older development build of andvari, and this build cannot bring it up
+   to its baseline (baseline '…', this build expects '…'). Start this build on a new, empty database file
+   (keep the old file aside), or run the build that made it." The earlier marker is added to
+   `Db.EARLIER_BASELINES`, so the refusal can say *older*; a marker no build of this design wrote is
+   refused as another build's.
+2. **It is one the start-up step can make.** At every start, inside the start-up transaction, the server
+   brings a database that carries the current marker up to the baseline, looking before it adds: it
+   creates a missing table with its indexes, adds a missing column that SQLite can add to a table with
+   rows (nullable, or NOT NULL with a default; never a key, `UNIQUE`, or a NOT NULL reference), and
+   rebuilds a table whose column definitions or table constraints changed (a NOT NULL dropped, a CHECK
+   widened) when no other table refers to it, copying its rows; drops, by the same rebuild, a column the
+   baseline retired, one named in `Db.RETIRED_COLUMNS` (a decision, made in the commit that removes the
+   column, that its values are not needed), when no other table refers to the table; and it creates every
+   index the baseline names that the database lacks, and makes again one defined differently. It writes one
+   log line naming what it did. Anything else — a NOT NULL column without a default, a column the baseline no
+   longer has and did not retire, a
+   changed table that others refer to, rows the new definition does not admit — refuses the start with
+   the sentence of 1 (naming what it could not bring up) and changes nothing. After the step every table
+   has exactly the baseline's columns and every index it names, so a server never runs on a database
+   that lacks one.
+
+A change of the second kind adds its expected effect to `BaselineCatchUpTest`; a change of the first kind
+freezes the outgoing baseline under `server/src/test/resources/baseline-history/` and moves the tests of
+the older databases to the refusal. `BaselineRuleTest` holds a digest of the baseline beside its marker,
+so a commit that edits the baseline without looking at this rule fails.
+
+Steps of the second kind so far: the step of 2026-11-15 let `recovery_requests.userId` be NULL (a decoy, spec 03
+§18.1), which rebuilds the table; the step of 2026-11-16 added `recovery_requests.commitHash` and `commitAttempts`,
+which are added (`commitHash` only, since `commitAttempts` was retired on 2026-11-16 with the count of
+wrong commit values it held, and the step drops it from a database that has it), and a request such a database already holds as answered
+(`fulfilled` with no `commitHash`: an answer of the old form, which no device takes and no commit value
+matches) goes back to `verified`, waiting for the operator, its stored answer dropped, at every start,
+with the count in the start's log line (rule of 2026-11-16, so that the operator answers it again in the
+new form); the covering index `idx_items_vault_live_size` on `items(vaultId, deleted, blobSize)`
+(the use-and-limits sums of spec 03 §14.4 read it alone, never the item rows) is created; on 2026-11-17
+`recovery_requests.cancelledAt` (nullable) is added, and the table `recovery_mailbox_values` is created with
+its index `idx_recovery_mailbox_values_email`. Of the earlier in-place edits of 2026-11-15, the step adds `vaults.logState` and
+`device_links.approvedBy` to a database made before them, and refuses one made before
+`instance_cards.name` or `users.registeredVia` (NOT NULL without a default: no value to give old rows).
+On 2026-11-17 the table `session_chains` is created with its index `idx_session_chains_chain`; a database
+a development build of that day ran on holds the chain in a column `sessions.chainId` instead, which is
+retired: its values are carried into `session_chains` first, then the rebuild drops it.
+
+**A roll-back stays possible (rule of 2026-11-17).** A server of the version before must start on a
+database this one has run on: its start-up step refuses a column of a table it knows that its baseline
+does not have, and ignores tables it does not know. So a new fact is kept in a table of its own, never in
+a new column of an existing table, and a new table holds no reference that would block the version
+before's deletes (rows it leaves behind are tidied up by this version's janitor). `SessionChainsRollBackTest`
+shows it for the version before `session_chains`: the version before's step finds nothing to change on a
+database this version has run on.
+
+Once the server is released, its databases hold people's vaults, and the baseline is frozen: every change
+is a numbered, tested migration (spec 07 §3), and this section no longer applies.
 
 ## 6. Attachments
 
 - Per-file random 32-byte `fileKey` (lives inside item ciphertext, §3).
+- **The file key is the item author's choice, and a reader checks it before anything is
+  downloaded.** Whoever writes an item chooses its `fileKey` (a co-member, in a shared vault). A key
+  that is not 32 bytes of base64url, or that is all zeros, is refused as damaged content before the
+  file is fetched: nothing is downloaded and nothing is decrypted. A key of all zeros is a key
+  everyone knows, so a file "sealed" under it could be made or replaced by the server, or by anyone
+  who sees the stored bytes, and would still open as if it were the author's. The shared code keeps
+  this (2026-11-17); a lock while a file downloads stays a lock and is never reported as damage.
 - Content encrypted with `crypto_secretstream_xchacha20poly1305`, plaintext chunked
   at **64 KiB** (last chunk 1..65536 bytes, tag FINAL; all others tag MESSAGE).
   Stored as `header (24B)` + ordered ciphertext chunks (each chunk + 17-byte ABYTES);
@@ -500,7 +587,8 @@ master-password SHA-1; the relay keeps no state now, spec 03 §8.)
   arithmetic; a client that scales a transfer timeout by `size` clamps it (desktop: 64 MiB).
 - Upload: blob first (`POST /attachments/{id}`), then the item update referencing it;
   orphaned blobs are GC'd after 24 h. Server enforces per-item and per-user quota
-  from policy (v1 defaults: 25 MiB/attachment, 100 MiB/item, 1 GiB/user).
+  from policy (defaults: 25 MiB/attachment, 100 MiB/item) and the vault owner's storage quota
+  (spec 03 §14.4).
 
 ## 7. Tombstones, versions, conflicts
 
@@ -515,10 +603,12 @@ master-password SHA-1; the relay keeps no state now, spec 03 §8.)
 > recorded the (a)–(d) preconditions any activation had to satisfy; the activation
 > record below states how each is met.
 
-**Vault deletion (spec 03 §11):** a soft-delete with a 7-day grace
+**Vault deletion (a signed `delete`, §10; spec 03 §11.1):** a soft-delete with a 7-day grace
 (`ANDVARI_VAULT_GRACE_DAYS`) — all rows stay intact and every grant is revoked
-(`revokedReason='vault_delete'`); RESTORE within grace un-revokes exactly those grants and
-re-opens the vault. After the grace the daily **janitor** purges (per-vault tx that
+(`revokedReason='vault_delete'`); a signed `restore` within grace un-revokes exactly the grants
+still revoked that way and re-opens the vault. The vault's log rows and its tombstone
+`{finalHead, purgedAt}` outlive the purge by one year, so the members at the `delete` can verify it
+(§10.6). After the grace the daily **janitor** purges (per-vault tx that
 re-checks `deletedAt/purgeAt` inside every destructive statement): `item_versions` and
 attachment rows/files are deleted, item rows are reduced to ciphertext-free
 **skeletal tombstones** (`deleted=1, blob=NULL`, no rev bump, `updatedAt` restamped to the
@@ -526,7 +616,7 @@ purge instant — they keep the `vault_mismatch` teleport fence alive, 0.2.x MSI
 for the full 30-day tombstone horizon from purge, then age out with the ordinary tombstone
 GC below; the edit-over-tombstone fence is grant-gated and never reads them post-purge),
 `metaBlob` is blanked, and **every** grant's key material is wiped
-(`wrappedVk=''` — the `NOT NULL` sentinel — and `sealedVk=NULL`, active and
+(`wrappedVk=''` — the `NOT NULL` sentinel — and `signedGrant=NULL`, active and
 previously-revoked alike). Vault tombstone rows and all grant rows are retained
 indefinitely and `vaultId` is never recycled — that pair is what keeps a push against the
 purged vault itself denied forever. **One exception (account deletion, spec 03 §13, design
@@ -546,7 +636,7 @@ never 410 at all on an idle server (the MAX(rev) fence floor + strict `since < f
 Either way a post-horizon teleport re-push degrades into the accepted re-add class (a clean INSERT
 of the pusher's own re-encrypted copy into their own vault; pinned in `JanitorTest`, same
 class as the >180d mutation replay). The janitor's v1 scope was **vault purge
-+ transfer-offer expiry ONLY** — the general retention machinery had to stay dormant until
++ ownership-offer expiry ONLY** — the general retention machinery had to stay dormant until
 it could satisfy the (a)–(d) invariants of that note plus a quiet-server integration test
 (delete → idle past retention → full janitor cycle → all client generations converge
 without 409/410 loops). **Activation record (2026-07-10, n2 residue hardening §5): that
@@ -650,8 +740,8 @@ pure functions graded by `spec/test-vectors/itemhome.json` (core `ItemHome`, web
   item's home.
 - **INV-EDIT.** A save of an existing item names the vault its editor was bound to when it opened. If the item's
   home differs at save time, the save is refused ("This item changed vaults; reopen it."), never re-targeted.
-- **INV-WRITE-KEY.** No item is sealed under a key that is legacy-read-only (spec 01 §6) or that contradicts this
-  device's vouch or held-key memory (the vouch gate), on any path: save, conflict, copy-into, import, the
+- **INV-WRITE-KEY.** No item is sealed under a key that failed the vault-key commitment (spec 01 §6.2), or under
+  the key of a vault that is frozen, failed or not yet accepted (§10.4), on any path: save, conflict, copy-into, import, the
   extension's capture and update targets, TOTP add. (The holding area's local re-seal, a queued write's local
   pre-edit snapshot and the revert of a refused write never leave the device and are not pushes.)
 
@@ -670,12 +760,17 @@ surface by construction:**
 - the sync cursor (a rev number);
 - item rows exactly as received on the wire (ids, revs, timestamps, flags,
   formatVersion, attachmentIds, `blob` AEAD ciphertext);
-- grant rows (vaultId, userId, role, `wrappedVk`/`sealedVk` ciphertext, rev);
+- grant rows (vaultId, userId, role, `wrappedVk` and `signedGrant` ciphertext, rev);
 - vault rows (vaultId, type, rev, `metaBlob` ciphertext, createdAt);
 - the outbound mutation queue (mutationId, op, ids, baseItemRev, `ItemUpload`
   ciphertext);
 - for offline unlock, a copy of the server's `accountKeys` payload (kdfSalt,
-  kdfParams, wrappedUvk, encryptedIdentitySeed, identityPub, escrowFingerprint).
+  kdfParams, wrappedUvk, encryptedIdentitySeed, identityPub, recoveryConfirmed, personalWrap,
+  genesis). A cached AccountKeys without a genesis is refused as damaged (spec 01 §5.4);
+- the vault log entries it has verified (§10.5; public frames).
+
+The per-vault verified state, the pinned card, the account's own records mirror and the link
+records live in **device state**, which outlives the offline cache (§10.5, spec 01 §5.2).
 
 Clients MUST NOT persist: the master password, MK, authKey, UVK, VK, identity seed,
 decrypted `ItemDoc`s, attachment plaintext, or fileKeys outside item ciphertext.
@@ -702,8 +797,8 @@ and relaunch drop all key material.
 ### 8.1 Web client (IndexedDB — 2026-07-14 amendment)
 
 The web client MAY persist the SAME per-account set (the list above verbatim, plus
-the `lastSyncAt` stamp, the spec 03 §4 lifecycle safety state — holding area,
-consumed delete-ids, verified transfer floors — and the last-known policy bits) in a
+the `lastSyncAt` stamp, the holding area, the per-vault verified log state of §10.5, and the
+last-known policy bits) in a
 per-account IndexedDB database (`andvari-vault-<userId>`); as built, the policy bits
 live device-locally in localStorage (see the origin-gated bullet below) — the DB's
 `kv:policy` slot is reserved, with no production writer yet. Design, schema, and
@@ -743,6 +838,20 @@ freshness posture above apply to the web cache **verbatim**. Web-specific deltas
   policy and consent are ANDed, and either one saying no forbids and wipes.
 - **No quick unlock** (spec 01 §8.3 unchanged): the cache stores ciphertext + wire
   metadata only and never changes what a reload demands — the full master password.
+- **What the copy serves without the server (2026-11-16).** The page and its code come
+  from the instance itself, and the web client keeps no offline app shell (no service
+  worker). So the copy opens the vault only in a tab that is already open when the
+  server cannot be reached; a reload or a fresh tab without the server cannot load the
+  page at all, and the browser shows its own error. An app shell is not part of this
+  release. Adding one is a design decision of its own, because a cached shell is code the
+  server served earlier: the update and minimum-version rules must still win over it, it
+  must be bound to the pinned origin and dropped with the pin (a fork, "Forget this
+  server", a sign-out), it may cache only static files (never API answers, tokens or
+  `/client-policy`), the consent gate and its wipe must cover it, an offline start may
+  open only through the copy with the pin-gated identity check, the content-security
+  rules must cover the worker, two tabs on different bundles must not fight over the
+  session record, and the kept records (pending wrap, held frames) must stay readable by
+  the previous released bundle.
 
 ### 8.2 Usage ledger (2026-08-22 amendment)
 
@@ -767,8 +876,8 @@ ciphertext (§5 `usage_ledger`), so a client caching it is still storing a subse
 server-visible table — the property §8 states holds unchanged.
 
 - **Sealed under `usageKey = HKDF-SHA-256(VK(personalVault), "andvari/v1|usage")`**, AD
-  `andvari/v1|usage|{userId}` (§2) — domain-separated from that VK's own AEAD use exactly as the
-  lifecycle key is (spec 03 §11), and the AD still binds the blob to the user's slot so a hostile
+  `andvari/v1|usage|{userId}` (§2) — domain-separated from that VK's own AEAD use by its HKDF label,
+  and the AD still binds the blob to the user's slot so a hostile
   endpoint cannot serve one member's ledger into another's.
   **Keyed from the personal VK rather than the UVK for a CLIENT reason, recorded so it is not
   "simplified" back:** the browser extension's UVK is memory-only and never persisted (spec 01
@@ -779,12 +888,11 @@ server-visible table — the property §8 states holds unchanged.
   and the server and a stolen locked device both hold opaque bytes. Spec 05 T3 is unchanged.
   An account with no personal vault simply has no ledger — clients MUST degrade to "—", not error.
   **WHICH vault that is comes from §4's rule — the personal wrap (security review 2026-10, root
-  cause A) — never from the server's label (originally the 2026-09-13 H64 amendment):** a client MUST NOT key the ledger from a vault whose VK arrived by
-  member grant (`sealedVk`), because that VK is held by every other member of the vault and
-  `andvari/v1|usage|{userId}` is public — a relabelled shared vault would hand a colluding
-  co-member the itemId → {lastUsedAt, useCount} log this whole single-blob design exists to keep
-  private. A held-but-refused candidate leaves the account with no personal vault, which is the
-  "—" degradation above and not an error.
+  cause A) and the genesis — never from the server's label:** a client MUST NOT key the ledger from a
+  shared vault, because its VK is held by every other member and `andvari/v1|usage|{userId}` is
+  public — a relabelled shared vault would hand a colluding co-member the itemId → {lastUsedAt,
+  useCount} log this whole single-blob design exists to keep private. No personal vault is the "—"
+  degradation above and not an error.
 - **Contents.** `itemId -> { lastUsedAt, useCount }`, nothing more. No password material, no
   document content, no URIs. Both fields are JSON **numbers** (integers: epoch ms and a count).
 - **Reading is tolerant per ENTRY and strict per TYPE (2026-09-13, audit H92).** A reader MUST
@@ -863,3 +971,378 @@ server-visible table — the property §8 states holds unchanged.
 - **Disclosure bound (spec 05).** On a stolen *unlocked* device, or to anyone who compels the
   master password, the ledger reveals which items the owner touches most. It carries no secret,
   but it is behavioral data, and it is named here rather than shipped quietly.
+
+## 9. Account-state records
+
+`GET/PUT /account/state` (spec 03 §3) carries ONE opaque blob per account,
+`Envelope(UVK, JSON, "andvari/v1|account-state|{userId}")`, capped at 1 MiB of base64
+(`ACCOUNT_STATE_SEALED_MAX = 1,048,576` characters, about 768 KiB of plaintext). Its JSON document holds
+the records below and its own `seq`: the authenticated counter that "older" and "newer" refer to. The
+`seq` the server serves beside the blob is only its compare-and-set token.
+
+Every device merges a served copy with its own on each read and on `409 stale_state`. **The server
+alone** can only serve an older copy (or withhold one), never a forged one. Any holder of the UVK can
+write anything — the account's own devices, a hostile web bundle while the person uses the web client,
+the operator of an operator-posture account who opened its escrow — and the rules below limit, but do
+not prevent, what a wrong record does (spec 05 R35). A record only ever **refuses**; a missing record
+never blocks anything.
+
+| Record | Shape | Merge rule |
+|---|---|---|
+| `contacts` | `userId → {userId, identityPub, label: <name>, method: "link", verifiedAt, compared: bool, madeOn: <deviceId>}`, plus tombstones | Per `userId`: the newest `verifiedAt` wins, and a tombstone not older than a pin removes it (an unpin's tombstone is pushed to the removed pin's `verifiedAt`, so the newest human act wins whatever the clocks say). A different key for the same `userId` is never merged silently: the record keeping the key this device already uses stays, and the other goes to the key-change prompt (spec 03 §15.9). `compared` merges as OR between records with the same key; a record with a different key starts at `false`. `method` has the single value `"link"`; a decoder refuses any other. |
+| `vaults` | `vaultId → {genesisHash, seq, hash}` | `genesisHash` is immutable: a copy with another genesis for the same `vaultId` is an anomaly, and the local record stays. Otherwise the higher `seq` wins. The same `seq` with a different `hash` is a **fork** (§10.5). A removed vault keeps its record, so a re-add of the same vault is checked against the same genesis. |
+| `accepted` | `vaultId → {owner, addSeq, at, decision: "accept" \| "decline"}` | The higher `addSeq` wins per vault. For the same `addSeq`, `decline` wins whatever `at` says (a leave is final for that `add`); between two records with the same decision the newest `at` wins. A record whose `addSeq` is not the `seq` of this account's latest `add` in the verified log answers nothing, so the person is asked again (§10.4).  A device that **creates** a vault writes `{owner: its own account, addSeq: 0, decision: "accept"}` (`0` stands for the genesis: no `add` has that position). A device that signs, or verifies, a `leave` or `remove` of this account writes `"decline"` for the current `addSeq`. Both exist for the extension, which reads `decision` only and so opens no wrap, owner wraps included, of a vault without an `accept` record (spec 01 §6.5). |
+| `recovery` | `{posture: "private" \| "operator", fp: <hex64> \| "none", at}` | The newest `at` wins; ties go to `private`. A device acts on an `operator` record only with its own mirror (spec 04 §2). |
+
+**Document layout.** The sealed plaintext is one JSON object:
+
+```
+{"v":2,"userId":<uuid>,"seq":<int>,
+ "contacts":{<userId>:<contact>},
+ "contactTombstones":{<userId>:<removedAt ms>},
+ "vaults":{<vaultId>:{"genesisHash":<hex64>,"seq":<int>,"hash":<hex64>}},
+ "accepted":{<vaultId>:{"owner":<uuid>,"addSeq":<int>,"at":<ms>,"decision":"accept"|"decline"}},
+ "recovery":{"posture":"private"|"operator","fp":<hex64n>,"at":<ms>}}
+```
+
+A contact's `userId` equals its map key. `recovery` is absent until a choice has been recorded. A
+document with another `v`, or whose `userId` is not the account's, is refused whole; a single record
+that fails its own shape (a contact whose `method` is not `"link"`, a malformed key, an unknown
+`decision`) is dropped and counted, and the rest of the document is used. Writers emit each map's keys
+in ascending byte order; readers accept any order. **Ties**, which exist only so that every device
+reaches the same document: two contact records with the same key and the same `verifiedAt` resolve to
+the larger `label`, then the larger `madeOn`; two `accepted` records with the same
+`addSeq`, `at` and `decision` resolve to the larger `owner`; two `recovery` records with the same `at`
+and the same posture resolve to the smaller `fp`. Every such comparison is on the field's text exactly as
+stored (a `label` is its base64url string), byte by byte. Two documents are merged record by record
+whatever their `seq` values; the result's `seq` is the larger of the two. An unknown key present in
+both stays as the copy with the larger `seq` has it, and as the local copy has it when they are equal.
+A vault record that forks (the same `seq`, another `hash`) keeps the local record and reports the
+fork. A rolled-back served copy is merged the same way. At the caps the newest are kept (`verifiedAt`
+for contacts, `removedAt` for tombstones), and among equals the smaller `userId`.
+**A record that supersedes another is stamped later than it.** When a device writes a record meant to
+replace one it holds (a new recovery choice, a contact verified again after it was removed, a tombstone
+for a contact), it stamps it at `max(its clock, the held record's time + 1)`. Otherwise a device whose
+clock runs behind would write a choice that loses the merge to the record it was meant to replace, and
+turning operator recovery off would silently not stick.
+A record that carries a field this build does not know is kept, with the field preserved as written. A
+document that lacks one of the four maps is read as having that map empty; one whose `seq` is not an
+`int` is refused whole. Tombstones are applied before the tombstone cap. When the document would not
+fit, unknown keys go first (largest first), then the `vaults` and `accepted` records of vaults the
+account has left (`decline`), oldest `at` first, then the smaller `vaultId`; `recovery` is never
+dropped; a document that still does not fit is not written (`account_state_full`), and one whose `seq`
+cannot be advanced is not written (`account_state_damaged`); the merged document is still read.
+
+**Size.** An account holds **at most 1,000 contacts** (the app refuses a new one beyond that) and at
+most 1,000 contact tombstones (the oldest dropped first). Each shared vault adds a `vaults` and an
+`accepted` record (about 350 bytes), so the 500-membership limit needs about 175 KB; in all the largest
+account the limits allow needs about 541 KB of the 786 KB of room. **Vault records are batched:** a
+device writes a new vault's record at once, and later heads at most once every 10 minutes; a stale
+record is still a valid lower bound for §10.4 (e).
+
+`label` is a `name` (spec 01 §5.1), rendered only as plain text; `madeOn` is the device that made the
+pin, shown in the per-device prompt (a hostile web bundle can forge it; the name the person
+recognises is the real check). An unknown key in the document is preserved (it is dropped only when the merged document would not fit its
+size cap, largest first, before any known record), so a newer
+build's records survive an older merge. A client keeps a high-water mark of the in-blob `seq` (native:
+in device state): a served document below it, or a withheld blob after one was seen, is a rollback,
+merged so that nothing the local copy holds is lost. Vectors: `spec/test-vectors/accountstate.json`
+(graded by core and the web twin; the extension grades the `vaults` rows).
+
+**Contacts current on a device.** A contact syncs to every device, but a device acts on it (accepts
+vaults from it, shares to it) only when it is **current** there: (a) this device processed or answered
+the link; (b) it arrived in a device-link bundle with the same key hash (spec 03 §16.9); (c) the person
+confirmed it on this device ("New person from your *iPhone*: *label* — Use on this device?", one tap,
+which also exposes contacts a hostile web bundle wrote); or (d) on a device signed in with only the
+password, the person confirmed the one-tap list ("People you've connected with", spec 05 R23). The
+device keeps `pins.confirmed = {userId, keyHash}` durably in device state. A label is shown for a log
+member or a grant sender only where that key equals the pinned key.
+
+## 10. The vault log
+
+Every **shared** vault has a log: an append-only, hash-chained list of signed entries (purpose 0x03,
+spec 01 §5.1). A personal vault has none (§4). The server stores it and serves it (spec 03 §10); every
+device verifies it.
+
+### 10.1 Templates
+
+Every entry starts with the same head, in this exact order, followed by the kind's fields and `}`:
+
+```
+{"v":2,"purpose":"vault-log","vaultId":<uuid>,"seq":<int>,"prev":<hex64>,"kind":<kind>,"actor":<uuid>,"at":<ms>
+```
+
+| `kind` | Extra fields, in order | Signed by |
+|---|---|---|
+| `genesis` | `"ownerKey":<b64_32>,"vkCommit":<hex64>` | the creator (`actor`) |
+| `add` | `"member":<uuid>,"memberKey":<b64_32>,"role":<role>,"grantId":<b64_16>` | owner |
+| `role` | `"member":<uuid>,"role":<role>` | owner |
+| `remove` | `"member":<uuid>` | owner |
+| `leave` | — | the member leaving (`actor`) |
+| `offer` | `"to":<uuid>,"toKey":<b64_32>,"offerId":<b64_16>,"expiresAt":<ms>` | owner |
+| `cancel` | `"offerId":<b64_16>` | owner or the offer's target |
+| `accept` | `"offerId":<b64_16>` | the offer's target |
+| `delete` | `"deleteId":<b64_16>` | owner |
+| `restore` | `"deleteId":<b64_16>` | owner |
+
+`at` is the signer's own clock, used only as §10.3 says. A signer sets `at = max(own clock, head.at)`.
+Example genesis (one line, shown wrapped):
+
+```
+{"v":2,"purpose":"vault-log","vaultId":"…","seq":0,"prev":"000…000","kind":"genesis",
+ "actor":"…","at":1763164800000,"ownerKey":"…43 chars…","vkCommit":"…64 hex…"}
+```
+
+### 10.2 Chain
+
+- **Template rules:** a `genesis` has `seq = 0` and `prev` = 64 `0` characters, and every other kind
+  has `seq >= 1`. A violation is `bad_statement`, at the parse.
+- Every later entry has `seq = previous.seq + 1` and `prev = H(previous frame)` (spec 01 §5.1).
+  Position is checked by `bad_seq` and `bad_prev` alone: a valid `genesis` frame placed later in a
+  chain is `bad_seq`, and so is a first entry whose `seq` is not 0.
+- `vaultId` is constant along the chain.
+- The **head** is `(seq, H(frame))` of the last entry.
+
+### 10.3 State, transitions and verdicts
+
+Replaying entries 0..n yields a **vault state**:
+
+```
+S = { vaultId, head, owner, ownerKey, vkCommit,
+      members: userId -> { key, role ∈ {owner, writer, reader} },
+      pending: { offerId, to, toKey, expiresAt } | none,
+      deleted: { deleteId } | none }
+```
+
+`genesis` sets `owner = actor`, `ownerKey`, `vkCommit`, `members = { actor: { ownerKey, owner } }`,
+`pending = none` and `deleted = none`. Each later entry must satisfy **every** condition of its row,
+checked against S before the entry; the first failure is the verdict.
+
+| kind | Signer key must be | Preconditions | Effect |
+|---|---|---|---|
+| `genesis` | its own `ownerKey`, with `actor` the creator: it signs itself | first entry only (the template rules of §10.2) | sets up S, as above |
+| `add` | `S.ownerKey`, with `actor = S.owner` | `deleted = none`; `member ∉ members` | `members[member] = {memberKey, role}` |
+| `role` | `S.ownerKey`, with `actor = S.owner` | `deleted = none`; `member ∈ members`, `member ≠ owner` | role replaced; if `pending.to = member`, `pending = none` |
+| `remove` | `S.ownerKey`, with `actor = S.owner` | `deleted = none`; `member ∈ members`, `member ≠ owner` | member deleted; if `pending.to = member`, `pending = none` |
+| `leave` | `members[actor].key` | `actor ∈ members`, `actor ≠ owner`. Allowed **while the vault is deleted** | actor deleted; if `pending.to = actor`, `pending = none`. A member who leaves during the grace stays out if the vault is restored |
+| `offer` | `S.ownerKey`, with `actor = S.owner` | `deleted = none`; `to ∈ members`, `to ≠ owner`; `toKey = members[to].key`; `at < expiresAt <= at + 14 d + 10 min`; `pending = none`, or `pending.expiresAt < at` | `pending = {offerId, to, toKey, expiresAt}` |
+| `cancel` | `S.ownerKey` (actor owner), or `pending.toKey` (actor `pending.to`) | `pending ≠ none`; `offerId = pending.offerId` | `pending = none` |
+| `accept` | `pending.toKey`, with `actor = pending.to` | `deleted = none`; `pending ≠ none`; `offerId = pending.offerId`; `at <= pending.expiresAt` | the old owner's role becomes `writer`; `owner = pending.to`, `ownerKey = pending.toKey`, the new owner's role is `owner`; `pending = none` |
+| `delete` | `S.ownerKey`, with `actor = S.owner` | `deleted = none` | `deleted = {deleteId}`; `pending = none` |
+| `restore` | `S.ownerKey`, with `actor = S.owner` | `deleted.deleteId = deleteId` | `deleted = none` |
+
+**Time rules.**
+
+- `at` never decreases along a log: every entry needs `at >= previous.at`, or it fails as
+  `precondition`. So a device with a slow clock never deadlocks the vault.
+- Before applying any entry whose `at > pending.expiresAt`, the verifier **clears the expired offer**
+  (`pending = none`). So once the owner signs anything after the expiry, a late `accept` is impossible.
+- `accept` additionally needs `at <= pending.expiresAt`; a target who backdates can only reach back to
+  `head.at`, and the server refuses an accept after expiry by its own clock.
+- The verifier is **clock-free**: every device reaches the same verdict on the same bytes. The ceiling
+  on `at` (10 minutes ahead of the server's clock, `400 at_ahead`) is the server's check, outside the
+  verifier (spec 03 §10.3). A hostile server can still store a far-future `at` and so freeze offers on
+  that vault; that is denial of service (spec 05 R20).
+
+All signer keys come from the log itself: `ownerKey` from genesis or the last `accept`, member keys
+from `add`, the target key from `offer`. Verifying a log therefore needs no contact pins. Whether a
+device *adopts* a vault is §10.4.
+
+**Verdicts**, in check order:
+
+1. `bad_frame`, `unknown_format`, `non_canonical`, `bad_statement` (the parse, spec 01 §5.1);
+2. `wrong_vault`;
+3. `bad_seq`;
+4. `bad_prev`;
+5. `not_authorized` (the signer key the row names is not the one in the frame, or `actor` is not the
+   required account);
+6. `bad_signature`;
+7. `precondition` (a row condition failed);
+8. `fork` (a different valid entry at a sequence number this device already saw).
+
+Signer mismatches in the log are `not_authorized`, never `signer_not_pinned_key` (spec 01 §5.1).
+
+**Undefined signer keys and expired offers.** Expired-offer clearing is applied to S **before** step 5.
+At step 5, if the key the row names does not exist in S, the verdict is `precondition` and checking
+stops: `accept`, or a `cancel` by the target, with `pending = none`; `leave` by an actor not in
+`members`. So `accept` after expiry is always `precondition`. The shared implementation is core
+`VaultLog.verify`, run by every client and by the server (spec 03 §10.3); vectors
+`spec/test-vectors/vaultlog.json`.
+
+### 10.4 Adopting a vault on a device
+
+A device starts using a shared vault's key when **all** of these hold:
+
+- (a) the log verifies (§10.5);
+- (b) this account is in `S.members`;
+- (c) the key passes the commitment (spec 01 §6.2);
+- (d) one of:
+  - this account is the genesis owner, the log has **no `add` of this account**, and the key comes from
+    its own owner wrap (a genesis owner who left and was added again is asked like anyone else);
+  - the key comes from this account's own self-wrap or owner wrap, which opens with the AD naming this
+    log's genesis hash (spec 01 §6.1), **and** an `accepted` record with `decision = accept` answers this
+    account's latest `add` (its `addSeq`, §9), so a server that replays an old self-wrap cannot make a
+    device adopt a vault the person was re-added to without asking;
+  - the key comes from a grant (spec 01 §6.3), **and** the `add` entry's actor is a contact that is
+    **current on this device** (§9) with the same key, **and** the person accepted the vault (below);
+- (e) the account's **vault record** (`vaults[vaultId]`, §9) agrees: the served log has the record's
+  genesis hash, and it holds the record's hash at the record's `seq`. With **no record yet**, (e) holds
+  and the device writes the record once the log verifies. A record never makes a log pass and is never
+  lowered by what a server serves.
+
+  When (e) alone fails, it fails in one of three ways, and they are told apart (decided on 23 November
+  2026):
+  - **Another beginning**: the record names another genesis hash than the served log, or the served log
+    does not begin where the device's own verified log began. This is not the vault's chain: the device
+    takes **no key**.
+  - **Ahead**: the record is above the served head, and nothing the device holds contradicts the served
+    log (the vault is **withheld**, §10.5). An honest restore of the server from an earlier day looks
+    like this. The device **takes the key, and the vault is read-only** on it.
+  - **Beside**: the served log carries another entry at a place after the genesis that the record or
+    the device's own log knows (the vault is **frozen**, §10.5). The device **takes the key, and the
+    vault is read-only** on it, for good.
+
+  Read-only means every road that writes under the vault's key is refused, as for a frozen vault (below),
+  and copying items out stays allowed. Whenever another of (a) to (d) fails, nothing is taken, whatever
+  the record says. A wrong record written by a UVK holder makes every device of the account see that
+  vault withheld or frozen, read-only, or refuse it (spec 05 R35).
+
+**Accepting an incoming vault.** A vault reaching this account through a grant is **never adopted
+unasked**, even from a current contact: "*Contact label* wants to share “*vault name*” with you"
+[Accept] [Decline].
+
+- The vault name is decrypted only after (a)–(c) pass, and shown as plain text.
+- The answer is recorded once per account in account state, as `accepted[vaultId] = {owner, addSeq, at,
+  decision}` (§9), so the account's other devices do not ask again. Reading it is one pure function:
+  an `accepted` record against the account's latest `add` seq gives `accept`, `decline` or `ask`
+  (vectors in `accountstate.json`; the Chrome and Firefox extension reads `decision` only, spec 01
+  §6.5). `addSeq` is the `seq` of the `add`
+  the person answered. **A record answers only that `add`**: after a `leave` or `remove`, a new `add`
+  has a higher `seq`, so the person is asked again.
+- **Decline** hides the vault on every device of the account **and signs a `leave`** (the account is a
+  member once added), so the owner sees the decline and the server revokes the grant.
+- The server refuses an `add` unless the owner and the new member are connected (spec 03 §10.3,
+  `409 not_connected`): hygiene against strangers pushing vaults on an honest server; the accept prompt
+  is the control against a hostile one.
+
+**Otherwise** (the `add`'s actor is not a current contact with that key) the vault is listed as "*Name
+as the server reports it* wants to share a vault with you. Connect with them first." Its name is not
+shown and nothing is decrypted.
+
+**Left out of AutoFill.** In an app that runs the rebuilt engine, a vault not yet accepted, frozen, failed or withheld is never written into the iOS
+AutoFill snapshot (which the Safari extension also reads), nor offered by an app's filling in; a vault that later
+freezes or is withheld is removed at the next refresh. A withheld vault is read (§10.4 (e)), never filled from.
+This rule is not claimed for the iPhone app until that app runs the engine.
+The Chrome and Firefox extension applies its own acceptance check (spec 01 §6.5).
+
+**A frozen, failed or withheld vault** (§10.5) is read-only on every path that writes under its key: item saves
+and edits, restore from trash, moving items in or out, copying items in, draining the iOS save queue
+into it, renames, and every log entry except `leave`. **Copying items out stays allowed** (it writes
+only under the destination's key); the copy dialog says "Items in this vault may have been changed by
+someone the server let in. Check what you copy."
+
+**After adoption.** A device that adopted a key from a grant posts its self-wrap (spec 03 §11.4), after
+which the account's other devices adopt through the wrap. Once a device has adopted a vault, later
+entries are judged by §10.3 alone, and the device keeps the account's vault record current.
+
+### 10.5 Client verification
+
+A device keeps, per shared vault, durably in device state (outliving the offline cache): the verified
+head; the derived state S; and the hash of every sequence number it has seen.
+
+On each sync where the vault row's `logHead` differs from the verified head, it fetches the log from
+`after = verified.seq` (spec 03 §10.6; a fresh device starts with no `after`) and verifies each entry in
+order (§10.3). It fetches the log again from the genesis, and verifies it from there against every hash
+it holds (the account's vault record and a checkpoint included), where the served head is at or below
+the verified head and names another hash than the one held for that sequence number, or where the first
+entry served parses and sits at `verified.seq + 1` but does not name the verified head as its `prev`.
+If that fetch does not come back whole (no answer, or a refusal), the vault is **failed** and its
+verified state stays as it was. Otherwise the replay's first refused entry decides: one valid in every
+other respect, at a sequence number where the device holds another hash, is a **fork**; any other is a
+**failure**; and a replay that refuses nothing but ends below the highest sequence number held, or
+beyond the served head, is **withholding**; a read again from the genesis that serves no entry at all
+changes nothing: the vault keeps its verified state and its standing. Where the replay accepted any
+entry, the verified state then stands at the last one, which can be below the old head.
+
+- **A failure** leaves the verified state at the last good entry. The device raises "This shared
+  vault's history doesn't check out — the server may be misbehaving." It keeps reading data already
+  decrypted under a committed key, and refuses writes to the vault until the log verifies again
+  (**failed**).
+- **A served head below the verified head**, below the account's vault record (§9), or a log missing
+  entries this device verified, is **withholding**: the device keeps its own state, the vault is
+  read-only, and the device shows "The server is showing an older version of this vault's history." It
+  is checked again at every sync, also when the served head equals the device's own.
+- **A different entry at a sequence number already seen** is a **fork** (equivocation): the device
+  **freezes** the vault (read-only) and shows the anomaly. A fork needs two validly signed entries at one
+  position; an item's `logHead` (§3) is only ever a hint to fetch.
+- **Checkpoints** carried by a device link (spec 03 §16.9), and the account's vault records (§9), are
+  verified heads too. Comparing a served log (or card chain, spec 01 §5.2) with a held head is **one
+  pure function**, shared by core and the web twin, that returns `ok`, `withheld` (the served chain
+  ends below the head) or `fork` (another hash at the head's `seq`); vectors in `vaultlog.json` and
+  `instancecard.json`.
+- **Member lists.** A member's label is shown only where the log's member key equals that person's
+  pinned key; otherwise "unverified member (as the server names them)". The list is the audience as far
+  as this device has verified the log; a withheld later `add` is not shown (spec 05 R20).
+
+### 10.6 Removal, deletion and purge on the device
+
+- **Removal and leave.** A removal is attributed when the device verifies the `remove` (or its own
+  `leave`) entry; otherwise it is shown as unverified. The vault's local data moves to the **holding
+  area** for 30 days, where items can still be copied out; in the Android and desktop apps, while the
+  person is added again and the device shows an invitation to that vault they can answer, the copy
+  does not open until they accept (decided on 22 and 23 November 2026), and it still goes on its day.
+  In the web client and in the Android and desktop apps (decided on 24 November 2026): when the person
+  is added again and accepts, the held copy's items are put back, except an item the device already
+  holds a served row of (readable or not) and an item whose deletion the server served while the copy
+  was held, in that answer or an earlier one; such a deletion is recorded with the held copy, so it
+  holds across a reload or a lock in the browser, a restart of the app and a resync, until a live row
+  of the item is served, and it goes with the copy. A deletion row carries no signature, so it never removes an item
+  from the held copy itself: until the vault is put back, the person removes the copy, or its 30 days
+  end, the copy keeps every item, and a person who declines keeps them all.
+- **Delete and restore.** A `delete` keeps every member in the log and keeps their fetch access; a
+  `restore` re-grants them (spec 03 §10.6, §11.1).
+- **Purge versus withholding.** A device shows "deleted for good" only after it has fetched and
+  verified the log through the tombstone's `finalHead`, and the verified state is **deleted** by the
+  owner's signed `delete` with no later `restore`. The server alone cannot fake the owner's `delete`;
+  it can withhold a later `restore` and purge anyway, which is why the device's copy goes to the
+  holding area rather than being dropped. Everything else is **withholding**: a tombstone whose log does
+  not verify, does not end deleted, or ends below this device's verified head; and a vault that
+  vanishes without a tombstone, including one whose tombstone year has passed.
+- **The device's own copy.** On a verified purge the vault's local data moves to the holding area and
+  stays there for 30 days from the moment this device verified it, or until the person removes it;
+  never straight to deletion, and never dropped at a time the server names, the owner's own deletion
+  included (design 2026-11-15 §3.8). On withholding the copy stays, read-only, with copy-out and "Remove from this device" (a
+  local action that tells the server nothing). So the server can never make a device drop its offline
+  copy by claiming a purge or by revoking a grant.
+
+### 10.7 A member deleted by the operator
+
+An operator deletion has no leaves (spec 03 §7.1): the deleted account stays in the log's `members`
+with no grant. Members' apps show "*name*'s account was deleted by the server's operator." The owner's
+app offers a one-tap **Remove from the list**, which signs an ordinary `remove`. Until then nothing
+breaks: the server serves the deleted account nothing.
+
+### 10.8 What removal does not do
+
+No step rotates a vault's key (P6, spec 05 R7). A removed member who kept the key, working with the
+server, can still read every later item, and can also **write**: items carry no author signature, and a
+hostile server accepts writes it should refuse. The remove dialog says so:
+
+> Removing someone stops the server from giving them this vault. It doesn't change the vault's key: if
+> they kept a copy and the server helps them, they could still read and change what's in it. To be
+> sure, move everything to a new vault.
+
+**Move everything to a new vault** is offered there. It creates a new vault, copies the items through
+the existing move path (fresh item ids and attachment keys), re-adds the remaining members, and
+deletes the old vault. While both vaults exist it needs free storage equal to the old vault's size; the
+app checks first and says so when the owner is short (spec 03 §14.4). The old vault is deleted last, and
+only once the server stored every add, every copy was made and nothing in it changed meanwhile; a stopped
+move says where it stopped. **From the moment the old vault's deletion is signed** until the server is
+known to have stored it, the old vault is closed for writing on the device: every way into it (a new
+item, an edit, a delete, a restore, a delete for good, an import, a file, a rename, a move or a copy
+into it, a move out of it) is refused before anything is sealed, and copying out still works, so that
+nothing new is put where it may vanish. The whole set of rules, in the order a person meets them, is design
+2026-11-15 §3.13. **On a frozen or failed vault** it still works,
+as the way out: it copies the items out and leaves the old vault frozen, signs nothing on that log, and
+re-adds **only the members the owner ticks, none ticked by default** (the last verified state may
+predate a `remove` this device never saw).

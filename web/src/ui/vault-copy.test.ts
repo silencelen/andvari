@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 
 const here = (p: string) => fileURLToPath(new URL(p, import.meta.url));
 const vaultTsx = readFileSync(here("./Vault.tsx"), "utf8");
+const storeSource = readFileSync(here("../vault/store.ts"), "utf8");
 const householdKt = readFileSync(
   here("../../../core/src/commonMain/kotlin/io/silencelen/andvari/core/client/HouseholdCopy.kt"),
   "utf8",
@@ -97,27 +98,22 @@ describe("Vault.tsx error copy — canon sentences, never wire text", () => {
     expect(vaultTsx).not.toContain("Save rejected: ${");
   });
 
-  it("the editor's rejected-attachment save shows core HouseholdCopy.SAVE_REJECTED_ATTACHMENT, byte-equal (R38)", () => {
+  it("the editor's rejected-attachment save shows core HouseholdCopy.SAVE_REJECTED_ATTACHMENT, byte-equal (R38)", async () => {
     const m = householdKt.match(/const val SAVE_REJECTED_ATTACHMENT = "([^"]+)"/);
     expect(m, "HouseholdCopy.SAVE_REJECTED_ATTACHMENT moved — update the pin").not.toBeNull();
-    expect(vaultTsx).toContain(`"${m![1]}"`);
-    // The branch is keyed on the server's two attachment refusal codes, ahead of the 413 row.
-    const branch = vaultTsx.match(/const rejectedAttachment = [^\n]+/);
-    expect(branch).not.toBeNull();
-    expect(branch![0]).toContain('err.code === "unknown_attachment"');
-    expect(branch![0]).toContain('err.code === "attachment_mismatch"');
+    // The editor's error line is saveerror.ts's (Vault.tsx calls it); keyed on the server's two attachment refusal
+    // codes, ahead of the 413 row.
+    expect(vaultTsx).toContain("setSaveErr(saveErrorText(err, ownsTarget(vaultId)));");
+    const { saveErrorText } = await import("./saveerror");
+    const { ApiError } = await import("../api/client");
+    expect(saveErrorText(new ApiError(413, "unknown_attachment", "x"), true)).toBe(m![1]);
+    expect(saveErrorText(new ApiError(400, "attachment_mismatch", "x"), false)).toBe(m![1]);
   });
 
   it("the MoveCopy 403 shows core HouseholdCopy's 403 row, byte-equal", () => {
     expect(vaultTsx).toContain(`"${canonStatusRow(403)}"`);
   });
 
-  it("the re-seal catch maps ApiError to the canon SERVER_PROBLEM twin and never e.message", () => {
-    const m = householdKt.match(/const val SERVER_PROBLEM = "([^"]+)"/);
-    expect(m).not.toBeNull();
-    expect(vaultTsx).toContain(`"${m![1]}"`);
-    expect(vaultTsx).not.toContain('e.message : "re-seal failed');
-  });
 });
 
 /**
@@ -157,32 +153,16 @@ describe("Vault.tsx key-precedence notices — the core HouseholdCopy twins", ()
     expect(vaultTsx).toContain(asTemplate(fn![1]!));
   });
 
-  it("grant-anomaly carries HouseholdCopy.GRANT_ANOMALY_NOTICE byte-equal (A6)", () => {
-    const m = householdKt.match(/const val GRANT_ANOMALY_NOTICE: String =\s*"([^"]+)"/);
-    expect(m, "HouseholdCopy.GRANT_ANOMALY_NOTICE moved — update the pin").not.toBeNull();
-    expect(vaultTsx).toContain(JSON.stringify(m![1]!));
-  });
-
-  it("grant-anomaly vk_mismatch carries HouseholdCopy.GRANT_VK_MISMATCH_NOTICE byte-equal, with the recovery path (A6 re-review LOW-C)", () => {
-    const m = householdKt.match(/const val GRANT_VK_MISMATCH_NOTICE: String =\s*"([^"]+)"/);
-    expect(m, "HouseholdCopy.GRANT_VK_MISMATCH_NOTICE missing — update the pin").not.toBeNull();
-    expect(m![1]!).toContain("leave it and ask its owner to add you again");
-    expect(vaultTsx).toContain(JSON.stringify(m![1]!));
-  });
-
-  it("added carries both branches of HouseholdCopy.addedNotice byte-equal (A6)", () => {
+  it("added carries HouseholdCopy.addedNotice's sentence without a label byte-equal; the web never names who added", () => {
     const fn = householdKt.match(/fun addedNotice\(vaultName: String, byLabel: String\?\): String =\s*if \(byLabel\.isNullOrBlank\(\)\) "([^"]+)" else "([^"]+)"/);
     expect(fn, "HouseholdCopy.addedNotice moved or was renamed — update the pin").not.toBeNull();
     const plain = fn![1]!.replace("$vaultName", "${name}");
-    const by = fn![2]!.replace("$vaultName", "${name}").replace("$byLabel", "${n.byLabel}");
     expect(vaultTsx).toContain("`" + plain + "`");
-    expect(vaultTsx).toContain("`" + by + "`");
-  });
-
-  it("key-unreadable carries HouseholdCopy.KEY_UNREADABLE_NOTICE byte-equal", () => {
-    const m = householdKt.match(/const val KEY_UNREADABLE_NOTICE: String =\s*"([^"]+)"/);
-    expect(m, "HouseholdCopy.KEY_UNREADABLE_NOTICE moved — update the pin").not.toBeNull();
-    expect(vaultTsx).toContain(JSON.stringify(m![1]!));
+    // The store's one "added" notice carries no label (store.ts pushes it with the vault's name only), so the
+    // branch that named the adder was dead and is gone with the field.
+    expect(vaultTsx).not.toContain("n.byLabel");
+    expect(storeSource).not.toContain("byLabel?: string");
+    expect(storeSource).toContain('vaultName: this.account.decryptVaultName(vaultId, v.metaBlob), kind: "added" });');
   });
 });
 

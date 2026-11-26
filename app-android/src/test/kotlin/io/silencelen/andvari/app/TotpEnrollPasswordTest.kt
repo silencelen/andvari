@@ -22,7 +22,6 @@ class TotpEnrollPasswordTest {
         .lines().joinToString("\n") { it.substringBefore("//") }
 
     private val vmCode = code("AndvariViewModel.kt")
-    private val mainCode = code("MainActivity.kt")
 
     @Test
     fun theViewModelEnrollsWithThePasswordProof() {
@@ -31,12 +30,17 @@ class TotpEnrollPasswordTest {
         assertFalse(vmCode.contains("api!!.totpSetup()"), "the bare setup call is refused by the server outside the fresh-login window")
     }
 
+    /**
+     * The code-only "turn off" call refuses without sending anything since two-step sign-in's off step needs the
+     * master password too. Nothing on the phone called the old view model's wrapper of it; it is gone, and the new
+     * path turns two-step off through `turnOffTwoStepWithPassword` (SettingsAndQuickUnlockTest).
+     */
     @Test
-    fun theEnableStepAsksForTheMasterPassword() {
-        val enable = mainCode.indexOf("PrimaryButton(\"Enable\"")
-        assertTrue(enable > -1, "the Enable button moved — update the pin")
-        val before = mainCode.substring(maxOf(0, enable - 1200), enable)
-        assertTrue(before.contains("SecretField(\"Master password\""), "Enable must sit under a master-password field")
-        assertTrue(mainCode.contains("vm.totpBegin(totpPassword)"), "Enable must hand the typed password to the ViewModel")
+    fun theOldViewModelNoLongerOffersTheCodeOnlyTurnOff() {
+        assertFalse(vmCode.contains("fun totpDisable("), "the old code-only turn-off wrapper must be gone")
+        assertFalse(Regex("""\.totpDisable\(\s*code\s*\)""").containsMatchIn(vmCode), "nothing may call the code-only turn-off")
     }
+
+    // theEnableStepAsksForTheMasterPassword pinned the old Settings screen, deleted in the overhaul. The new path's two-step
+    // setup asks for the password first (trust/SettingsScreens.kt, SettingsAndQuickUnlockTest).
 }

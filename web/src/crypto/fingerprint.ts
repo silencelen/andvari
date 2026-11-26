@@ -15,8 +15,27 @@
  * review 2026-10, root cause A, branch A5).
  */
 
+import { toHexLower } from "./bytes";
+import { sha256 } from "./provider";
+
 /** Human short-form length in hex chars (128 bits). */
 export const SHORT_HEX_LEN = 32;
+
+/**
+ * spec 01 §5 — identity fingerprint = lowercase hex SHA-256 of the identity public key.
+ * MUST be computed over the SEED-DERIVED pubkey, never the server-supplied identityPub.
+ */
+export async function identityFingerprint(identityPub: Uint8Array): Promise<string> {
+  return toHexLower(await sha256(identityPub));
+}
+
+/**
+ * The HUMAN short form of the identity fingerprint — first 32 hex (128 bits), the same length a
+ * member reads elsewhere (security review 2026-10, §7); {@link shortForm} owns the length.
+ */
+export async function shortIdentityFingerprint(identityPub: Uint8Array): Promise<string> {
+  return shortForm(await identityFingerprint(identityPub));
+}
 
 /** The short form: the first {@link SHORT_HEX_LEN} lowercase hex chars of a full fingerprint. */
 export function shortForm(fullFingerprintHex: string): string {

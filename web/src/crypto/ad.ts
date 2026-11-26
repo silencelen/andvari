@@ -32,3 +32,21 @@ export const adAccountState = (userId: string) => join("account-state", userId);
 export const adUsage = (userId: string) => join("usage", userId);
 /** spec 07 §2.4 — backup items envelope AD; `v` is the container header version. */
 export const adExport = (v: number, fileId: string) => join("export", String(v), fileId);
+
+// ---- andvari/v2 (design 2026-11-15 §2.3) ------------------------------------------------------------
+
+function join2(...parts: string[]): Uint8Array {
+  for (const p of parts) {
+    if (p.includes("|")) throw new CryptoError("AD component must not contain '|'");
+  }
+  return utf8(`andvari/v2|${parts.join("|")}`);
+}
+
+/**
+ * Design 2026-11-15 §2.3, §3.6 (d) (T-B3): the UVK wrap of a SHARED vault's key, for the owner wrap and
+ * the member self-wrap alike: `andvari/v2|vk-shared|{vaultId}|{userId}|{genesisHash}`, where
+ * `genesisHash = H(genesis frame)` of the vault's log (`VaultState.genesisHash`). A wrap opens only for
+ * the log whose genesis the wrapping client verified. The personal wrap keeps {@link adVkPersonal}.
+ * Twin of core `Ad.vkShared`; replaces {@link adVk} for shared vaults at the cut-over.
+ */
+export const adVkShared = (vaultId: string, userId: string, genesisHash: string) => join2("vk-shared", vaultId, userId, genesisHash);

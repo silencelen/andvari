@@ -103,12 +103,12 @@ describe("a11y-webext--11 — the ~6 s Argon2id unseal is not silent", () => {
     // Announcer must be UNCONDITIONAL (BL-1): a role=status mounted already-populated is silent.
     expect(welcomeTsx).toContain("const UNSEALING_NOTICE =");
     const announces = welcomeTsx.match(/<Announcer text=\{busy \? UNSEALING_NOTICE : ""\} \/>/g);
-    expect(announces, "one for the Unlock card, one for Sign in").toHaveLength(2);
+    expect(announces, "one each for the Unlock card, Sign in and Sign up").toHaveLength(3);
   });
 
   it("the visible half is the house busy affordance, not a bare label swap", () => {
     const busies = welcomeTsx.match(/busy \? <Busy>Unsealing…<\/Busy>/g);
-    expect(busies).toHaveLength(2);
+    expect(busies).toHaveLength(3); // sign-in, unlock, and opening this browser's copy under a fork (§4.4)
     expect(welcomeTsx).not.toContain('busy ? "Unsealing…"');
   });
 });
@@ -131,12 +131,16 @@ describe("F10 — no unnamed <input> anywhere under web/src/ui", () => {
     expect(files.length).toBeGreaterThan(10);
     expect(files).toContain("Vault.tsx");
     expect(files).toContain("Welcome.tsx");
-    expect(files).toContain("Admin.tsx");
+    expect(files).toContain("KitCard.tsx");
   });
 
   for (const file of files) {
     it(`${file} names every input (Field wrapper, wrapping <label>, or aria-label)`, () => {
-      const lines = readFileSync(here(`./${file}`), "utf8").split("\n");
+      // JSX comments are blanked first (newlines kept): a comment that mentions "<label>" opened a label that never
+      // closed and left every later input in Vault.tsx unscanned until ReSealBanner's comment went.
+      const lines = readFileSync(here(`./${file}`), "utf8")
+        .replace(/\{\/\*[\s\S]*?\*\/\}/g, (m) => m.replace(/[^\n]/g, " "))
+        .split("\n");
       const unnamed: string[] = [];
       // Depth-track the two wrappers that name a control implicitly: <Field> (injects htmlFor)
       // and a wrapping <label> (the .check checkbox rows). Neither is ever self-closing.
@@ -166,29 +170,27 @@ describe("F10 — no unnamed <input> anywhere under web/src/ui", () => {
     });
   }
 
-  it("the two one-shot recovery gates are wrapped in Field, not a bare label", () => {
-    // Vault's re-seal banner (the household recovery key rotated) …
-    expect(vaultTsx).toContain('label="Type the FIRST 32 characters of the fingerprint on your printed recovery sheet"');
-    expect(vaultTsx).not.toContain("<label>Type the FIRST 32 characters");
-    // … and the shown-once phrase type-back, which blocks entry to the vault entirely.
-    expect(welcomeTsx).toContain('label="Type your recovery phrase back to confirm you saved it"');
-    expect(welcomeTsx).not.toContain("<label>Type your recovery phrase back");
+  it("the one-shot recovery gate is wrapped in Field, not a bare label", () => {
+    // The kit's three-group type-back (design §10), which blocks entry to the vault entirely. (Vault's re-seal banner,
+    // the other gate this pinned, went with design §15's web row.)
+    expect(vaultTsx).not.toContain("ReSealBanner");
+    const kitTsx = readFileSync(here("./KitCard.tsx"), "utf8");
+    expect(kitTsx).toContain("<Field key={g} label={`Group ${g}`}>");
+    expect(kitTsx).not.toContain("<label>Group");
   });
 
   it("a <label> heading no control at all is a heading, not a label", () => {
     const stylesHasHead = stylesCss.includes(".field-head {");
     expect(stylesHasHead, ".field-head must exist — it is what these headings paint with").toBe(true);
-    const adminTsx = readFileSync(here("./Admin.tsx"), "utf8");
     const exportTsx = readFileSync(here("./ExportPanel.tsx"), "utf8");
     const sharingTsx = readFileSync(here("./Sharing.tsx"), "utf8");
-    expect(adminTsx).toContain('<div className="field-head" style={{ marginBottom: 8 }}>Minimum client versions</div>');
     expect(exportTsx).toContain('<div className="field-head">What gets exported</div>');
-    // A6 (security review 2026-10): the add-member flow no longer shows a per-add read-only code block; an
-    // unverified member goes through the household verification ceremony (Household.tsx VerifyMemberPanel, whose
-    // inputs are Field-wrapped and pinned above), and a pinned member needs no code step at all.
-    expect(sharingTsx).toContain("presetServed={found}");
+    // Design §3.7, §6.9: adding a member picks one of this browser's current contacts; there is no lookup and no code
+    // step, and the list's heading heads a radio group, not one control.
+    const logAddTsx = readFileSync(here("./LogAddMember.tsx"), "utf8");
+    expect(logAddTsx).toContain('<div className="field-head">{LOG_ADD_TITLE}</div>');
+    expect(sharingTsx).not.toContain("presetServed");
     expect(sharingTsx).not.toContain("'s identity code</label>");
-    expect(welcomeTsx).toContain('<div className="field-head">Your recovery phrase</div>');
   });
 });
 
@@ -252,8 +254,9 @@ describe("a11y F12 — every file with an info message also mounts an Announcer"
   it("the three that were missing it now have it, driven by the value that lands asynchronously", () => {
     expect(healthTsx).toContain('<Announcer text={msg && msg.kind === "info" ? msg.text : ""} />');
     expect(healthTsx).toContain('import { Announcer, Msg } from "./Msg"');
-    const recoverTsx = readFileSync(here("./Recover.tsx"), "utf8");
-    expect(recoverTsx).toContain('<Announcer text={step === "reset"');
+    // The old Recover.tsx went with the old recovery screen; the kit card's "shown again" notice is its successor.
+    const kitTsx = readFileSync(here("./KitCard.tsx"), "utf8");
+    expect(kitTsx).toContain("<Announcer text={notice} />");
     const sharingTsx = readFileSync(here("./Sharing.tsx"), "utf8");
     expect(sharingTsx).toContain("<Announcer text={copiedNote} />");
   });

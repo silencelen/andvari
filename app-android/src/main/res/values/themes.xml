@@ -13,6 +13,17 @@
         <item name="android:windowLightNavigationBar">true</item>
     </style>
 
+    <!-- The autofill windows (unlock, app-fill and card confirms, the chooser, the
+         trust card, the save card) are OPAQUE and cover the whole screen, so nothing of the requesting app shows
+         around them to frame the card with its own words. The dot-parent resolves per configuration (light here,
+         dark from values-night's Theme.Andvari), so the window is the app's own background in both. -->
+    <style name="Theme.Andvari.FillWindow">
+        <item name="android:windowIsTranslucent">false</item>
+        <item name="android:windowIsFloating">false</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowContentOverlay">@null</item>
+    </style>
+
     <!-- Overlay theme for AutofillUnlockActivity: the target app stays visible behind a
          dimmed, non-floating translucent window while the small unlock card is shown.
          Implicit dot-parent (Theme.Andvari) resolves per-configuration, so no night twin

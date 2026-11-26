@@ -28,7 +28,8 @@ export const KDF_MAX_OPS = 10;
  *  state, never a wrong-password/transport error (spec 05 T1). */
 export class KdfPolicyError extends Error {
   constructor(
-    readonly code: "kdf_below_floor" | "kdf_above_ceiling",
+    /** `kdf_not_whole`: a cost that is not a whole number, or a memory cost that is not a whole number of KiB. */
+    readonly code: "kdf_below_floor" | "kdf_above_ceiling" | "kdf_not_whole",
     readonly params: KdfParams,
   ) {
     super(`server KDF params rejected (${code}): ops=${params.ops} memBytes=${params.memBytes}`);
@@ -48,6 +49,10 @@ export function assertServerKdfParams(p: KdfParams): void {
     throw new KdfPolicyError("kdf_below_floor", p);
   if (p.memBytes < KDF_MIN_MEM_BYTES || p.ops < KDF_MIN_OPS) throw new KdfPolicyError("kdf_below_floor", p);
   if (p.memBytes > KDF_MAX_MEM_BYTES || p.ops > KDF_MAX_OPS) throw new KdfPolicyError("kdf_above_ceiling", p);
+  // Spec 01 §7: the whole fence on every served cost, before anything is derived at it. argon2id counts memory in KiB and
+  // the engines round a ragged cost differently, so a cost that is not a whole number, or a memory cost that is not a
+  // whole number of KiB, is the server's fault and is refused here, never derived at.
+  if (!Number.isInteger(p.ops) || !Number.isInteger(p.memBytes) || p.memBytes % 1024 !== 0) throw new KdfPolicyError("kdf_not_whole", p);
 }
 
 /** Shared user-facing copy for a KdfPolicyError — a distinct security block, never a wrong-password.

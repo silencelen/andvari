@@ -14,16 +14,17 @@
  */
 
 import type { BioReq, BioResult } from "./bioprotocol";
-import { DEFAULT_SERVER_URL } from "./serverurl";
+import { PUBLIC_INSTANCE } from "./publicinstance";
+import * as T from "./copy";
 
-/** The RP id is the REFERENCE instance's host, whatever server this browser is configured for
+/** The RP id is the PUBLIC instance's host, whatever server this browser is configured for
  *  (design 2026-07-18 §3): the claim rides the manifest's install-time host_permissions entry,
  *  which is present regardless, whereas a self-hoster's own domain lives only in
  *  optional_host_permissions and would drag a runtime consent prompt into the unlock path. Derived
- *  from DEFAULT_SERVER_URL rather than re-spelled, so there is one literal to change and the SW's
+ *  from PUBLIC_INSTANCE.origin rather than re-spelled, so there is one literal to change and the SW's
  *  bug-ext-gating--4 permission probe cannot drift off the origin the ceremony actually claims.
- *  Consequence a self-hoster sees: their passkey is listed under the reference domain. */
-const RP_ID = new URL(DEFAULT_SERVER_URL).hostname;
+ *  Consequence a self-hoster sees: their passkey is listed under the public instance's domain. */
+const RP_ID = new URL(PUBLIC_INSTANCE.origin).hostname;
 const RP_NAME = "andvari";
 const CEREMONY_TIMEOUT_MS = 60_000;
 
@@ -172,16 +173,16 @@ async function main(): Promise<void> {
   // on the friendly no-op screen, never be mis-run as a ceremony with undefined fields.
   if (req && (req.op !== "enroll" && req.op !== "eval")) req = null;
   if (!req) {
-    setMsg("Nothing to do here — you can close this window.");
+    setMsg(T.CONNECTOR_NOTHING_TO_DO);
     showClose();
     return;
   }
 
   const isEnroll = req.op === "enroll";
-  $("cx-title").textContent = isEnroll ? "Set up quick unlock" : "Unlock andvari";
-  setMsg(isEnroll ? "Set up unlocking with your device’s biometrics or PIN." : "Confirm it’s you to unlock andvari.");
+  $("cx-title").textContent = isEnroll ? T.CONNECTOR_SET_UP_TITLE : T.CONNECTOR_UNLOCK_TITLE;
+  setMsg(isEnroll ? T.CONNECTOR_SET_UP : T.CONNECTOR_UNLOCK);
   const cont = $<HTMLButtonElement>("cx-continue");
-  cont.textContent = "Continue";
+  cont.textContent = T.CONTINUE;
   cont.hidden = false;
   $("cx-hint").hidden = false;
   // a11y-webext--8: this window opens fresh with focus on <body>, and Continue is the ONLY thing
@@ -193,7 +194,7 @@ async function main(): Promise<void> {
     async () => {
       cont.disabled = true;
       $("cx-hint").hidden = true;
-      setMsg("Follow your device’s prompt…");
+      setMsg(T.CONNECTOR_FOLLOW_PROMPT);
       let result: BioResult;
       try {
         result = req!.op === "enroll" ? await runEnroll(req as Extract<BioReq, { op: "enroll" }>) : await runEval(req as Extract<BioReq, { op: "eval" }>);
@@ -207,26 +208,26 @@ async function main(): Promise<void> {
         /* the SW got it or died; the poll below reflects reality either way */
       }
       if (!result.ok) {
-        setMsg("Cancelled — you can close this window and try again.", "err");
+        setMsg(T.CONNECTOR_CANCELLED, "err");
         showClose();
         return;
       }
       if (result.op === "enroll" && !result.prfEnabled) {
-        setMsg("This device can’t do biometric quick unlock. Use a PIN instead.", "err");
+        setMsg(T.CONNECTOR_NO_BIO, "err");
         showClose();
         return;
       }
-      setMsg(isEnroll ? "Finishing setup…" : "Unlocking…");
+      setMsg(isEnroll ? T.CONNECTOR_FINISHING : T.CONNECTOR_UNLOCKING);
       const done = await pollUntilDone(req!.op);
       if (done) {
-        setMsg(isEnroll ? "Quick unlock is on ✓" : "Unlocked ✓ — reopen andvari.", "ok");
+        setMsg(isEnroll ? T.CONNECTOR_SET_UP_DONE : T.CONNECTOR_UNLOCK_DONE, "ok");
         // a11y-webext--8: #cx-msg is a POLITE live region, so this announcement waits its turn —
         // and at 900 ms the window teardown was killing it, deleting the one instruction a blind
         // user needs from this flow ("reopen andvari"). Long enough for a polite queue to drain;
         // still short enough that the window does not feel stuck.
         setTimeout(() => window.close(), 2500);
       } else {
-        setMsg("Done — you can close this window and reopen andvari.");
+        setMsg(T.CONNECTOR_DONE);
         showClose();
       }
     },

@@ -203,6 +203,23 @@ data class ItemSummary(
     val hasTotp: Boolean,
     /** Saved here but not yet on the server. */
     val pendingSync: Boolean,
+    /** The vault the item is in, for the filter by vault. */
+    val vaultId: String = "",
+    /** That vault's name, as this device decrypted it; null where it holds no name for it. */
+    val vaultName: String? = null,
+    /** The vault is a shared one (the row's shared-vault mark); false for the personal vault. */
+    val sharedVault: Boolean = false,
+    /** A card's brand ("Visa"), worked out from its number; null for another kind of item, no number or a brand not known. */
+    val cardBrand: String? = null,
+    /** A card's last four digits (fewer when its number is shorter); null for another kind of item or no number. */
+    val cardLastFour: String? = null,
+    /**
+     * When the item was last changed, Unix milliseconds: the server's record of its last write (spec 02 §1, bookkeeping,
+     * so only an order for "recently updated", never a reason for anything); the time of the save for one queued here.
+     */
+    val updatedAt: Long = 0L,
+    /** This account may change the item: false in a vault it only reads, so a view-only item offers no Edit. */
+    val editable: Boolean = false,
 )
 
 /** An item's detail screen. Secrets are read through [SessionController.revealSecret] and [SessionController.oneTimeCode]. */
@@ -275,7 +292,24 @@ data class SharingVaultView(
     val awaitingReview: Boolean = false,
 )
 
-data class DeletedVaultView(val vaultId: String, val name: String, val deletedAtMs: Long, val purgeAtMs: Long)
+/**
+ * A row of the owner's "Recently deleted" shared vaults. [purgeAtMs] is the day the server served for the end of this
+ * deletion's grace, the only day a screen may name; 0 where the server served none (never drawn as a date then:
+ * [deletedNoDayLine] is the line instead). [deleted] is the vault's own mark: this device's verified log shows its
+ * owner's `delete`.
+ */
+data class DeletedVaultView(
+    val vaultId: String,
+    val name: String,
+    val deletedAtMs: Long,
+    val purgeAtMs: Long,
+    /** Additive. */
+    val deleted: Boolean = true,
+) {
+    /** [CopyKey.VAULT_DELETED_NO_DAY] for a [deleted] vault whose grace end the server did not serve ([purgeAtMs] 0); null otherwise. */
+    val deletedNoDayLine: CopyLine?
+        get() = if (deleted && purgeAtMs <= 0L) CopyLine.of(CopyKey.VAULT_DELETED_NO_DAY) else null
+}
 
 data class RemovedVaultView(
     val vaultId: String,
@@ -588,6 +622,11 @@ data class TrashItemView(
     val canRestore: Boolean,
     /** Delete forever removes it and its history now; false in a vault this account only reads. */
     val canPurge: Boolean,
+    /**
+     * Not read yet: this device never held the item and this opening of the trash did not read it, so [name], [type] and
+     * [detail] are null for now. Restore reads it first; opening the trash again reads further.
+     */
+    val notReadYet: Boolean = false,
 )
 
 /** One item's earlier versions (the server keeps the last 10), newest first. Secrets are read through [SessionController.historyPassword]. */

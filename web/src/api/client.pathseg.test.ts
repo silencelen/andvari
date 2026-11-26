@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiClient } from "./client";
+import { WireApi } from "./wireclient";
 
 /**
  * Security review 2026-10 (root cause D): an item id or attachment id a co-member authored went
@@ -27,6 +28,8 @@ function stub(): { urls: string[] } {
 }
 
 const client = () => new ApiClient("http://server", { accessToken: "a", refreshToken: "r" });
+/** The item routes are the item layer's wire client (api/wireclient.ts), over the same transport. */
+const wire = () => new WireApi(client());
 
 const HOSTILE = [
   "../admin/users/0f8e2c1a-3b4d-4e5f-8a9b-0c1d2e3f4a5b/disable?",
@@ -47,9 +50,9 @@ describe("ApiClient refuses a non-id path segment before any request", () => {
   it("purge / restore / versions refuse a planted item id", async () => {
     const { urls } = stub();
     for (const id of HOSTILE) {
-      await expect(client().purgeItem(id), `purge ${JSON.stringify(id)}`).rejects.toThrow();
-      await expect(client().restoreItem(id, { formatVersion: 1, attachmentIds: [], blob: "x" }), `restore ${JSON.stringify(id)}`).rejects.toThrow();
-      await expect(client().itemVersions(id), `versions ${JSON.stringify(id)}`).rejects.toThrow();
+      await expect(wire().purgeItem(id), `purge ${JSON.stringify(id)}`).rejects.toThrow();
+      await expect(wire().restoreItem(id, { formatVersion: 1, attachmentIds: [], blob: "x" }), `restore ${JSON.stringify(id)}`).rejects.toThrow();
+      await expect(wire().itemVersions(id), `versions ${JSON.stringify(id)}`).rejects.toThrow();
     }
     expect(urls).toEqual([]);
   });
@@ -57,8 +60,8 @@ describe("ApiClient refuses a non-id path segment before any request", () => {
   it("attachment download / upload refuse a planted attachment id", async () => {
     const { urls } = stub();
     for (const id of HOSTILE) {
-      await expect(client().downloadAttachment(id), `download ${JSON.stringify(id)}`).rejects.toThrow();
-      await expect(client().uploadAttachment(id, "i", "v", new Uint8Array(1)), `upload ${JSON.stringify(id)}`).rejects.toThrow();
+      await expect(wire().downloadAttachment(id), `download ${JSON.stringify(id)}`).rejects.toThrow();
+      await expect(wire().uploadAttachment(id, "i", "v", new Uint8Array(1)), `upload ${JSON.stringify(id)}`).rejects.toThrow();
     }
     expect(urls).toEqual([]);
   });
@@ -75,8 +78,8 @@ describe("ApiClient refuses a non-id path segment before any request", () => {
   it("a real id still reaches exactly its own route", async () => {
     const { urls } = stub();
     const id = "0f8e2c1a-3b4d-4e5f-8a9b-0c1d2e3f4a5b";
-    await client().purgeItem(id);
-    await client().downloadAttachment(id);
+    await wire().purgeItem(id);
+    await wire().downloadAttachment(id);
     expect(urls).toEqual([`http://server/api/v1/items/${id}/purge`, `http://server/api/v1/attachments/${id}`]);
   });
 });

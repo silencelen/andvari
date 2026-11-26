@@ -1,4 +1,5 @@
 import type { BuildTarget } from "./buildtarget.ts";
+import { OPEN_APP_AND_UNLOCK } from "./copy.ts";
 
 /**
  * Safari on iOS: the extension has no sign-in and no vault of its own. Its popup fills from the andvari app's vault,
@@ -51,7 +52,7 @@ export type AppVaultSecret =
   | { state: "refused" }
   | { state: "unavailable" };
 
-const OPEN_APP_FALLBACK = "Open andvari and unlock it, then try again.";
+const OPEN_APP_FALLBACK = OPEN_APP_AND_UNLOCK;
 const TICKET_RE = /^[0-9a-f]{64}$/;
 const MAX_ITEMS = 5000;
 const text = (v: unknown, max: number): string | null => (typeof v === "string" && v.length <= max ? v : null);

@@ -1,4 +1,4 @@
-# selfhost test fixture — the real file is deploy/docker-compose.caddy.yml (docs/deploy lane)
+# selfhost test fixture — the real file is deploy/docker-compose.caddy.yml (this stub shadows it on the test classpath)
 services:
   caddy:
     image: caddy:2-alpine

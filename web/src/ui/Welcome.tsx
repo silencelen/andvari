@@ -1,131 +1,318 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ApiClient, ApiError } from "../api/client";
-import type { ClientPolicy } from "../api/types";
-import { fromB64 } from "../crypto/bytes";
-import { fingerprint, shortFormMatches } from "../crypto/escrow";
-import { enrolInPerson, enrollCheckCodeMatches, IN_PERSON_CODE_WARNING, type InPersonEvidence } from "../enroll/enrollcheck";
-import { pinFromEnrolLink } from "../vault/contacts";
-import { MyIdentityCard } from "./Household";
-import { groupedShort } from "../crypto/fingerprint";
-import { confirmMatches, displayForm } from "../crypto/member-recovery";
-import { clearPendingEnroll, enrollPrefillFor, peekPendingEnroll, type EnrollPayload } from "../enroll/enrolllink";
-import { enrollPosture, escrowGate, type EnrollPosture } from "../enroll/enrollposture";
-import { Account, IdentityMismatchError, VaultKeyDamagedError, deviceName } from "../vault/account";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ApiError } from "../api/client";
+import type { ClientPolicyV2 } from "../api/wire";
 import { KdfPolicyError, WEAK_KDF_MESSAGE } from "../crypto/keys";
-import { maybeKdfUpgrade } from "../vault/kdfupgrade";
-import { VaultStore } from "../vault/store";
-import { NullCache, openVaultCache } from "../vault/idbcache";
-import { unlockExistingSession } from "./unlock";
-import { loadSelfIdentityPub, recordSelfIdentityPub } from "../vault/selfidentity";
-import { scheduleClipboardClear, writeClipboard } from "./clipboard";
-import { CLIPBOARD_FAILED, CLIPBOARD_NOT_CLEARED, NetworkError, POLICY_UNAVAILABLE, UNREACHABLE, net } from "./errors";
-import { safeHttpUrl } from "./safeurl";
+import { decodeName, emailNorm, NONE } from "../crypto/trust/grammar";
+import { ESCROW_WRONG_FORM, type OperatorOffer, operatorOffer, operatorRecoveryOffered, PROOF_REFUSED, refusalOf, SERVER_KEYS_NOT_KNOWN } from "../vault/settingsflow";
+import type { SessionWrap } from "../vault/sessionwrap";
+import { ONLY_ME, RecoveryChoice, type RecoveryChoiceValue, recoveryChoiceReady } from "./RecoveryChoice";
+import { Account, deviceName } from "../vault/account";
+import { accountId, SELF_IDENTITY_MISMATCH, wipeOpened, type OpenedAccount } from "../vault/accountopen";
+import { boundAccountAt } from "../vault/selfidentity";
+import { EarlierAccountOffer, type EarlierOffer, earlierOfferFor, identityRefusal } from "./ForgetEarlier";
+import { abandonKit, commitKitRecovery, confirmKit, currentAuthKey, type FreshKit, type KitCommitResult, type KitInput, type KitVerified, parseKitInput, PasswordRuleRefused, rotateKit, verifyKit } from "../vault/kitflow";
+import type { UnknownWhy } from "../vault/afterstore";
+import { canCreateAccount, completeSignup, openFromCopy, type PinOutcome, settlePin, signIn, startSignup, type UnlockResult, unlockSession } from "../vault/onboardflow";
+import type { CardStatus, FirstPin, WebPin } from "../vault/pinstore";
+import { runPow } from "../vault/pow";
+import type { SessionKeys } from "../vault/sessionwrap";
+import type { VaultStore } from "../vault/store";
 import { Busy } from "./Busy";
-import { SignOutLink } from "./SignOutLink";
-import { Field } from "./Field";
-import { fmtDate } from "./format";
-import { Announcer, Msg } from "./Msg";
-import { Recover } from "./Recover";
-import { needsRecoveryCapture, settleRecoveryConfirm, setupAndCommitRecovery } from "./recovery-capture";
 import {
-  clearSession,
-  ensureCachePersistenceRequested,
-  installId,
-  offlineCopyStamp,
-  refreshCachedAccountKeys,
-  revokeSessionBestEffort,
-  saveSession,
-  webCacheEnabled,
-  wipeVaultCache,
-  type Session,
-} from "./session";
-import { BrandSigil } from "./Sigil";
-import { clampClipboardClearSeconds } from "./policyclamp";
+  AGE_13_OR_OLDER,
+  AS_THE_SERVER_NAMES_ITSELF,
+  CARD_CHANGED_UPDATE,
+  CARD_FORK,
+  CARD_MOVED_UPDATE,
+  CARD_MOVED_WEB,
+  CARD_NOT_VERIFIED,
+  CARD_OTHER_ADDRESS,
+  CARD_OTHER_ADDRESS_TITLE,
+  CARD_RECORD_DAMAGED,
+  CARD_RECORD_DAMAGED_TITLE,
+  CARD_REFUSED,
+  CHANGE_NOT_STORED,
+  CHANGE_NOT_STORED_UNDATED,
+  WRONG_PASSWORD_KDF_NOT_USABLE,
+  CARD_WITHHELD,
+  CODE_SENT_DAILY,
+  CREATE_ACCOUNT_HERE,
+  EMAIL_CHECK_SPAM,
+  ENDED_COPY_OPEN,
+  ENDED_COPY_READ,
+  ESCROW_WRONG_FORM_TEXT,
+  fill,
+  FORGET_ARMED_LABEL,
+  FORGET_DELETES_COPY,
+  FORGET_KEEP,
+  FORGET_THIS_SERVER,
+  UNSENT_SEND_FIRST_SIGN_IN,
+  UNSENT_SEND_FIRST_UNLOCK,
+  unsentLine,
+  FORKED_COPY_OPEN,
+  FORKED_COPY_READ,
+  FORKED_NO_COPY,
+  GATE_BASELINE,
+  GATE_CALLS_ITSELF,
+  GATE_CANCEL,
+  GATE_CONTINUE,
+  GATE_ENTERING_PASSWORD,
+  GATE_KIND_CHANGE,
+  GATE_KIND_CONTINUE,
+  GATE_KIND_NOT_NOW,
+  GATE_OPERATOR_KEY,
+  GATE_TITLE_CONNECT,
+  GATE_TITLE_KIND_CHANGE,
+  IDENTITY_FAULT,
+  KIT_PASTE_LABEL,
+  KIT_RECOVER,
+  KIT_RECOVER_SETS_PASSWORD,
+  KIT_RECOVERY_STORED_UNCHECKED,
+  passwordRuleText,
+  REMADE_ACCOUNT_REFUSAL,
+  KIT_RECOVERY_CONFIRM_SERVER_REFUSED,
+  SIGNUP_CONFIRM_SERVER_REFUSED,
+  CARD_KIND_CHANGED_RELOAD,
+  KIT_RECOVERY_STORED_KIT_GONE,
+  KIT_RECOVERY_UNKNOWN_KIT_GONE,
+  SIGNUP_STORED_KIT_GONE,
+  SIGNUP_UNKNOWN_KIT_GONE,
+  KIT_RECOVERY_UNKNOWN,
+  KIT_RECOVERY_UNKNOWN_SERVER_ERROR,
+  KIT_RECOVERY_UNKNOWN_UNREADABLE,
+  KIT_RECOVERY_NOT_SENT,
+  KIT_REPLACED,
+  KIT_WRONG_SERVER,
+  LINK_REQUIRED_WEB,
+  LINK_REQUIRED_WEB_TITLE,
+  MAIL_UNAVAILABLE,
+  MASTER_PASSWORD_FOR,
+  OPERATOR_KIT_RESET_NOT_ON_WEB,
+  RECOVERY_CHOICE_REFUSED,
+  NAME_TOO_LONG,
+  OPERATOR_NOT_ON_WEB,
+  POW_PROGRESS,
+  RECOVERY_KIT_ONLY,
+  RECOVERY_ONLY_ME_DETAIL,
+  KDF_NOT_USABLE,
+  signInAnswerRefusedText,
+  kdfRefusalText,
+  OFFLINE_COPY_UNREADABLE,
+  SERVER_KEYS_NOT_KNOWN_REFUSED,
+  SERVER_KEYS_NOT_KNOWN_SIGN_IN,
+  SERVER_REFUSED_PROOF,
+  SESSION_ENDED_HELD,
+  SESSION_NOT_CONFIRMED,
+  SIGN_IN,
+  SIGN_IN_FORGOT,
+  SIGN_IN_KEYS_NOT_THIS_ACCOUNT,
+  SIGN_IN_WAIT,
+  SIGNIN_BACKOFF,
+  SIGNUP_FULL,
+  SIGNUP_STORED_UNCHECKED,
+  SIGNUP_UNKNOWN,
+  SIGNUP_UNKNOWN_SERVER_ERROR,
+  SIGNUP_UNKNOWN_UNREADABLE,
+  SIGNUP_NOT_SENT,
+  USE_THE_APP,
+} from "./copy";
+import { answerLimitText, NetworkError, POLICY_UNAVAILABLE, UNREACHABLE } from "./errors";
+import { nameText } from "./nametext";
+import { Field } from "./Field";
+import { fmtDate, fmtDayYear } from "./format";
+import { instanceLabel, KitGate, StoredKitCard } from "./KitCard";
+import { Announcer, Msg } from "./Msg";
+import { cachedAccountKeys, copyAtUnlock, enterVault, knownIdentity, type LoginMeta, OperatorAccountError, type WebContext, writeSignupRecovery } from "./opensession";
 import { MasterPasswordHint } from "./passwordadvice";
-import { abandonSignIn, pendingSignInBinding } from "./tabsession";
+import { cachedPendingWraps, clearSession, offlineCopyStamp, revokeSessionBestEffort, type Session, tokensKeptAcrossLock, unsentChangeCount, wipeVaultCache } from "./session";
+import { endedByServer, endedUnconfirmed } from "./sessionend";
+import { BrandSigil, Wordmark } from "./Sigil";
+import type { SessionHow } from "../vault/contactbook";
+import { SignOutLink, type UnsentAsk, useUnsentArm } from "./SignOutLink";
 import { meetsMasterPasswordFloor } from "./strength";
-import { useAutoLock } from "./useAutoLock";
+import { abandonSignIn, beginSignIn, beginUnlock, signInForm, type SignInFlow } from "./tabsession";
+
+export type { LoginMeta } from "./opensession";
 
 type Mode = { unlock: Session } | { fresh: true };
+type Ready = (account: Account, store: VaultStore, meta: LoginMeta) => void;
 
-/**
- * CR-02 (compliance 2026-07-15): the recovery-phrase reveal / capture-gate / self-recovery screens
- * hold a fully-unlocked Account and/or a UVK-equivalent recovery secret (TM-R9) OUTSIDE the vault
- * phase, where App's inactivity auto-lock (keyed to phase.kind==="vault") never arms — so a
- * walked-away device could display a standing account-takeover credential indefinitely, outside the
- * TM-T4 auto-lock bound spec 05 claims exists (KH-22). A fixed conservative idle cap bounds it. The
- * same activity-reset useAutoLock as the vault, so an actively-typing user is never cut off; only a
- * genuinely-idle screen expires. On expiry: zero the secret, drop the held Account/store, land on the
- * sign-in/unlock card with a non-alarming notice — the capture/reveal re-fires with a FRESH phrase at
- * the next sign-in (recoveryConfirmed stays false), the finding's prescribed heal path.
- */
-const REVEAL_TIMEOUT_S = 300; // 5 minutes idle
-/** Static (never interpolated — §F.7). Never implies the account/vault is broken. */
-const REVEAL_TIMEOUT_NOTICE = "Timed out for your security. Sign in again — a fresh recovery phrase will be shown.";
+/** Static (never interpolated). Shown after a kit screen sat idle: the kit is shown afresh at the next sign-in. */
+const KIT_TIMEOUT_NOTICE = "Timed out for your security. Sign in again — a fresh recovery kit will be shown.";
+const UNSEALING_NOTICE = "Unsealing your vault — this takes a few seconds.";
+const WRONG_PASSWORD = "Wrong master password.";
+/** The unlock card's session end when no App handler is wired (App passes onSessionEnded). */
+const SESSION_EXPIRED_NOTICE = "Session expired — sign in again.";
+const DEVICE_PROBLEM = "Something went wrong on this device while unsealing your vault — your password is probably fine. Reload this page and try again.";
+/** PLACEHOLDER: a refused sign-up step (spec 03 §14.1 codes the design gives no sentence for). */
+const SIGNUP_REFUSALS: Record<string, string> = {
+  signup_closed: "This server isn't taking new accounts.",
+  signup_full: SIGNUP_FULL,
+  invalid_email: "That doesn't look like an email address.",
+  email_domain_blocked: "This server doesn't take sign-ups from that email domain.",
+  age_confirm_required: "Please confirm you are 13 or older.",
+  pow_required: "Something went wrong getting ready to send the code. Try again.",
+  bad_pow: "Something went wrong getting ready to send the code. Try again.",
+  mail_unavailable: MAIL_UNAVAILABLE,
+  bad_code: "That code is wrong or has expired.",
+  bad_ticket: "This sign-up took too long. Start again.",
+  email_taken: "An account with this email already exists. Sign in instead.",
+  signup_daily_max: "This server has taken all the new accounts it can today. Try again tomorrow.",
+  rate_limited: SIGNIN_BACKOFF,
+  kdf_too_weak: WEAK_KDF_MESSAGE,
+  [ESCROW_WRONG_FORM]: ESCROW_WRONG_FORM_TEXT,
+};
 
-/** What the vault shell needs to know about how this session came to be. */
-export interface LoginMeta {
-  isAdmin: boolean;
-  mustChangePassword: boolean;
-  // F57: the account's escrow is sealed to a superseded recovery key (re-ceremony) and the
-  // client should re-seal on this unlock. escrowFingerprint is the CURRENT org recovery
-  // fingerprint (the re-seal target + the value the user verifies against the new sheet).
-  escrowStale: boolean;
-  /** §8.4 escrow v2 migration hint (security review 2026-10, root cause A). Optional: older paths omit it. */
-  escrowNeedsV2?: boolean;
-  escrowFingerprint: string;
-  /** design 2026-07-13-web-offline-cache §C6: set ONLY by an OFFLINE unlock whose cached
-   *  `recoveryConfirmed !== true`. The vault shows a persistent, NON-blocking reminder banner
-   *  (never "broken" copy). An online unlock never sets it — the online capture gate hard-blocks
-   *  instead — so the nag can't be ridden indefinitely by any device that ever reconnects. */
-  offlineRecoveryReminder?: boolean;
+/** The text for a refusal the flows hand back. Never the server's own message: that text is the server's to choose. */
+export function refusalText(e: unknown): string {
+  const limit = answerLimitText(e);
+  if (limit !== null) return limit;
+  if (e instanceof KdfPolicyError) return kdfRefusalText(e);
+  if (e instanceof NetworkError || e instanceof TypeError) return UNREACHABLE;
+  if (e instanceof ApiError) {
+    const known = SIGNUP_REFUSALS[e.code];
+    if (known) return known;
+    if (e.status === 0) return "The server's answer didn't make sense, so nothing was changed.";
+    if (e.status >= 500) return "The server had a problem answering. Try again in a moment.";
+    return `The server refused this (${e.code}).`;
+  }
+  // The address grammar (spec 01 §5.5) refused locally, before anything was sent: the same sentence as the server's.
+  if (e instanceof Error && e.message === "invalid_email") return SIGNUP_REFUSALS.invalid_email!;
+  return DEVICE_PROBLEM;
 }
 
-/** design 2026-07-13 piece-binding: the STATIC notice for a `409 recovery_piece_stale` confirm — the
- *  phrase the user just typed back attests a piece a concurrent setup (another device's gate) rotated
- *  away. Static copy only, never interpolated (§F.7); shared verbatim by the enroll reveal and the
- *  vault-entry capture gate. */
-const RECOVERY_PIECE_STALE_NOTICE =
-  "This recovery phrase was replaced — a newer one was created, possibly from another device. A fresh phrase will be shown; discard any phrase you saved before it.";
+/**
+ * A refused sign-in's text. The sign-in's back-off has a line of its own (SIGN_IN_WAIT, "at least a minute"): the server
+ * names a fixed wait there, since its caller has proven nothing, so its number is never shown, unlike the real wait a
+ * signed-in session is told (reauthtext.ts). Everything else is {@link refusalText}.
+ */
+export function signInRefusalText(e: unknown): string {
+  if (e instanceof ApiError && (e.code === "rate_limited" || e.status === 429)) return SIGN_IN_WAIT;
+  return refusalText(e);
+}
 
-/** §F.9 handoff to the vault-entry capture gate: a fully-unlocked account whose vault entry is BLOCKED
- *  until it captures a recovery phrase (`recoveryConfirmed !== true`). `currentAuthKey` is the login
- *  authKey derived from the just-typed master password (the server re-verifies it at self-setup). */
-interface CaptureHandoff {
-  account: Account;
-  store: VaultStore;
-  meta: LoginMeta;
-  currentAuthKey: string;
+/**
+ * What the person reads when the kit at sign-in (a fresh kit for an account whose kit was never confirmed) did not go
+ * through. It reads the session's mark itself, as every other proof's text does: a proof the server refused while the
+ * session is marked as holding keys the server does not ({@link SessionWrap.serverKeysNotKnown}) is said as that, never
+ * as a wrong password, whatever path led here. [wrap] is the session's; a sign-in and an unlock of the served keys carry
+ * none.
+ */
+/**
+ * The line for a sign-in, a sign-up or a kit's check that stopped before anything was sent: the card's refusal only
+ * where the pinned card failed (`pin`); where the password rule refused, the rule's own line by its decision, with the
+ * confirmation's own line where "sign in again" is not open ([where]: a sign-up has no account yet, a kit recovery no
+ * password).
+ */
+export function stoppedBeforeSendingText(r: { readonly kind: "pin" } | { readonly kind: "password_rule"; readonly decision: "trust_gate" | "refuse_entry" }, where: "sign_in" | "sign_up" | "kit_recovery"): string {
+  if (r.kind === "pin") return CARD_REFUSED;
+  if (r.decision === "trust_gate" && where === "sign_up") return SIGNUP_CONFIRM_SERVER_REFUSED;
+  if (r.decision === "trust_gate" && where === "kit_recovery") return KIT_RECOVERY_CONFIRM_SERVER_REFUSED;
+  return passwordRuleText(r.decision);
+}
+
+/**
+ * The first screen's stop where the pinned server's newest card did not simply extend the pin: moved, changed its kind
+ * (an update needed, or a change to show the person: never "couldn't verify", the card verified), or not verified.
+ */
+export function pinChangedText(s: CardStatus): string {
+  if (s.kind === "moved") return fill(CARD_MOVED_WEB, s.newest.origin);
+  if (s.kind === "kind_changed") return s.mustUpdate ? CARD_CHANGED_UPDATE : CARD_KIND_CHANGED_RELOAD;
+  return CARD_REFUSED;
+}
+
+export function kitAtSignInText(e: unknown, wrap?: Pick<SessionWrap, "serverKeysNotKnown">): string {
+  if (e instanceof PasswordRuleRefused) return passwordRuleText(e.decision);
+  const r = refusalOf(e, wrap);
+  if (r.kind === "refused" && r.code === SERVER_KEYS_NOT_KNOWN) return SERVER_KEYS_NOT_KNOWN_REFUSED;
+  // The proof was made here (currentAuthKey opened the session's wrap first): the server's refusal is never a wrong password.
+  if (r.kind === "refused" && r.code === PROOF_REFUSED) return SERVER_REFUSED_PROOF;
+  return refusalText(e);
+}
+
+/**
+ * The unlock card's sentence for the two results that say two things at once (spec 01 §7): a password that opens none of
+ * this browser's own keys while the server's cost cannot be used; and the new password of a change made here that never
+ * reached the server (with the day it was made, where the copy recorded it).
+ */
+export function unlockRefusalText(r: Extract<UnlockResult, { kind: "wrong_password_kdf_refused" | "change_not_stored" }>): string {
+  if (r.kind === "wrong_password_kdf_refused") return WRONG_PASSWORD_KDF_NOT_USABLE;
+  return r.at === null ? CHANGE_NOT_STORED_UNDATED : fill(CHANGE_NOT_STORED, fmtDayYear(r.at));
 }
 
 interface Props {
-  client: ApiClient;
-  policy: ClientPolicy | null;
+  ctx: WebContext;
+  policy: ClientPolicyV2 | null;
   policyError: boolean;
   policyErrorMessage?: string;
   onRetryPolicy: () => Promise<void>;
   mode: Mode;
-  /** F26: one-line reason this screen is showing ("Locked.", revoked, …) — rendered on the card. */
   notice?: string;
-  onReady: (account: Account, store: VaultStore, meta: LoginMeta) => void;
-  /** Leave this card. An optional notice rides through to App.signOut so the definitive-401
-   *  ("Session expired…") can wipe (§E.4) AND surface its reason on the next Welcome screen. */
+  /** The account of a session the server ended on this profile: the first screen offers "Sign in" to it first. */
+  knownEmail?: string;
+  onReady: Ready;
+  /**
+   * Leave this card. With no notice it is the person's own sign-out (SignOutLink asked first). With a notice it is a
+   * sign-in this browser ended by itself (the kit timed out; the operator account) after ending that sign-in's own
+   * session: App says the number of unsent changes first and deletes the copy only when there are none.
+   */
   onForget: (notice?: string) => void;
+  /** Design §4.4: the unlock found the session gone server-side (a definitive 401); App ends it and keeps the copy. */
+  onSessionEnded?: () => void;
+  /**
+   * This browser itself ended the sign-in or session and kept the copy because it holds changes not sent (App
+   * endByClient): the notice says why and how many, so the card does not also say that the server ended it.
+   */
+  endedByBrowser?: boolean;
 }
 
-export function Welcome({ client, policy, policyError, policyErrorMessage, onRetryPolicy, mode, notice, onReady, onForget }: Props) {
-  if ("unlock" in mode) {
-    return <Unlock client={client} policy={policy} session={mode.unlock} notice={notice} onReady={onReady} onForget={onForget} />;
-  }
-  return <FreshStart client={client} policy={policy} policyError={policyError} policyErrorMessage={policyErrorMessage} onRetryPolicy={onRetryPolicy} notice={notice} onReady={onReady} />;
+export function Welcome(p: Props) {
+  return (
+    <div className="auth-shell">
+      <div className="card">
+        <div className="card-hero">
+          <div className="sigil"><BrandSigil /></div>
+          <h1><Wordmark /></h1>
+        </div>
+        {p.notice && <Msg kind="info">{p.notice}</Msg>}
+        <PinSettled ctx={p.ctx} forPassword={"unlock" in p.mode} onForgotten={() => void p.onRetryPolicy()} held={"unlock" in p.mode ? { session: p.mode.unlock, onReady: p.onReady, onForget: p.onForget } : undefined}>
+          {(pin, cardNotice) =>
+            "unlock" in p.mode ? (
+              <Unlock ctx={p.ctx} policy={p.policy} pin={pin} cardNotice={cardNotice} session={p.mode.unlock} onReady={p.onReady} onForget={p.onForget} onSessionEnded={p.onSessionEnded ?? (() => p.onForget(SESSION_EXPIRED_NOTICE))} endedByBrowser={p.endedByBrowser === true} />
+            ) : (
+              <FreshStart {...p} pin={pin} cardNotice={cardNotice} />
+            )
+          }
+        </PinSettled>
+      </div>
+    </div>
+  );
 }
 
-/** design 2026-07-13-web-offline-cache §E.3.4: the Unlock-card transparency line — a borrowed-machine
- *  user SEES that this device holds a durable (encrypted) copy, and how fresh it is. Rendered only
- *  when a cache actually exists (offlineCopyStamp — a non-creating probe); null hides it entirely.
- *  Exported for the static-render test (the line must show ONLY with a cache). */
-export function OfflineCopyUnlockLine({ stamp }: { stamp: { lastSyncAt: number | null } | null }) {
+/** What the unlock card says of this browser's offline copy: none, one it cannot read, or one with its last sync. */
+export type CopyStamp = { readonly lastSyncAt: number | null; readonly unreadable?: true };
+
+/**
+ * The unlock card's stamp for [userId]'s offline copy: null when this browser holds none. A copy that is there but cannot
+ * be read here (its keys row not a usable key set, or the database fails to open: {@link copyAtUnlock}'s `unreadable`)
+ * is said as that, never with a "last synced" time over keys nothing here can open. The copy is read only when the
+ * probe found a database, so the card never makes one.
+ */
+export async function unlockCopyStamp(
+  userId: string,
+  stampOf: (userId: string) => Promise<{ lastSyncAt: number | null } | null> = offlineCopyStamp,
+  copyOf: (userId: string) => Promise<{ kind: string }> = copyAtUnlock,
+): Promise<CopyStamp | null> {
+  const s = await stampOf(userId);
+  if (s === null) return null;
+  const c = await copyOf(userId).catch(() => ({ kind: "unreadable" }));
+  return c.kind === "unreadable" ? { lastSyncAt: s.lastSyncAt, unreadable: true } : s;
+}
+
+/** design 2026-07-13 §E.3.4: the unlock card's line saying this browser holds an encrypted offline copy. */
+export function OfflineCopyUnlockLine({ stamp }: { stamp: CopyStamp | null }) {
   if (!stamp) return null;
+  if (stamp.unreadable === true) return <p className="muted" style={{ textAlign: "center", marginTop: 0 }}>{OFFLINE_COPY_UNREADABLE}</p>;
   return (
     <p className="muted" style={{ textAlign: "center", marginTop: 0 }}>
       Offline copy on this device — last synced {stamp.lastSyncAt !== null ? fmtDate(stamp.lastSyncAt) : "not yet"}
@@ -133,1457 +320,1377 @@ export function OfflineCopyUnlockLine({ stamp }: { stamp: { lastSyncAt: number |
   );
 }
 
-/**
- * a11y-webext--11: the Argon2id unseal is ~6 s in which nothing reaches a screen reader — the
- * only signal was the submit button's own label flipping to "Unsealing…", and a text swap on a
- * now-DISABLED, focused control is not reliably announced. A blind user heard silence until the
- * unlocked view moved focus: indistinguishable from a hang, and an invitation to submit again.
- * Both password forms below now pair the house busy affordance (<Busy>, whose dial is decorative
- * — the label carries the meaning) with a persistent polite region (BL-1's Announcer idiom).
- */
-const UNSEALING_NOTICE = "Unsealing your vault — this takes a few seconds.";
+// ---- The pin -----------------------------------------------------------------------------------------------
 
-/** Reload or F26 lock with an existing session: master password re-derives keys. */
-function Unlock({ client, policy, session, notice, onReady, onForget }: { client: ApiClient; policy: ClientPolicy | null; session: Session; notice?: string; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void; onForget: (notice?: string) => void }) {
+/** The card's name as shown: decoded, plain text, marked for a pin nobody but the server vouches for (§4.5). */
+export function shownName(pin: WebPin): string {
+  const { name } = instanceLabel(pin);
+  return pin.root === "trust_gate" ? `${name} ${AS_THE_SERVER_NAMES_ITSELF}` : name;
+}
+
+/** The line a card notice shows above the forms; null for none. */
+export function cardNoticeText(n: CardStatus | null): string | null {
+  if (n === null) return null;
+  switch (n.kind) {
+    case "withheld":
+      return CARD_WITHHELD;
+    case "not_verified":
+      // Approved entry 11, in the place CARD_WITHHELD shows: the pin stays and nothing stops.
+      return CARD_NOT_VERIFIED;
+    case "moved":
+      return fill(CARD_MOVED_WEB, n.newest.origin);
+    case "kind_changed":
+      return n.mustUpdate ? CARD_CHANGED_UPDATE : null;
+    case "unreachable":
+      return UNREACHABLE;
+    default:
+      return null;
+  }
+}
+
+type PinView =
+  | { kind: "checking" }
+  | { kind: "ready"; pin: WebPin; notice: CardStatus | null }
+  | { kind: "stop"; first: PinOutcome & { kind: "stop" } }
+  | { kind: "kind_gate"; status: Extract<CardStatus, { kind: "kind_changed" }> }
+  /** Design §4.4: a session this browser holds, at an origin with no pin record. */
+  | { kind: "held_no_pin" };
+
+/**
+ * Settles this browser's pin of the origin that served it (§13) before any form shows: the baked root for the
+ * public instance, the Trust Gate once per browser for any other origin, the stop screen on a fork or a damaged
+ * record. The forms then work under the pin.
+ */
+/** A session this browser holds, for what a stop screen may still offer it (§4.4: its copy, read-only). */
+type Held = { session: Session; onReady: Ready; onForget: (notice?: string) => void };
+
+function PinSettled({ ctx, forPassword, held, onForgotten, children }: { ctx: WebContext; forPassword: boolean; held?: Held; onForgotten?: () => void; children: (pin: WebPin, notice: CardStatus | null) => JSX.Element }) {
+  const [view, setView] = useState<PinView>({ kind: "checking" });
+  const [busy, setBusy] = useState(false);
+  const holding = held !== undefined;
+  const check = useCallback(async () => {
+    // Design §4.4 "No credential goes to an origin without a pin in force": a kept session whose origin holds no pin
+    // record (a move that stopped half-way, a record that was lost) does not unlock and dials nothing, not even the
+    // card chain of a first pin; it can only be forgotten.
+    if (holding && ctx.pins.state(ctx.origin).kind === "none") {
+      setView({ kind: "held_no_pin" });
+      return;
+    }
+    setView({ kind: "checking" });
+    const s = await settlePin(ctx.pins, ctx.origin);
+    if (s.kind === "pinned") {
+      if (s.notice?.kind === "kind_changed" && !s.notice.mustUpdate) setView({ kind: "kind_gate", status: s.notice });
+      else setView({ kind: "ready", pin: s.pin, notice: s.notice });
+    } else setView({ kind: "stop", first: s });
+  }, [ctx, holding]);
+  useEffect(() => {
+    void check();
+  }, [check]);
+
+  if (view.kind === "checking") return <p className="muted"><Busy>Checking this server…</Busy></p>;
+  if (view.kind === "held_no_pin") return held ? <HeldWithoutPin ctx={ctx} held={held} /> : <RecordDamaged origin={ctx.origin} onForget={() => { ctx.pins.forget(ctx.origin); clearSession(); void check(); }} />;
+  if (view.kind === "ready") return children(view.pin, view.notice);
+  if (view.kind === "kind_gate") {
+    const { newest } = view.status;
+    const accept = async () => {
+      setBusy(true);
+      try {
+        await ctx.pins.acceptKindChange(ctx.origin, { newestHash: newest.hash });
+      } finally {
+        setBusy(false);
+        void check();
+      }
+    };
+    // No form shows while the gate stands, so nothing derived from a password can be asked for under it. Not now keeps
+    // the old kind in force and closes the gate until the next unlock (this card mounts again then, and asks again).
+    return <KindChangeGate newest={newest} busy={busy} onContinue={() => void accept()} onNotNow={() => setView({ kind: "ready", pin: view.status.pinned, notice: null })} />;
+  }
+  const first = view.first.first;
+  if (first.kind === "needs_trust_gate") {
+    const confirm = () => {
+      const r = ctx.pins.confirmTrustGate(first.ticket);
+      if (r.kind === "pinned") setView({ kind: "ready", pin: r.pin, notice: null });
+      else setView({ kind: "stop", first: { kind: "stop", first: r } });
+    };
+    return <TrustGate origin={first.origin} name={decodeName(first.name) ?? ""} operatorShortFp={first.operatorShortFp} forPassword={forPassword} onContinue={confirm} />;
+  }
+  return <PinStop ctx={ctx} first={first} held={held} onRetry={() => void check()} onForgotten={onForgotten} />;
+}
+
+/**
+ * §4.4 and §12.3, a verified card that changes the server's `kind`: approved entry 10's title and buttons over
+ * GATE_KIND_CHANGE. Continue accepts the change (the chain is judged again first); Not now keeps the old kind.
+ */
+export function KindChangeGate({ newest, busy, onContinue, onNotNow }: { newest: WebPin; busy: boolean; onContinue: () => void; onNotNow: () => void }) {
+  const { name, origin } = instanceLabel(newest);
+  return (
+    <div>
+      <h2>{GATE_TITLE_KIND_CHANGE}</h2>
+      <p>{fill(GATE_KIND_CHANGE, name, origin, newest.kind)}</p>
+      <div className="stack">
+        <button className="primary" disabled={busy} onClick={onContinue}>{busy ? <Busy>{GATE_KIND_CONTINUE}</Busy> : GATE_KIND_CONTINUE}</button>
+        <button className="secondary" disabled={busy} onClick={onNotNow}>{GATE_KIND_NOT_NOW}</button>
+      </div>
+    </div>
+  );
+}
+
+/** Approved entry 12: this browser can't read its record of the origin, which is blocked until it is forgotten.
+ *  [userId]: the account whose copy forgetting deletes (none: this browser holds no session here). */
+export function RecordDamaged({ origin, onForget, userId }: { origin: string; onForget: () => void; userId?: string | null }) {
+  const [first, second] = fill(CARD_RECORD_DAMAGED, origin).split("\n");
+  return (
+    <div role="alert">
+      <h2>{CARD_RECORD_DAMAGED_TITLE}</h2>
+      <p><strong className="mono">{origin}</strong></p>
+      <p>{first}</p>
+      <p>{second}</p>
+      <ForgetServerButton userId={userId ?? null} onForget={onForget} />
+    </div>
+  );
+}
+
+/**
+ * Design §4.4 (decided on 2026-11-17): what "Forget this server" must say first, or null when it may forget on one click.
+ * It deletes this browser's copy of [userId]'s account; with changes made here that were not sent (or when this browser
+ * cannot tell), the first click says how many and the second forgets. Nothing can be sent first from here: the origin's
+ * pin is not in force, so nothing goes to it.
+ */
+export async function forgetServerAsk(userId: string | null, unsent: (userId: string) => Promise<number | null> = unsentChangeCount): Promise<UnsentAsk | null> {
+  if (!userId) return null;
+  let n: number | null;
+  try {
+    n = await unsent(userId);
+  } catch {
+    n = null;
+  }
+  const line = unsentLine(n);
+  return line === undefined ? null : { text: line, unsent: n };
+}
+
+/** "Forget this server", armed by unsent changes ({@link forgetServerAsk}). */
+function ForgetServerButton({ userId, onForget }: { userId: string | null; onForget: () => void }) {
+  const { armed, busy, click, cancel } = useUnsentArm(() => forgetServerAsk(userId), onForget);
+  return (
+    <>
+      {armed && <Msg kind="info">{armed.text}</Msg>}
+      <Announcer text={armed?.text ?? ""} />
+      <button className="secondary" disabled={busy} onClick={() => void click()}>{armed ? FORGET_ARMED_LABEL : FORGET_THIS_SERVER}</button>
+      {armed && (
+        <button type="button" className="link" onClick={cancel}>
+          {FORGET_KEEP}
+        </button>
+      )}
+    </>
+  );
+}
+
+/**
+ * Approved entry 8: the newest card names another address than the one that served this page, so no pin was made and
+ * nothing was sent. On the baked public instance core's CARD_MOVED_UPDATE shows instead. No buttons.
+ */
+export function OtherAddress({ dialed, cardOrigin, baked }: { dialed: string; cardOrigin: string; baked: boolean }) {
+  if (baked) return <Msg kind="err">{CARD_MOVED_UPDATE}</Msg>;
+  return (
+    <Msg kind="err">
+      <strong>{CARD_OTHER_ADDRESS_TITLE}</strong>
+      <br />
+      {fill(CARD_OTHER_ADDRESS, dialed, cardOrigin)}
+    </Msg>
+  );
+}
+
+/** §12.3 in its typed-address wording (§13: the person typed the address into the browser). */
+export function TrustGate({ origin, name, operatorShortFp, forPassword, onContinue }: { origin: string; name: string; operatorShortFp: string; forPassword: boolean; onContinue: () => void }) {
+  return (
+    <div>
+      <h2>{GATE_TITLE_CONNECT}</h2>
+      <p><strong>{origin}</strong></p>
+      <p>{GATE_BASELINE}</p>
+      <p>{fill(GATE_CALLS_ITSELF, name)}</p>
+      <p className="muted">
+        {GATE_OPERATOR_KEY}: <span className="mono">{operatorShortFp.match(/.{1,4}/g)?.join(" ") ?? operatorShortFp}</span>
+      </p>
+      {forPassword && <p>{GATE_ENTERING_PASSWORD}</p>}
+      <button className="primary" onClick={onContinue}>{GATE_CONTINUE}</button>
+    </div>
+  );
+}
+
+/**
+ * Ends a held session on this device without telling the server (design §4.4: its origin's pin is not in force): the
+ * pair is dropped before anything else, so nothing can carry it, then the copy and the record go, and App lands on
+ * the first screen (its sign-out finds no pair to revoke and POSTs nothing).
+ */
+async function forgetHeldSession(ctx: WebContext, held: Held): Promise<void> {
+  ctx.client.setTokens(null);
+  await wipeVaultCache(held.session.userId).catch(() => {});
+  clearSession();
+}
+
+/** Design §4.4: a kept session at an origin with no pin record is a blocked server that can be forgotten. Core's engine
+ * shows that orphan as its `Damaged` state, so the web shows approved entry 12 for it too. */
+function HeldWithoutPin({ ctx, held }: { ctx: WebContext; held: Held }) {
+  const forget = async () => {
+    await forgetHeldSession(ctx, held);
+    held.onForget();
+  };
+  return <RecordDamaged origin={ctx.origin} onForget={() => void forget()} userId={held.session.userId} />;
+}
+
+export function PinStop({ ctx, first, held, onRetry, onForgotten }: { ctx: WebContext; first: FirstPin | { kind: "refused"; verdict: string; cardOrigin?: string }; held?: Held; onRetry: () => void; onForgotten?: () => void }) {
+  const forget = async () => {
+    // §4.4: "Forget this server" deletes this browser's copy too (it says so beside the button), and the held session
+    // with it: its pair is dropped first, unsent, so the next pin of this origin never carries the forgotten one.
+    if (held) await forgetHeldSession(ctx, held);
+    ctx.pins.forget(ctx.origin);
+    clearSession();
+    if (held) held.onForget();
+    else {
+      onRetry();
+      // The stop held back the server's settings too (the policy probe goes through the same gate): fetch them again,
+      // or the first screen would show "couldn't load the server's settings" under the new Trust Gate's pin.
+      onForgotten?.();
+    }
+  };
+  if (first.kind === "blocked") {
+    const forked = first.state.kind === "forked";
+    // Approved entry 12: a record that does not decode checks nothing, so it stays blocked and offers no copy to open.
+    if (!forked) return <RecordDamaged origin={ctx.origin} onForget={() => void forget()} userId={held?.session.userId ?? null} />;
+    return (
+      <div>
+        <Msg kind="err">{CARD_FORK}</Msg>
+        {forked && held && <HeldCopyUnlock ctx={ctx} held={held} mode="forked_copy" />}
+        <p className="muted">{FORGET_DELETES_COPY}</p>
+        <ForgetServerButton userId={held?.session.userId ?? null} onForget={() => void forget()} />
+      </div>
+    );
+  }
+  if (first.kind === "unreachable") {
+    return (
+      <div>
+        <Msg kind="err">{UNREACHABLE}</Msg>
+        <button className="secondary" onClick={onRetry}>Try again</button>
+      </div>
+    );
+  }
+  if (first.kind === "pin_changed") return <Msg kind="err">{pinChangedText(first.status)}</Msg>;
+  const verdict = first.kind === "refused" ? first.verdict : first.kind;
+  if (first.kind === "refused" && verdict === "origin_mismatch" && first.cardOrigin !== undefined) {
+    return <OtherAddress dialed={ctx.origin} cardOrigin={first.cardOrigin} baked={ctx.pins.isBaked(ctx.origin)} />;
+  }
+  return (
+    <div>
+      {/* No raw verdict code under the sentence: §12.3 and §4.4 give these stops sentences, never a code. */}
+      <Msg kind="err">{verdict === "update_required" ? CARD_CHANGED_UPDATE : CARD_REFUSED}</Msg>
+      <button className="secondary" onClick={onRetry}>Try again</button>
+    </div>
+  );
+}
+
+/**
+ * Design §4.4 "A fork stops traffic, not reading" and "A session the server ends does not delete the device's copy":
+ * the copy this browser holds opens with the master password, as an offline unlock does, and is read-only: nothing is
+ * sent to the origin, nothing from it is accepted, nothing written. [mode] says which of the two it is.
+ */
+function HeldCopyUnlock({ ctx, held, mode }: { ctx: WebContext; held: Held; mode: "forked_copy" | "ended_copy" }) {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  // §F.9: an unlock that succeeds but whose account has not durably CONFIRMED its recovery piece is
-  // BLOCKED here — the capture gate takes over the card until the phrase is saved.
-  const [capture, setCapture] = useState<CaptureHandoff | null>(null);
-  // A14 (F5): while the token-less sign-in below shows its recovery-capture gate, the card's own
-  // sign-out link steps aside (the gate carries its own).
-  const [signInBlocking, setSignInBlocking] = useState(false);
-  // §E.3.4: does this device hold a durable offline copy for THIS account? Loaded async (IDB probe);
-  // null (no cache / probe failed / still loading) renders nothing — the line never blocks unlock.
-  const [copyStamp, setCopyStamp] = useState<{ lastSyncAt: number | null } | null>(null);
+  const enter = useEnter(ctx, held.onReady, held.onForget);
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setErr("");
+    const flow = beginUnlock(); // as at the unlock card: the held session is this act's own
+    try {
+      let known: Uint8Array | null;
+      try {
+        known = knownIdentity(held.session.email)(held.session.userId);
+      } catch {
+        setErr(IDENTITY_FAULT);
+        return;
+      }
+      const uid = held.session.userId;
+      const copy = await openFromCopy({ keys: await cachedAccountKeys(uid), pending: await cachedPendingWraps(uid), pins: ctx.pins, origin: ctx.origin, userId: uid, password, knownIdentityPub: known });
+      if (copy.kind === "opened") {
+        await enter({ opened: copy.opened, keys: copy.keys, wrap: copy.wrap, pending: copy.pending, email: held.session.email, pin: copy.pin, cardNotice: null, mode, flow });
+        return;
+      }
+      setErr(copy.kind === "wrong_password" ? WRONG_PASSWORD : copy.kind === "identity_fault" ? IDENTITY_FAULT : copy.kind === "no_copy" ? FORKED_NO_COPY : copy.kind === "kdf_refused" ? KDF_NOT_USABLE : refusalText(copy.error));
+    } finally {
+      setBusy(false);
+      setPassword(""); // after a refusal the typed password is not left in its field
+    }
+  };
+  const ended = mode === "ended_copy";
+  return (
+    <form onSubmit={submit}>
+      <p>{ended ? ENDED_COPY_READ : FORKED_COPY_READ}</p>
+      {err && <Msg kind="err">{err}</Msg>}
+      <Field label="Master password">
+        <input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+      </Field>
+      <button className={ended ? "secondary" : "primary"} disabled={busy || !password}>{busy ? <Busy>Unsealing…</Busy> : ended ? ENDED_COPY_OPEN : FORKED_COPY_OPEN}</button>
+    </form>
+  );
+}
+
+// ---- The first screen (§12.2) ------------------------------------------------------------------------------
+
+type Screen = "home" | "signin" | "signup" | "forgot";
+
+export function FreshStart({ ctx, policy, policyError, policyErrorMessage, onRetryPolicy, onReady, onForget, pin, cardNotice, knownEmail }: Props & { pin: WebPin; cardNotice: CardStatus | null }) {
+  const [screen, setScreen] = useState<Screen>("home");
+  // Once the account exists (sign-up registered, or a recovery committed) the kit must be confirmed before the
+  // vault opens (§10): there is no Back to the first screen from there, which would leave the kit unconfirmed.
+  const [committed, setCommitted] = useState(false);
+  const create = canCreateAccount(policy);
+  const line = cardNoticeText(cardNotice);
+  const back = <button type="button" className="link" onClick={() => setScreen("home")}>Back</button>;
+  const { origin } = instanceLabel(pin);
+  return (
+    <>
+      <p className="muted" style={{ textAlign: "center" }}>{shownName(pin)} · {origin}</p>
+      {line && <Msg kind="info">{line}</Msg>}
+      {screen === "home" && (
+        <div className="stack">
+          {/* A profile the server signed out still knows its account: signing in to it comes first, and is the primary. */}
+          {knownEmail !== undefined && <button className="primary" onClick={() => setScreen("signin")}>{SIGN_IN}</button>}
+          {create !== "hidden" && (
+            <button className={knownEmail !== undefined ? "secondary" : "primary"} disabled={create === "full"} onClick={() => setScreen("signup")}>
+              {create === "full" ? SIGNUP_FULL : CREATE_ACCOUNT_HERE}
+            </button>
+          )}
+          {knownEmail === undefined && <button className={create === "hidden" ? "primary" : "secondary"} onClick={() => setScreen("signin")}>{SIGN_IN}</button>}
+          <p className="muted">{USE_THE_APP}</p>
+          {policyError && (
+            <Msg kind="err">
+              {policyErrorMessage ?? POLICY_UNAVAILABLE} <button className="link" onClick={() => void onRetryPolicy()}>Try again</button>
+            </Msg>
+          )}
+        </div>
+      )}
+      {screen === "signin" && (
+        <>
+          <SignIn ctx={ctx} pin={pin} cardNotice={cardNotice} onReady={onReady} onForget={onForget} initialEmail={knownEmail} />
+          <button type="button" className="link" onClick={() => setScreen("forgot")}>{SIGN_IN_FORGOT}</button>
+          {back}
+        </>
+      )}
+      {screen === "signup" && (
+        <>
+          {policy ? <SignUp ctx={ctx} policy={policy} pin={pin} cardNotice={cardNotice} onReady={onReady} onForget={onForget} onCommitted={setCommitted} /> : <Msg kind="err">{policyErrorMessage ?? POLICY_UNAVAILABLE}</Msg>}
+          {!committed && back}
+        </>
+      )}
+      {screen === "forgot" && (
+        <>
+          {policy ? <KitRecover ctx={ctx} policy={policy} pin={pin} cardNotice={cardNotice} onReady={onReady} onForget={onForget} onCommitted={setCommitted} /> : <Msg kind="err">{policyErrorMessage ?? POLICY_UNAVAILABLE}</Msg>}
+          {!committed && back}
+        </>
+      )}
+    </>
+  );
+}
+
+// ---- The kit gate (ui/KitCard.tsx KitGate) --------------------------------------------------------------------
+
+/** The kit gate before a session is kept: a timeout also revokes the session, which App's sign-out cannot reach yet. */
+function EntryKitGate({ ctx, flow, onTimeout, ...rest }: Omit<Parameters<typeof KitGate>[0], "wire" | "describe"> & { ctx: WebContext; flow: SignInFlow | null }) {
+  return (
+    <KitGate
+      {...rest}
+      wire={ctx.wire}
+      describe={(e) => kitAtSignInText(e)}
+      onTimeout={() => {
+        void abandonSignIn(ctx.client, flow);
+        onTimeout();
+      }}
+    />
+  );
+}
+
+/** Kit capture for an account whose kit was never confirmed: a fresh kit over this session (the rule is asked inside). */
+async function rotateFor(ctx: WebContext, opened: OpenedAccount, email: string, password: string, wrap: SessionKeys): Promise<FreshKit> {
+  const account = emailNorm(email);
+  if (account === null) throw new Error("invalid_email");
+  const ak = await currentAuthKey(ctx.pins, { origin: ctx.origin, account }, password, opened, wrap);
+  return rotateKit(ctx.wire, opened, ak);
+}
+
+interface Capture {
+  opened: OpenedAccount;
+  keys: { kdfSalt: string; kdfParams: ClientPolicyV2["kdfParams"] };
+  wrap: SessionKeys;
+  email: string;
+  pin: WebPin;
+  cardNotice: CardStatus | null;
+  kit: FreshKit;
+  password: string;
+  /** A sign-in over a copy of the same account that the typed password does not open (onboardflow `copySealedElsewhere`). */
+  copySealedElsewhere?: boolean;
+  /** The sign-in or unlock this capture belongs to: its way out ends that flow's own session alone. */
+  flow: SignInFlow;
+}
+
+/** [how]: how the session is made (§8.5, the one-tap contact list); null for the unlock of a held session. */
+/**
+ * Design §12.2 rule 7: when the verified card names this account as the operator (a handover made this member the
+ * operator), the keys are wiped, the session revoked and the browser signed out with the operator sentence; the
+ * session-role check at sign-in cannot see this, and an unlock of a held session carries no role.
+ */
+function useEnter(ctx: WebContext, onReady: Ready, onForget: (notice?: string) => void, how: SessionHow | null = null) {
+  return useCallback(
+    async (c: { opened: OpenedAccount; keys: { kdfSalt: string }; wrap: SessionKeys; pending?: readonly SessionKeys[]; email: string; pin: WebPin; cardNotice: CardStatus | null; mode?: "online" | "offline" | "forked_copy" | "ended_copy"; password?: string; serverKeysNotKnown?: boolean; copySealedElsewhere?: boolean; flow: SignInFlow | null }) => {
+      let r: Awaited<ReturnType<typeof enterVault>>;
+      try {
+        // [password]: only a full-password unlock that reached the server hands it in, for the quiet re-key (spec 01 §7).
+        r = await enterVault(ctx, { opened: c.opened, keys: c.keys, wrap: c.wrap, pendingWraps: c.pending, email: c.email, pin: c.pin, cardNotice: c.cardNotice, how, mode: c.mode, ...(c.serverKeysNotKnown === true ? { serverKeysNotKnown: true } : {}), ...(c.copySealedElsewhere === true ? { copySealedElsewhere: true } : {}), ...(c.mode === undefined || c.mode === "online" ? { password: c.password } : {}) });
+      } catch (e) {
+        if (!(e instanceof OperatorAccountError)) throw e;
+        wipeOpened(c.opened);
+        void abandonSignIn(ctx.client, c.flow);
+        onForget(OPERATOR_NOT_ON_WEB);
+        return;
+      }
+      onReady(r.account, r.store, r.meta);
+    },
+    [ctx, onReady, onForget, how],
+  );
+}
+
+// ---- Sign in -----------------------------------------------------------------------------------------------
+
+/**
+ * Email and master password (§8.5, spec 03 §2). The two-step code is asked on the same screen after the server
+ * says `totp_required`, without asking for the password again; the password rule is asked again before the retry
+ * (inside signIn). `link_required` says the account allows only linked devices, which the web cannot be.
+ */
+function SignIn({ ctx, pin, cardNotice, onReady, onForget, lockedEmail, initialEmail }: { ctx: WebContext; pin: WebPin; cardNotice: CardStatus | null; onReady: Ready; onForget: (notice?: string) => void; lockedEmail?: string; initialEmail?: string }) {
+  const [email, setEmail] = useState(lockedEmail ?? initialEmail ?? "");
+  const [password, setPassword] = useState("");
+  const [totp, setTotp] = useState("");
+  const [needTotp, setNeedTotp] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [errTitle, setErrTitle] = useState("");
+  const [capture, setCapture] = useState<Capture | null>(null);
+  // The offer to forget the earlier account under this address, under a refusal that is this browser's own record of it.
+  const [earlier, setEarlier] = useState<EarlierOffer | null>(null);
+  const [forgotLine, setForgotLine] = useState("");
+  const enter = useEnter(ctx, onReady, onForget, "password");
+  const { name, origin } = instanceLabel(pin);
+  // One record per form (tabsession.ts signInForm): what its first submit found to replace stays named at the next ones.
+  const form = useRef(signInForm(ctx.client, tokensKeptAcrossLock));
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setErr("");
+    setErrTitle("");
+    // Every new try takes the offer away; a refusal of the same kind raises it again.
+    setEarlier(null);
+    setForgotLine("");
+    // Only the server's ask for the two-step code keeps the typed password (the code is asked without it, §8.5). After
+    // any refusal it is not left in its field: the form starts again from the password (a two-step code included).
+    let keepPassword = false;
+    try {
+      // The session this sign-in replaces (this tab's own pair only), named at every submit of this form, the one after a
+      // request for the two-step code or a wrong password included; and the flow's own record: a way out ends only the
+      // pair this submit's own login installed (tabsession.ts).
+      const { flow, replaces } = form.current.submit();
+      const r = await signIn({
+        replaces,
+        wire: ctx.wire,
+        pins: ctx.pins,
+        origin: ctx.origin,
+        email,
+        password,
+        deviceName: deviceName(),
+        totp: needTotp ? totp.trim() : undefined,
+        session: null,
+        knownIdentityPub: knownIdentity(email),
+        // Spec 01 §7: a copy this browser holds of the answered account is compared with before anything is written over it.
+        heldCopy: (userId) => copyAtUnlock(userId),
+        installed: flow.installed,
+      });
+      switch (r.kind) {
+        case "opened": {
+          const keys = r.session.accountKeys;
+          const copySealedElsewhere = r.copySealedElsewhere === true;
+          if (!keys.recoveryConfirmed) {
+            try {
+              const kit = await rotateFor(ctx, r.opened, email, password, r.wrap);
+              setCapture({ opened: r.opened, keys, wrap: r.wrap, email, pin: r.pin, cardNotice: r.notice, kit, password, copySealedElsewhere, flow });
+            } catch (e) {
+              wipeOpened(r.opened);
+              void abandonSignIn(ctx.client, flow);
+              setErr(kitAtSignInText(e)); // a sign-in, or an unlock of the served keys: never marked
+            }
+            return;
+          }
+          await enter({ opened: r.opened, keys, wrap: r.wrap, email, pin: r.pin, cardNotice: r.notice, password, copySealedElsewhere, flow });
+          return;
+        }
+        case "keys_not_this_account":
+          // Nothing was written over the copy or its waiting wraps; no session is kept.
+          void abandonSignIn(ctx.client, flow);
+          setErr(SIGN_IN_KEYS_NOT_THIS_ACCOUNT);
+          return;
+        case "totp_required":
+          keepPassword = true;
+          setNeedTotp(true);
+          return;
+        case "kdf_refused":
+          void abandonSignIn(ctx.client, flow);
+          setErr(KDF_NOT_USABLE);
+          return;
+        case "answer_refused": {
+          // The server took this sign-in: the session its answer carried is ended BEFORE the refusal is said, and the line
+          // says whether that end was confirmed.
+          const ended = (await abandonSignIn(ctx.client, flow)) === true;
+          setErr(signInAnswerRefusedText(r.reason, ended));
+          return;
+        }
+        case "invalid_credentials":
+          setErr(needTotp ? "Wrong email, master password, or one-time code." : "Wrong email or master password.");
+          return;
+        case "link_required":
+          setErrTitle(LINK_REQUIRED_WEB_TITLE);
+          setErr(fill(LINK_REQUIRED_WEB, email.trim() || "This account"));
+          return;
+        case "operator":
+          void abandonSignIn(ctx.client, flow);
+          setErr(OPERATOR_NOT_ON_WEB);
+          return;
+        case "identity_fault": {
+          void abandonSignIn(ctx.client, flow);
+          // With the offer, its own refusal line stands alone; the identity fault's plate only where nothing is offered.
+          const f = identityRefusal(email, r.reason, r.servedUserId);
+          setErr(f.err);
+          setEarlier(f.offer);
+          return;
+        }
+        case "pin":
+        case "password_rule":
+          setErr(stoppedBeforeSendingText(r, "sign_in"));
+          return;
+        case "refused":
+        case "failed":
+          void abandonSignIn(ctx.client, flow);
+          setErr(signInRefusalText(r.error));
+          return;
+      }
+    } finally {
+      setBusy(false);
+      if (!keepPassword) {
+        setPassword("");
+        setTotp("");
+        setNeedTotp(false);
+      }
+    }
+  };
+
+  if (capture) {
+    return (
+      <EntryKitGate
+        ctx={ctx}
+        flow={capture.flow}
+        kit={capture.kit}
+        email={capture.email}
+        pin={capture.pin}
+        opened={capture.opened}
+        rotate={() => rotateFor(ctx, capture.opened, capture.email, capture.password, capture.wrap)}
+        onDone={() => void enter(capture)}
+        onTimeout={() => {
+          wipeOpened(capture.opened);
+          onForget(KIT_TIMEOUT_NOTICE);
+        }}
+      />
+    );
+  }
+
+  const shownEmail = email.trim() || "your account";
+  return (
+    <>
+    <form onSubmit={submit}>
+      {/* The 2026-11-16 walk: with the server gone the notice and the failed sign-in said the same sentence twice. */}
+      {cardNoticeText(cardNotice) && lockedEmail && cardNoticeText(cardNotice) !== err && <Msg kind="info">{cardNoticeText(cardNotice)}</Msg>}
+      {err && <Msg kind="err">{errTitle && <><strong>{errTitle}</strong><br /></>}{err}</Msg>}
+      {forgotLine && <Msg kind="info">{forgotLine}</Msg>}
+      <Announcer text={busy ? UNSEALING_NOTICE : ""} />
+      <Field label="Email">
+        <input type="email" autoComplete="username" value={email} disabled={!!lockedEmail || needTotp} autoFocus={!lockedEmail} onChange={(e) => { setEmail(e.target.value); setEarlier(null); }} />
+      </Field>
+      <Field label={fill(MASTER_PASSWORD_FOR, shownEmail, shownName(pin), origin)} prompt>
+        <input type="password" autoComplete="current-password" value={password} disabled={needTotp} autoFocus={!!lockedEmail} onChange={(e) => setPassword(e.target.value)} />
+      </Field>
+      {needTotp && (
+        <Field label="One-time code">
+          <input inputMode="numeric" autoComplete="one-time-code" value={totp} autoFocus onChange={(e) => setTotp(e.target.value)} />
+        </Field>
+      )}
+      <button className="primary" disabled={busy || !email || !password || (needTotp && !totp.trim())}>{busy ? <Busy>Unsealing…</Busy> : SIGN_IN}</button>
+    </form>
+    {earlier && <EarlierAccountOffer offer={earlier} server={shownName(pin)} onKeep={() => setEarlier(null)} onDone={(l) => { setEarlier(null); setErr(""); setForgotLine(l); }} />}
+    </>
+  );
+}
+
+// ---- Unlock a session this browser holds ----------------------------------------------------------------
+
+function Unlock({ ctx, policy, pin, cardNotice, session, onReady, onForget, onSessionEnded, endedByBrowser = false }: { ctx: WebContext; policy: ClientPolicyV2 | null; pin: WebPin; cardNotice: CardStatus | null; session: Session; onReady: Ready; onForget: (notice?: string) => void; onSessionEnded: () => void; endedByBrowser?: boolean }) {
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [capture, setCapture] = useState<Capture | null>(null);
+  /** Spec 01 §7: the server's keys could not be compared with anything this browser holds; a sign-in is offered. */
+  const [notKnown, setNotKnown] = useState(false);
+  const [signInInstead, setSignInInstead] = useState(false);
+  // The address is bound here to another account than this kept session's: the offer to forget that earlier account.
+  const [earlier, setEarlier] = useState<EarlierOffer | null>(null);
+  const [forgotLine, setForgotLine] = useState("");
+  const enter = useEnter(ctx, onReady, onForget);
+  const { name, origin } = instanceLabel(pin);
+  void policy;
+  // Spec 05 T3, design 2026-07-13 §E.3.4: the unlock card says when this browser holds an offline copy of the account, so
+  // a person on a borrowed computer can see it and remove it. The 2026-11-16 walk found the line rendered nowhere since the
+  // sign-in screens were rewritten. Loaded from IndexedDB; null (no copy, a failed probe, still loading) shows nothing.
+  const [copyStamp, setCopyStamp] = useState<CopyStamp | null>(null);
   useEffect(() => {
     let alive = true;
-    void offlineCopyStamp(session.userId).then((s) => {
-      if (alive) setCopyStamp(s);
-    });
+    void unlockCopyStamp(session.userId).then(
+      (s) => alive && setCopyStamp(s),
+      () => {},
+    );
     return () => {
       alive = false;
     };
   }, [session.userId]);
 
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setBusy(true);
-    setErr("");
-    try {
-      // design 2026-07-13-web-offline-cache §C: online-first with an offline fallback. The whole
-      // flow (net()-tagged server call, cache creation + re-cache, the C3/C4 gates, hydrate, the
-      // first sync, and the C6-nag decision) lives in the total {@link unlockExistingSession} seam
-      // so the node-env tests can drive it without a DOM; this handler only maps the outcome.
-      // F61: the silent KDF re-key is deliberately NOT fired on this returning-session unlock — it
-      // cannot observe must-change (accountKeys carries no flag, web doesn't persist it across a
-      // lock), so the re-key rides ONLY the SignIn path below. That posture is unchanged here.
-      const r = await unlockExistingSession(client, session, password);
-      if (r.kind === "ready") return onReady(r.account, r.store, r.meta);
-      if (r.kind === "capture") return setCapture({ account: r.account, store: r.store, meta: r.meta, currentAuthKey: r.currentAuthKey });
-      // §E.4: a definitive-401 is routed through App.signOut (via onForget) so the cache is WIPED —
-      // not Welcome's old copy-only path — while still surfacing the "session expired" reason.
-      if (r.kind === "expired") return onForget("Session expired — sign in again.");
-      setErr(r.message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // §F.9: the un-skippable capture gate replaces the unlock card entirely (its own hero, no dismiss).
-  if (capture) {
+  if (endedByServer(session)) {
+    // Design §4.4: the server ended this session and the offline copy stayed. Signing in again to the same account
+    // here, under the pin, restores the session (its unsent changes are sent then); the copy opens read-only meanwhile.
+    // "Sign out" is the person's own act, and deletes the copy (it asks first when changes are unsent).
     return (
-      <div className="auth-shell">
-        <div className="card">
-          <div className="card-hero">
-            <div className="sigil"><BrandSigil /></div>
-            <h1>One more step</h1>
-            <p>save your recovery phrase</p>
-          </div>
-          <RecoveryCaptureGate
-            client={client}
-            account={capture.account}
-            store={capture.store}
-            meta={capture.meta}
-            currentAuthKey={capture.currentAuthKey}
-            clipboardClearSeconds={policy?.clipboardClearSeconds ?? 30}
-            onReady={onReady}
-            onSignOut={() => onForget()}
-            // CR-02: on idle-timeout, sign out with the timeout notice (onForget routes it through
-            // App.signOut → the §E.4 wipe + welcome card). The gate re-fires with a fresh phrase.
-            onTimeout={() => onForget(REVEAL_TIMEOUT_NOTICE)}
-          />
-        </div>
-      </div>
-    );
-  }
-
-  // A14 (F5): a browser without the offline copy keeps no token once locked (and a new tab never had
-  // one), so this "unlock" is a full sign-in — the normal SignIn flow, TOTP step included, with the
-  // session's email filled in and fixed. A password-only unlock would have no session to unlock.
-  if (!session.tokens) {
-    return (
-      <div className="auth-shell">
-        <div className="card">
-          <div className="card-hero">
-            <div className="sigil"><BrandSigil /></div>
-            <h1>Welcome back</h1>
-            <p>{session.email}</p>
-          </div>
-          {notice && <Msg kind="info">{notice}</Msg>}
-          <SignIn client={client} policy={policy} onReady={onReady} onBlockingChange={setSignInBlocking} lockedEmail={session.email} />
-          {!signInBlocking && <SignOutLink userId={session.userId} onSignOut={() => onForget()} />}
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="auth-shell">
-      <form className="card" onSubmit={submit}>
-        <div className="card-hero">
-          <div className="sigil"><BrandSigil /></div>
-          <h1>Welcome back</h1>
-          <p>{session.email}</p>
-        </div>
-        {/* §E.3.4 transparency: a durable offline copy exists on this device — say so, with freshness. */}
+      <>
+        <p style={{ textAlign: "center" }}>Welcome back</p>
         <OfflineCopyUnlockLine stamp={copyStamp} />
-        {/* F26: why the user is here ("Locked after N minutes of inactivity.", …). The
-            SPOKEN announce rides App's persistent Announcer (this box is silent-but-visible). */}
-        {notice && !err && <Msg kind="info">{notice}</Msg>}
-        {err && <Msg kind="err">{err}</Msg>}
-        {/* a11y-webext--11: mounted unconditionally (empty) so the mutation announces. */}
-        <Announcer text={busy ? UNSEALING_NOTICE : ""} />
-        <Field label="Master password">
-          <input type="password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} />
-        </Field>
-        <button className="primary" disabled={busy || !password}>{busy ? <Busy>Unsealing…</Busy> : "Unlock"}</button>
-        {/* H135: the destructive sign-out arms INLINE here (SignOutLink), the house idiom —
-            App.signOut no longer raises a native dialog, so this component IS the confirm. */}
-        <SignOutLink userId={session.userId} onSignOut={() => onForget()} />
-      </form>
-    </div>
-  );
-}
-
-/**
- * §7.1/§2.1 the reference-instance landing decision — a pure CLIENT RENDERING of the server-
- * DECLARED `signupMode` (never a hostname sniff; the origin.ts heuristic is gone). Unit-pinnable
- * because the card itself reads window.location + module singletons and cannot render in the node
- * test env. Modes:
- *  - "landing"     → the reference-instance stranger landing (self-host nudge over invite-gated enroll);
- *  - "closed"      → sign-in only, NO invite/enroll UI (the per-origin break-glass overlay, §2.2);
- *  - "invite-only" → today's plain sign-in + invite-gated enroll.
- * "open" is RESERVED — treated as landing until the open-register path ships (§7.3). Absent (old
- * server / a failed policy fetch ⇒ policy null) and any unknown value from a newer server both
- * degrade to "invite-only": never an open-register surface (§2.1, §2.3 conservative default).
- */
-export type LandingMode = "landing" | "closed" | "invite-only";
-export function landingModeFor(signupMode: string | null | undefined): LandingMode {
-  if (signupMode === "closed") return "closed";
-  if (signupMode === "landing" || signupMode === "open") return "landing";
-  return "invite-only";
-}
-
-/** The live per-render inputs {@link freshStartAffordances} maps to onboarding surfaces. `tab` is the
- *  user's current selection; `hasPendingLink`/`hasValidPrefill` come from a peeked enroll link
- *  (`pending !== null` / `enrollPrefillFor(...) !== null` for THIS origin); `consented`/`dismissed`
- *  are the consent-card outcome; `blocking` is set while a child reveal/capture gate is un-skippable. */
-export interface FreshStartState {
-  hasPendingLink: boolean;
-  hasValidPrefill: boolean;
-  tab: "signin" | "enroll";
-  consented: boolean;
-  dismissed: boolean;
-  blocking: boolean;
-}
-/** What FreshStart's render is allowed to expose, given the mode + state. */
-export interface FreshStartAffordances {
-  enrollAvailable: boolean;
-  effectiveTab: "signin" | "enroll";
-  showConsentCard: boolean;
-  showTabBar: boolean;
-  showNudge: boolean;
-  showMismatch: boolean;
-}
-/**
- * §2.1/§7.1/§4.4 the security-relevant mode→affordance WIRING for {@link FreshStart}: from the
- * server-DECLARED landing mode + the current link/consent/blocking state, decide which onboarding
- * surfaces the card may render. Extracted PURE and exported because FreshStart itself reads
- * window.location + module singletons and cannot render in the node test env — so THIS seam (not the
- * card) is where the wiring is unit-pinned (welcome-landing.test.ts). FreshStart must CALL this rather
- * than re-inline the booleans, or a future mis-wire (exposing enroll on a "closed" break-glass origin,
- * or failing to force the tab to sign-in) would ship untested. Security-load-bearing outputs:
- *  - enrollAvailable — any enroll surface at all; FALSE only on "closed" (the §2.2 break-glass overlay);
- *  - effectiveTab    — FORCED to "signin" whenever enroll is unavailable, even if a stale tab state (or
- *                      a landing→closed policy refresh) left `tab` on "enroll";
- *  - showConsentCard — the explicit origin-consent step (consume-semantics rule 4): only with enroll
- *                      available, a valid same-origin prefill, and neither consented nor dismissed —
- *                      "closed" never shows it, not even for a crafted same-origin link (§2.1);
- *  - showTabBar      — hidden while a child reveal blocks (escape-hatch guard, §F.7/§F.9) AND whenever
- *                      enroll is unavailable ("closed" ⇒ sign-in only);
- *  - showNudge       — the stranger self-host nudge: "landing" only, and not while blocking;
- *  - showMismatch    — the §4.4 terminal reject: a captured link present but NOT valid for this origin.
- */
-export function freshStartAffordances(landingMode: LandingMode, s: FreshStartState): FreshStartAffordances {
-  const enrollAvailable = landingMode !== "closed";
-  return {
-    enrollAvailable,
-    effectiveTab: enrollAvailable ? s.tab : "signin",
-    showConsentCard: enrollAvailable && s.hasValidPrefill && !s.consented && !s.dismissed,
-    showTabBar: !s.blocking && enrollAvailable,
-    showNudge: !s.blocking && landingMode === "landing",
-    showMismatch: s.hasPendingLink && !s.hasValidPrefill,
-  };
-}
-
-/** §7.1 stranger landing banner (signupMode "landing"/"open"): the invite-only + self-host nudge.
- *  Static copy only — it adds NO account/enumeration surface (no email probe, no "account exists"
- *  oracle); server enforcement of register-without-invite is unchanged (invite-ROW gate). The
- *  self-host docs URL is rendered as a raw link, and only when present AND a safe http(s) URL. */
-export function LandingNudge({ selfHostDocsUrl }: { selfHostDocsUrl?: string | null }) {
-  const docs = safeHttpUrl(selfHostDocsUrl);
-  return (
-    <div className="msg info" style={{ display: "block" }}>
-      This is a <strong>private, invite-only server</strong>. Have an invite? Paste it here. Want your own?{" "}
-      andvari is self-hostable — <strong>run your own server</strong>
-      {docs ? (
-        <>
-          {": "}
-          <a href={docs} rel="noreferrer noopener">{docs}</a>
-        </>
-      ) : (
-        "."
-      )}
-    </div>
-  );
-}
-
-/** §4.4 web REJECT-on-mismatch (B2-2): a captured enroll link minted for a DIFFERENT origin than
- *  this page is a TERMINAL, non-actionable state. The foreign origin is shown as PLAIN TEXT — never
- *  a link, never a button, and with no "continue"/"switch" affordance — so this trusted page can
- *  never become an escort to the attacker origin, where post-navigation JS (T6) could phish the
- *  master password and replay it against the user's REAL server. There is deliberately no
- *  `enrollSwitchProposalFor`: on web the link IS the switch (opening the genuine link lands on the
- *  issuing server's own SPA). The user's own same-origin sign-in / enroll below stay available. */
-export function EnrollMismatchNotice({ origin }: { origin: string }) {
-  return (
-    <div className="msg err" style={{ display: "block" }} role="alert">
-      This invite belongs to <span className="mono">{origin}</span>. Open the original link you were given.
-    </div>
-  );
-}
-
-/** No session: sign in to an existing account, or enroll with an invite. */
-function FreshStart({ client, policy, policyError, policyErrorMessage, onRetryPolicy, notice, onReady }: { client: ApiClient; policy: ClientPolicy | null; policyError: boolean; policyErrorMessage?: string; onRetryPolicy: () => Promise<void>; notice?: string; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void }) {
-  // §7.1/§2.1 landing decision — the server-DECLARED signupMode drives which onboarding surface
-  // renders (never a hostname sniff). "closed" ⇒ sign-in only (no enroll UI); "landing"/"open" ⇒
-  // the stranger self-host nudge over the enroll form; else today's plain sign-in + invite enroll.
-  const landingMode = landingModeFor(policy?.signupMode);
-  // One-scan onboarding: peek (never consume) the captured enroll link so a StrictMode
-  // double-invoked initializer reads the same value both times. The seed is read ONCE here.
-  const [pending] = useState<EnrollPayload | null>(() => peekPendingEnroll());
-  // Only a link minted for THIS exact origin applies (a mismatch → the terminal reject notice).
-  const validPrefill = enrollPrefillFor(pending, window.location.origin);
-  const [consented, setConsented] = useState(false);
-  const [dismissed, setDismissed] = useState(false);
-  // Stranger-first on the reference-instance landing: open on the invite field ("paste it here",
-  // §7.1); every other mode opens on Sign in. policy is fetched before the welcome phase mounts
-  // (App boot awaits loadPolicy before setPhase), so the mode is settled at this first render.
-  const [tab, setTab] = useState<"signin" | "enroll">(landingMode === "landing" ? "enroll" : "signin");
-  // Self-service recovery (design §F.3): its own screen, reachable from the sign-in form or a
-  // `#recover` deep link. On success it lands back on Sign in with a notice (sessions were revoked).
-  const [recovering, setRecovering] = useState(() => typeof window !== "undefined" && window.location.hash === "#recover");
-  const [localNotice, setLocalNotice] = useState("");
-  // §F.7/§F.9: while a child is showing an un-skippable recovery reveal / capture gate (Enroll's
-  // shown-once reveal, or SignIn's vault-entry capture), HIDE the Sign-in/Enroll tab bar — otherwise
-  // a tab switch would navigate away from the reveal, unmounting it and losing the phrase the user
-  // was told to save (a silent-total-loss escape). Whichever child is mounted reports this.
-  const [blocking, setBlocking] = useState(false);
-
-  // §2.1/§7.1/§4.4: the mode→affordance wiring lives in the pure, unit-pinned freshStartAffordances
-  // (this card can't render in the node test env, so the booleans are proven THERE, not inline).
-  const { effectiveTab, showConsentCard, showTabBar, showNudge, showMismatch } = freshStartAffordances(landingMode, {
-    hasPendingLink: !!pending,
-    hasValidPrefill: !!validPrefill,
-    tab,
-    consented,
-    dismissed,
-    blocking,
-  });
-
-  if (recovering) {
-    return (
-      <Recover
-        client={client}
-        policy={policy}
-        onDone={(n) => { setRecovering(false); setTab("signin"); setLocalNotice(n); }}
-        onCancel={() => setRecovering(false)}
-        // CR-02: the reset step holds the UVK-equivalent recovery secret — an idle-timeout lands
-        // back on Sign-in with the notice (same as onDone's placement, distinct semantics).
-        onTimedOut={(n) => { setRecovering(false); setTab("signin"); setLocalNotice(n); }}
-      />
+        {/* Ended by this browser itself (App endByClient): the notice above says why, the count, and what stays. */}
+        {/* A session this browser could not confirm in time ended here, not at the server: said as that end. */}
+        {!endedByBrowser && <Msg kind="info">{session.endedUnconfirmed === true || endedUnconfirmed(session.userId) ? SESSION_NOT_CONFIRMED : SESSION_ENDED_HELD}</Msg>}
+        <SignIn ctx={ctx} pin={pin} cardNotice={cardNotice} onReady={onReady} onForget={onForget} lockedEmail={session.email} />
+        <HeldCopyUnlock ctx={ctx} held={{ session, onReady, onForget }} mode="ended_copy" />
+        <SignOutLink userId={session.userId} onSignOut={() => onForget()} sendFirst={UNSENT_SEND_FIRST_SIGN_IN} />
+      </>
     );
   }
 
-  // Consume-semantics rule 4 (normative): a captured link must NOT auto-advance into the
-  // prefilled form. Show an explicit origin-consent step first, so a silent drive-by
-  // navigation (a hostile page replaying a photographed QR link) can't stage an enrollment
-  // the member never saw and accepted. §2.1 "closed" renders no enroll UI at all — not even
-  // the consent card for a (crafted) same-origin link a closed instance would never mint.
-  if (showConsentCard) {
+  if (!session.tokens || signInInstead) {
+    // A browser without the offline copy keeps no token once locked: this is a full sign-in, the email fixed. And after
+    // the server's keys could not be compared with anything here (spec 01 §7): the sign-in the unlock card offered.
     return (
-      <div className="auth-shell">
-        <div className="card">
-          <div className="card-hero">
-            <div className="sigil"><BrandSigil /></div>
-            <h1 className="brand"><span className="a-mark">and</span>vari</h1>
-            <p>the keeper of the hoard</p>
-          </div>
-          <div className="msg info" style={{ display: "block" }}>
-            Set up a <strong>new andvari account</strong> at <strong>{window.location.origin}</strong>? You'll need the <strong>printed recovery sheet</strong> from the person who invited you.
-          </div>
-          <button type="button" className="primary" onClick={() => { setConsented(true); setTab("enroll"); }}>Continue</button>
-          <div style={{ textAlign: "center", marginTop: 12 }}>
-            <button type="button" className="link" onClick={() => { setDismissed(true); clearPendingEnroll(); }}>Not now</button>
-          </div>
-        </div>
-      </div>
+      <>
+        <p style={{ textAlign: "center" }}>Welcome back</p>
+        <SignIn ctx={ctx} pin={pin} cardNotice={cardNotice} onReady={onReady} onForget={onForget} lockedEmail={session.email} />
+        <SignOutLink userId={session.userId} onSignOut={() => onForget()} sendFirst={UNSENT_SEND_FIRST_SIGN_IN} />
+      </>
     );
   }
-
-  return (
-    <div className="auth-shell">
-      <div className="card">
-        <div className="card-hero">
-          <div className="sigil"><BrandSigil /></div>
-          <h1 className="brand"><span className="a-mark">and</span>vari</h1>
-          <p>the keeper of the hoard</p>
-        </div>
-        {/* F26: why a full sign-in is required ("This device's access was revoked."). App's
-            persistent Announcer speaks it; this box is the sighted-user copy. */}
-        {notice && <Msg kind="info">{notice}</Msg>}
-        {localNotice && <Msg kind="info">{localNotice}</Msg>}
-        {/* §4.4 reject-on-mismatch (B2-2): a foreign-origin invite link is TERMINAL + non-actionable
-            — the origin is plain text, with NO affordance escorting the user to attacker turf. */}
-        {showMismatch && <EnrollMismatchNotice origin={pending!.o} />}
-        {/* §7.1 stranger landing: the self-host nudge frames the enroll form on a "landing"
-            (reference-instance) or reserved-"open" server. Hidden while a child reveal blocks. */}
-        {showNudge && <LandingNudge selfHostDocsUrl={policy?.selfHostDocsUrl} />}
-        {/* §F.7/§F.9: the tab bar is the escape hatch out of an un-skippable reveal — hide it while a
-            child is blocking so the reveal cannot be navigated away from without confirming.
-            §2.1 "closed" ⇒ sign-in only: no tab bar, no enroll surface. */}
-        {showTabBar && (
-          <div className="tabs">
-            <button className={effectiveTab === "signin" ? "active" : ""} aria-pressed={effectiveTab === "signin"} onClick={() => setTab("signin")}>Sign in</button>
-            <button className={effectiveTab === "enroll" ? "active" : ""} aria-pressed={effectiveTab === "enroll"} onClick={() => setTab("enroll")}>Enroll</button>
-          </div>
-        )}
-        {effectiveTab === "signin" ? (
-          <SignIn client={client} policy={policy} onReady={onReady} onForgot={() => { setLocalNotice(""); setRecovering(true); }} onBlockingChange={setBlocking} />
-        ) : (
-          <Enroll client={client} policy={policy} policyError={policyError} policyErrorMessage={policyErrorMessage} onRetryPolicy={onRetryPolicy} onReady={onReady} prefill={consented ? validPrefill : null} onBlockingChange={setBlocking} onTimedOut={(n) => { setBlocking(false); setTab("signin"); setLocalNotice(n); }} />
-        )}
-      </div>
-    </div>
-  );
-}
-
-/** [lockedEmail] (A14, F5): the token-less unlock card's sign-in — the email is the session's, shown
- *  and fixed, and there is no "forgot" link (the card never had one; recovery is from the start
- *  screen). */
-function SignIn({ client, policy, onReady, onForgot, onBlockingChange, lockedEmail }: { client: ApiClient; policy: ClientPolicy | null; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void; onForgot?: () => void; onBlockingChange: (blocking: boolean) => void; lockedEmail?: string }) {
-  const [email, setEmail] = useState(lockedEmail ?? "");
-  const [password, setPassword] = useState("");
-  const [totp, setTotp] = useState("");
-  const [totpNeeded, setTotpNeeded] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  // §F.9: a sign-in that succeeds but whose account has not durably CONFIRMED its recovery piece is
-  // BLOCKED here — the capture gate replaces the form until the phrase is saved.
-  const [capture, setCapture] = useState<CaptureHandoff | null>(null);
-  // Tell FreshStart to hide the tab bar while the capture gate holds (no navigation escape).
-  // useLayoutEffect (A.5): the flag must land BEFORE paint — with useEffect the gate's first
-  // frame rendered with the tab bar still visible (a 1-frame escape-hatch flash).
-  useLayoutEffect(() => {
-    onBlockingChange(capture !== null);
-    return () => onBlockingChange(false);
-  }, [capture, onBlockingChange]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
     setErr("");
-    // A14 review 3: once login() has answered, the client holds a new device session's pair. Until saveSession below
-    // has recorded it, a failure must not leave that pair live in this tab's memory (abandonSignIn in the catch).
-    let signedIn = false;
-    let saved = false;
+    setNotKnown(false);
+    setEarlier(null);
+    setForgotLine("");
+    // The held session is the one this unlock opens: a way out the web must take ends it (abandonSignIn).
+    const flow = beginUnlock();
     try {
-      const pre = await net(client.prelogin(email));
-      const authKey = await Account.deriveAuthKey(password, pre.kdfSalt, pre.kdfParams);
-      const code = totp.replace(/\s/g, "");
-      // installId (F28): stable per-browser id so repeat sign-ins can share a device row.
-      const s = await net(
-        client.login(email, authKey, deviceName(), {
-          totp: totpNeeded && code ? code : undefined,
-          installId: installId(),
-        }),
-      );
-      signedIn = true;
-      // A14 review W3: login() held the pair in memory only, and the saveSession below is its only writer.
-      // A14 review 3 (W-a): s.userId is the server's word until Account.unlock has checked the keys it came with, so
-      // until then the client is bound to a placeholder no account has: a rotation in that window is written nowhere
-      // and no persisted pair is adopted. The account the server answered for is bound only once unlock succeeded.
-      client.boundUserId = pendingSignInBinding();
-      // A11 (q08): the §2.4 pin is found by the email the user TYPED, not only the server's userId.
-      const account = await Account.unlock(s.userId, password, s.accountKeys, loadSelfIdentityPub(s.userId, email));
-      client.boundUserId = s.userId;
-      recordSelfIdentityPub(s.userId, account, email);
-      // §D.2c login-response re-cache write point (design 2026-07-13-web-offline-cache): seed the
-      // durable offline cache so a later returning-session unlock can go OFFLINE. §F.1 dark-ship
-      // gate, consent-keyed (design 2026-07-15 §5.4.1): durable only with this user's per-device
-      // opt-in — cache-less NullCache otherwise, on EVERY origin — so seeding here is deploy-safe
-      // everywhere. hydrate is a cold no-op on a fresh/just-wiped DB, and the first sync populates
-      // the row envelopes. Fresh sign-in itself stays online-only (§C.2) — no offline fallback on
-      // this path.
-      const cache = webCacheEnabled(s.userId) ? await openVaultCache(s.userId) : new NullCache();
-      // §B.5 (S5): first durable enable on this device asks for eviction protection (once,
-      // marker-deduped) — offline WRITES stay dark until persist() has been requested.
-      if (cache.durable) ensureCachePersistenceRequested();
-      await cache.setAccountKeys(s.accountKeys);
-      const store = new VaultStore(client, account, cache);
-      await store.hydrate();
-      await net(store.sync()); // discovers the personal vault id from grants
-      saveSession({
-        baseUrl: client.baseUrl,
-        userId: s.userId,
-        personalVaultId: account.personalVaultId,
-        email,
-        isAdmin: s.isAdmin,
-        // W3: the CURRENT pair — the sync above may already have rotated the one login returned.
-        tokens: client.getTokens(),
-      });
-      saved = true;
-      const meta: LoginMeta = { isAdmin: s.isAdmin, mustChangePassword: s.mustChangePassword, escrowStale: s.accountKeys.escrowStale ?? false, escrowNeedsV2: s.accountKeys.escrowNeedsV2 ?? false, escrowFingerprint: s.accountKeys.escrowFingerprint };
-      if (needsRecoveryCapture(s.accountKeys)) {
-        // `authKey` IS the login authKey derived from the just-typed master password — reuse it as
-        // currentAuthKey (the server re-verifies it at self-setup). BLOCK on the capture gate.
-        setCapture({ account, store, meta, currentAuthKey: authKey });
+      let known: Uint8Array | null;
+      try {
+        known = knownIdentity(session.email)(session.userId);
+      } catch {
+        // Offered only where the address names another account than this session's: this session's copy is never the
+        // one a forgetting deletes. With the offer, its own refusal line stands alone; the plate only where none is made.
+        const f = identityRefusal(session.email, SELF_IDENTITY_MISMATCH, session.userId);
+        setErr(f.err);
+        setEarlier(f.offer);
         return;
       }
-      // F61 (spec 01 §7, Android runKdfUpgrade parity): the SOLE web re-key site — a full-master-
-      // password sign-in WITH connectivity that was NOT routed to the capture gate. This path (unlike
-      // the returning-session unlock above) carries the login response's accurate `mustChangePassword`
-      // (meta.mustChangePassword ← s.mustChangePassword), so the silent re-key can safely honour A5.
-      // Detached + best-effort: never blocks/fails sign-in; maybeKdfUpgrade no-ops before any argon2id
-      // when already current or must-change. LIVE policy only (App.loadPolicy) — never a stale value.
-      // CR-07: on a successful silent re-key, replace the durable cache's accountKeys (mirrors the
-      // user-initiated Settings change at Settings.tsx) — else the pre-upgrade wrap lingers offline.
-      if (policy) void maybeKdfUpgrade({ client, account, password, currentKdfSalt: s.accountKeys.kdfSalt, currentKdfParams: s.accountKeys.kdfParams, currentWrappedUvk: s.accountKeys.wrappedUvk, policyKdfParams: policy.kdfParams, mustChangePassword: meta.mustChangePassword, onUpgraded: () => refreshCachedAccountKeys(client, account.userId) });
-      onReady(account, store, meta);
-    } catch (e) {
-      // A14 review 3: login() succeeded and something after it failed before the session was saved (unlock refused the
-      // keys, the first sync failed): revoke the pair it got and drop it, rather than keep it live in memory.
-      if (signedIn && !saved) void abandonSignIn(client);
-      if (e instanceof ApiError && e.code === "totp_required") {
-        // §2.6 row 1 (origin-independent): the account has server-TOTP enrolled; the
-        // password checked out and the server additionally wants the current code.
-        setTotpNeeded(true);
-        setErr("");
-      } else if (e instanceof ApiError && e.code === "public_login_requires_totp") {
-        // Only an armed break-glass twin origin (opt-in dual-origin self-hosts) answers this.
-        setErr("This account doesn't have two-factor sign-in turned on, and this address only accepts accounts that do. Connect from inside (VPN/LAN), turn it on in Settings, then retry.");
-      } else if (e instanceof KdfPolicyError) {
-        // H1 (spec 05 T1): the server tried to weaken the master-password KDF — a distinct
-        // security block, never softened into a wrong-password/credentials error.
-        setErr(WEAK_KDF_MESSAGE);
-      } else if (e instanceof IdentityMismatchError) {
-        // F31/spec 01 §5: the password DID check out (login succeeded) — the server sent
-        // an identity key our sealed seed does not derive. Never blame the password.
-        setErr(e.message);
-      } else if (e instanceof VaultKeyDamagedError) {
-        // H67: the login succeeded and then the account's stored wrappedUvk turned out not to be a
-        // well-formed envelope (bad base64url, too short, a version/alg this build doesn't know) —
-        // refused from its public header, before the password's wrap key was applied. Never
-        // "Wrong email or master password" (the password is proven by the 200), and never
-        // "try again": the same row fails identically forever. Its `message` IS the canon sentence.
-        setErr(e.message);
-      } else if (e instanceof NetworkError) {
-        setErr(UNREACHABLE);
-      } else if (e instanceof ApiError && e.status === 401) {
-        setErr(totpNeeded ? "Wrong email, master password, or one-time code." : "Wrong email or master password.");
-      } else if (e instanceof ApiError) {
-        setErr("The server had a problem answering — your details may be fine. Try again in a moment.");
-      } else {
-        setErr("Sign-in failed. Please try again.");
+      // Spec 01 §7: what this browser holds to compare the server's keys with (the offline copy's own keys and the wraps
+      // pending beside it, no copy, or a copy it cannot read), so that a served wrap is never taken with no key compared.
+      const r = await unlockSession({ wire: ctx.wire, pins: ctx.pins, origin: ctx.origin, userId: session.userId, password, knownIdentityPub: known, copy: await copyAtUnlock(session.userId) });
+      switch (r.kind) {
+        case "keys_differ":
+          // Nothing here to compare the server's keys with: nothing is taken, the copy is left as it is, and a sign-in follows.
+          setNotKnown(true);
+          return;
+        case "opened_from_copy":
+          // "Leaves both": the vault opens from the copy, the session marked; no password is handed on (no re-key's proof).
+          await enter({ opened: r.opened, keys: r.keys, wrap: r.wrap, pending: r.pending, email: session.email, pin: r.pin, cardNotice: r.notice, serverKeysNotKnown: true, flow });
+          return;
+        case "kdf_refused":
+          setErr(KDF_NOT_USABLE);
+          return;
+        case "wrong_password_kdf_refused":
+        case "change_not_stored":
+          setErr(unlockRefusalText(r));
+          return;
+        case "opened":
+          if (!r.keys.recoveryConfirmed) {
+            try {
+              const kit = await rotateFor(ctx, r.opened, session.email, password, r.wrap);
+              setCapture({ opened: r.opened, keys: r.keys, wrap: r.wrap, email: session.email, pin: r.pin, cardNotice: r.notice, kit, password, flow });
+            } catch (e) {
+              wipeOpened(r.opened);
+              setErr(kitAtSignInText(e)); // a sign-in, or an unlock of the served keys: never marked
+            }
+            return;
+          }
+          await enter({ opened: r.opened, keys: r.keys, wrap: r.wrap, email: session.email, pin: r.pin, cardNotice: r.notice, password, flow });
+          return;
+        case "wrong_password":
+          setErr(WRONG_PASSWORD);
+          return;
+        case "expired":
+          onSessionEnded();
+          return;
+        case "not_confirmed":
+          // Ended here, not confirmed: the transport raised that one end already (App lands on its card); none of the card's.
+          return;
+        case "ended_elsewhere":
+          // The session every tab shares was gone from the record: the transport raised that end already (App lands the
+          // tab as another tab's sign-out, or another account's sign-in, lands it); no refusal's line before the landing.
+          return;
+        case "identity_fault":
+          setErr(IDENTITY_FAULT);
+          return;
+        case "pin":
+          setErr(CARD_REFUSED);
+          return;
+        case "failed": {
+          // No answer (spec 02 §8): this browser's copy of the account keys opens offline, checked as online.
+          const copy = await openFromCopy({ keys: await cachedAccountKeys(session.userId), pending: await cachedPendingWraps(session.userId), pins: ctx.pins, origin: ctx.origin, userId: session.userId, password, knownIdentityPub: known });
+          if (copy.kind === "opened") {
+            await enter({ opened: copy.opened, keys: copy.keys, wrap: copy.wrap, pending: copy.pending, email: session.email, pin: copy.pin, cardNotice: null, mode: "offline", flow });
+            return;
+          }
+          setErr(copy.kind === "wrong_password" ? WRONG_PASSWORD : copy.kind === "identity_fault" ? IDENTITY_FAULT : copy.kind === "kdf_refused" ? KDF_NOT_USABLE : refusalText(r.error));
+          return;
+        }
+        case "refused":
+          setErr(refusalText(r.error));
+          return;
       }
     } finally {
       setBusy(false);
+      // After a refusal the typed password is not left in its field; an unlock that opened keeps its own copy (capture).
+      setPassword("");
     }
   };
 
-  // §F.9: the un-skippable capture gate replaces the sign-in form (it renders inside FreshStart's card,
-  // whose brand hero + hidden-while-blocking tab bar already surround it).
   if (capture) {
-    // Mirror App's signOut (unreachable from here): drop the persisted session + tokens and
-    // fall back to the sign-in form. Signing out of the gate is SAFE — the flag is still false,
-    // so the capture gate simply re-fires at the next sign-in.
-    // §E.4 (S3-1): SignIn.submit already SEEDED the durable cache (openVaultCache + setAccountKeys)
-    // BEFORE this gate mounted, so — unlike App.signOut, the choke point this path can't reach —
-    // the wipe MUST happen here too, or a sign-out on a shared machine leaves crackable ciphertext +
-    // the user's email in someone else's profile forever. Read the userId before clearSession, then
-    // wipe (fire-and-forget; deleteDatabase self-completes, §D.5.3). `notice` (CR-02): the idle-
-    // timeout escape surfaces the timeout copy on the returned sign-in form.
-    const signOutOfCapture = (notice = "") => {
-      const uid = capture.account.userId;
-      // bug-web--0: revoke the just-issued device session server-side (fire-and-forget — this
-      // path is sync; logout() captures the pair now, BEFORE setTokens(null) below).
-      void revokeSessionBestEffort(client);
-      clearSession();
-      client.setTokens(null);
-      void wipeVaultCache(uid);
-      setPassword("");
-      setTotp("");
-      setTotpNeeded(false);
-      setErr(notice);
-      setCapture(null);
-    };
     return (
-      <RecoveryCaptureGate
-        client={client}
-        account={capture.account}
-        store={capture.store}
-        meta={capture.meta}
-        currentAuthKey={capture.currentAuthKey}
-        clipboardClearSeconds={policy?.clipboardClearSeconds ?? 30}
-        onReady={onReady}
-        onSignOut={() => signOutOfCapture()}
-        // CR-02: idle-timeout → same safe teardown, with the timeout notice on the sign-in form.
-        onTimeout={() => signOutOfCapture(REVEAL_TIMEOUT_NOTICE)}
+      <EntryKitGate
+        ctx={ctx}
+        flow={capture.flow}
+        kit={capture.kit}
+        email={capture.email}
+        pin={capture.pin}
+        opened={capture.opened}
+        rotate={() => rotateFor(ctx, capture.opened, capture.email, capture.password, capture.wrap)}
+        onDone={() => void enter(capture)}
+        onTimeout={() => {
+          wipeOpened(capture.opened);
+          onForget(KIT_TIMEOUT_NOTICE);
+        }}
       />
     );
   }
 
   return (
+    <>
     <form onSubmit={submit}>
+      <p style={{ textAlign: "center" }}>Welcome back</p>
+      <OfflineCopyUnlockLine stamp={copyStamp} />
+      {cardNoticeText(cardNotice) && cardNoticeText(cardNotice) !== err && <Msg kind="info">{cardNoticeText(cardNotice)}</Msg>}
       {err && <Msg kind="err">{err}</Msg>}
-      {/* a11y-webext--11: same silent-unseal fix as the Unlock card above. */}
+      {forgotLine && <Msg kind="info">{forgotLine}</Msg>}
+      {/* The 2026-11-17 walk: a link inside the error plate read as plain text in the light theme; a button of its own. */}
+      {notKnown && !err && (
+        <>
+          <Msg kind="err">{SERVER_KEYS_NOT_KNOWN_SIGN_IN}</Msg>
+          <button type="button" className="ghost" style={{ width: "100%", marginBottom: 16 }} onClick={() => setSignInInstead(true)}>{SIGN_IN}</button>
+        </>
+      )}
       <Announcer text={busy ? UNSEALING_NOTICE : ""} />
-      <Field label="Email">
-        <input type="email" autoComplete="username" value={email} readOnly={lockedEmail !== undefined} onChange={(e) => setEmail(e.target.value)} />
+      <Field label={fill(MASTER_PASSWORD_FOR, session.email, shownName(pin), origin)} prompt>
+        <input type="password" autoComplete="current-password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} />
       </Field>
-      <Field label="Master password">
-        <input type="password" autoComplete="current-password" autoFocus={lockedEmail !== undefined} value={password} onChange={(e) => setPassword(e.target.value)} />
-      </Field>
-      {totpNeeded && (
-        <Field
-          label="One-time code"
-          hint={<span className="muted">This account has two-factor sign-in — enter the code from your authenticator app.</span>}
-        >
-          <input
-            className="mono"
-            autoFocus
-            inputMode="numeric"
-            autoComplete="one-time-code"
-            placeholder="123 456"
-            value={totp}
-            onChange={(e) => setTotp(e.target.value)}
-          />
-        </Field>
-      )}
-      <button className="primary" disabled={busy || !email || !password || (totpNeeded && !totp.trim())}>{busy ? <Busy>Unsealing…</Busy> : lockedEmail !== undefined ? "Unlock" : "Sign in"}</button>
-      {onForgot && (
-        <div style={{ textAlign: "center", marginTop: 12 }}>
-          <button type="button" className="link" onClick={onForgot}>Forgot your master password? Recover with your recovery phrase</button>
-        </div>
-      )}
+      <button className="primary" disabled={busy || !password}>{busy ? <Busy>Unsealing…</Busy> : "Unlock"}</button>
+      <SignOutLink userId={session.userId} onSignOut={() => onForget()} sendFirst={UNSENT_SEND_FIRST_UNLOCK} />
     </form>
+    {earlier && <EarlierAccountOffer offer={earlier} server={shownName(pin)} onKeep={() => setEarlier(null)} onDone={(l) => { setEarlier(null); setErr(""); setForgotLine(l); }} />}
+    </>
   );
 }
 
-/**
- * Security review 2026-10, root cause A, A5c: when the in-person condition is not met, the enrolment registers
- * WITHOUT pinning the admin and this is the state it reports — a pending verification (the normal "Verify a
- * household member" ceremony closes it later), never an error. One sentence, rendered on the form and on the
- * end screen (enrol-provenance.test.ts pins it verbatim).
- */
-const ADMIN_PIN_PENDING = "Your admin isn't verified on this account yet. You can verify them any time under Settings → Verify a household member.";
+// ---- Sign up (§7.2, §7.3) ----------------------------------------------------------------------------------
 
-function Enroll({ client, policy, policyError, policyErrorMessage, onRetryPolicy, onReady, prefill, onBlockingChange, onTimedOut }: { client: ApiClient; policy: ClientPolicy | null; policyError: boolean; policyErrorMessage?: string; onRetryPolicy: () => Promise<void>; onReady: (a: Account, s: VaultStore, m: LoginMeta) => void; prefill?: EnrollPayload | null; onBlockingChange: (blocking: boolean) => void; onTimedOut: (notice: string) => void }) {
-  // A prefill applies ONLY if the link was minted FOR this exact origin — the page IS served
-  // by payload.o, so a mismatch means a redirect or a hand-mangled link; fall through to manual
-  // entry rather than silently enrolling against the wrong server.
-  const linkValid = !!prefill && prefill.o === window.location.origin;
-  // §F.1: an `rfp` on the link CLAIMS an in-person QR off the admin's screen. Security review 2026-10,
-  // root cause A (A5): a navigated link is not proof of that (the server composes /enroll links too: it
-  // emails invites), so the claim is honoured only after the human TYPES the in-person code the admin's
-  // screen shows beside the QR (enrollCheckCode). The same code authenticates `ifp`/`iu`, the admin's
-  // identity, which this enrolment then pins (the §7.2 mutual pin).
-  // A5c (API review #4): the code is an unkeyed hash of the link, so the server that composed a navigated
-  // link can email "the code" beside it. The code alone is therefore never in-person evidence: the human
-  // must also affirm, first person and under the stop warning, that they are reading the admin's screen
-  // right now (`inPersonAffirmed`; in required-affirm that is the posture's own tick). Both halves go to
-  // the state layer as raw evidence (`InPersonEvidence`), which re-checks them. Without them the enrolment
-  // registers with NO pin and the admin stays a pending verification.
-  const linkPayload = linkValid ? prefill! : null;
-  const linkRfp = linkPayload?.rfp;
-  const inPersonLink = !!linkPayload && (!!linkPayload.rfp || !!linkPayload.ifp);
-  const [inPersonEntry, setInPersonEntry] = useState("");
-  const [inPersonOk, setInPersonOk] = useState(false);
-  const [inPersonAffirmed, setInPersonAffirmed] = useState(false); // waived: "I'm with my admin right now"
-  useEffect(() => {
-    let live = true;
-    if (!linkPayload || !inPersonLink) {
-      setInPersonOk(false);
-      return;
-    }
-    void enrollCheckCodeMatches(linkPayload, inPersonEntry).then((ok) => { if (live) setInPersonOk(ok); });
-    return () => { live = false; };
-  }, [linkPayload, inPersonLink, inPersonEntry]);
-  // After a successful in-person enrolment: show THIS member's identity QR so the admin's client pins
-  // them back (the other half of the mutual pin), then hand over to the vault.
-  const [showIdentity, setShowIdentity] = useState<{ account: Account; store: VaultStore; meta: LoginMeta; adminPinned: boolean } | null>(null);
-  const [adminPinned, setAdminPinned] = useState(false);
+type SignUpStep =
+  | { kind: "email" }
+  | { kind: "code"; pin: WebPin }
+  | { kind: "account"; pin: WebPin; ticket: string }
+  | { kind: "record"; opened: OpenedAccount; keys: { kdfSalt: string; kdfParams: ClientPolicyV2["kdfParams"] }; wrap: SessionKeys; kit: FreshKit; pin: WebPin; error: string }
+  | { kind: "kit"; opened: OpenedAccount; keys: { kdfSalt: string; kdfParams: ClientPolicyV2["kdfParams"] }; wrap: SessionKeys; kit: FreshKit; pin: WebPin }
+  /**
+   * The server registered the account and this browser refused its answer, or whether it registered it cannot be told:
+   * the account's kit is shown with [line] before anything is wiped.
+   */
+  | { kind: "stored"; kit: FreshKit; accountId: string; pin: WebPin; line: string; gone: string }
+  /** The end of a stored or untold registration: its line alone, no form. */
+  | { kind: "after"; line: string };
 
-  const [invite, setInvite] = useState(linkValid ? prefill!.t : "");
-  const [email, setEmail] = useState(linkValid ? prefill!.e : "");
-  const [name, setName] = useState("");
+function SignUp({ ctx, policy, pin, cardNotice, onReady, onForget, onCommitted }: { ctx: WebContext; policy: ClientPolicyV2; pin: WebPin; cardNotice: CardStatus | null; onReady: Ready; onForget: (notice?: string) => void; onCommitted?: (committed: boolean) => void }) {
+  const [step, setStep] = useState<SignUpStep>({ kind: "email" });
+  const committed = step.kind === "record" || step.kind === "kit" || step.kind === "stored";
+  useEffect(() => onCommitted?.(committed), [committed, onCommitted]);
+  const stepRef = useRef(step);
+  stepRef.current = step;
+  useEffect(
+    () => () => {
+      const s = stepRef.current;
+      if (s.kind === "stored") s.kit.secret.fill(0);
+    },
+    [],
+  );
+  const [email, setEmail] = useState("");
+  const [age, setAge] = useState(false);
+  const [code, setCode] = useState("");
+  const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
-  const [confirm, setConfirm] = useState("");
-  // Posture (§F.1): rfp ⇒ required-affirm; otherwise WAIVED by default, or required-typed if the
-  // member declares they were handed a printed recovery sheet. NEVER auto-trust the server key.
-  const [hasSheet, setHasSheet] = useState(false);
-  const posture: EnrollPosture = enrollPosture(linkRfp, hasSheet);
-  const [affirmConfirmed, setAffirmConfirmed] = useState(false); // required-affirm: eyeball the QR rfp
-  const [shortFp, setShortFp] = useState("");                    // required-typed: the sheet's 32 hex (128-bit short form)
-  const [fpConfirmed, setFpConfirmed] = useState(false);         // required-typed: checkbox gate
-  const [waivedAck, setWaivedAck] = useState(false);             // waived: "no admin backstop" ack
+  const [confirmPw, setConfirmPw] = useState("");
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<number | null>(null);
   const [err, setErr] = useState("");
-  const [retrying, setRetrying] = useState(false);
-
-  // §F.7 shown-once: the recovery secret bytes live ONLY in this ref, zeroed the instant the confirm
-  // passes. After register() succeeds we stash the ready session (plus the register-committed piece's
-  // `recoveryPieceId`, design 2026-07-13 — the bound confirm presents it) and render the un-skippable
-  // reveal gate BEFORE handing the account to the vault shell.
-  const secretRef = useRef<Uint8Array | null>(null);
-  const [ready, setReady] = useState<{ account: Account; store: VaultStore; meta: LoginMeta; pieceId: string | null } | null>(null);
-  // design 2026-07-13: the confirm answered 409 recovery_piece_stale — a concurrent setup (another
-  // device) rotated the register-committed piece away mid-reveal. The typed phrase is DEAD: surface
-  // the static notice, then proceed unconfirmed on acknowledgment (no reauth in hand to re-setup here;
-  // the vault-entry capture gate re-fires at the next unlock and heals).
-  const [pieceStale, setPieceStale] = useState(false);
-  // In-flight state for the awaited bound confirm (design 2026-07-13): once settlement starts we
-  // replace the reveal with explicit "Saving…" feedback (mirrors the capture gate's stage="confirming"),
-  // so a copied-reset timer firing mid-POST can't blank the reveal to a bare screen on the slow tunnel path.
-  const [settling, setSettling] = useState(false);
-  // One settlement per reveal (the confirm is now awaited, so the button outlives the first click).
-  const settlingRef = useRef(false);
-  const aliveRef = useRef(true);
-
-  // §F.7: zero the raw recovery secret on unmount as well as on confirm (mirrors Recover.tsx's
-  // cleanup) — if the reveal is interrupted (navigate away / lock), the secret never lingers in memory.
-  // aliveRef re-arms across a StrictMode remount so a confirm settling after unmount can't call onReady.
+  // The registration was refused before anything was sent because the address is bound here: the offer to forget.
+  const [earlier, setEarlier] = useState<EarlierOffer | null>(null);
+  const [forgotLine, setForgotLine] = useState("");
+  const abortRef = useRef<AbortController | null>(null);
+  const enter = useEnter(ctx, onReady, onForget, "registered");
+  // The registration's own record (tabsession.ts), kept for its later steps (the kit gate, the vault's entry).
+  const flowRef = useRef<SignInFlow | null>(null);
+  useEffect(() => () => abortRef.current?.abort(), []);
+  // §7.7: on a private instance whose card names a recovery key, the choice is offered at sign-up too. The offer
+  // walks the card chain again at this moment (the pin store keeps none); without one only "Only me" is shown.
+  const [offer, setOffer] = useState<OperatorOffer | null>(null);
+  const [recovery, setRecovery] = useState<RecoveryChoiceValue>(ONLY_ME);
+  const chosen = useRef<{ posture: "private" | "operator"; fp: string }>({ posture: "private", fp: NONE });
+  const accountPin = step.kind === "account" ? step.pin : null;
   useEffect(() => {
-    aliveRef.current = true;
-    return () => { aliveRef.current = false; secretRef.current?.fill(0); secretRef.current = null; };
-  }, []);
-  // §F.7/§F.9: while the shown-once reveal (or the stale-piece notice) is up, tell FreshStart to HIDE
-  // the Sign-in/Enroll tab bar so the user cannot navigate away from the reveal (unmounting it, losing
-  // the phrase) without confirming. useLayoutEffect (A.5): pre-paint, so the bar never flashes for a
-  // frame around the reveal mounting.
-  const revealing = ready !== null && (secretRef.current !== null || pieceStale || settling);
-  useLayoutEffect(() => { onBlockingChange(revealing); }, [revealing, onBlockingChange]);
+    if (accountPin === null || !operatorRecoveryOffered(accountPin)) return;
+    let live = true;
+    void operatorOffer({ wire: ctx.wire, pins: ctx.pins, origin: ctx.origin })
+      .then((o) => {
+        if (live) setOffer(o.kind === "offer" ? o.offer : null);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [accountPin, ctx]);
+  const ageRequired = policy.signup.ageConfirmRequired;
+  const recoveryLine = pin.kind === "public" ? RECOVERY_KIT_ONLY : RECOVERY_ONLY_ME_DETAIL;
 
-  // CR-02: the shown-once reveal holds a freshly-enrolled unlocked Account and displays the raw
-  // recovery phrase (UVK-equivalent). Bound the whole account-held window (ready !== null) by the
-  // idle auto-lock. On expiry zero the secret, SIGN OUT (the session was already saved at register),
-  // and route to Sign-in with the notice — the vault-entry capture gate re-fires with a fresh phrase
-  // at the next sign-in (recoveryConfirmed stays false), the finding's enroll heal path. Disabled
-  // (timeout 0) until a reveal is live. Activity resets it — an actively-typing member is never cut.
-  useAutoLock(ready !== null ? REVEAL_TIMEOUT_S : 0, () => {
-    const uid = ready?.account.userId;
-    secretRef.current?.fill(0);
-    secretRef.current = null;
-    // bug-web--0: this timeout is a full SIGN-OUT (the session was already saved at register) —
-    // revoke it server-side too (fire-and-forget; issued before setTokens(null) below).
-    void revokeSessionBestEffort(client);
-    clearSession();
-    client.setTokens(null);
-    if (uid) void wipeVaultCache(uid);
-    setReady(null);
-    onTimedOut(REVEAL_TIMEOUT_NOTICE);
-  });
-
-  const retryPolicy = async () => {
-    setRetrying(true);
+  const sendCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setErr("");
+    const ac = new AbortController();
+    abortRef.current = ac;
     try {
-      await onRetryPolicy();
+      const r = await startSignup({
+        wire: ctx.wire,
+        pins: ctx.pins,
+        origin: ctx.origin,
+        email,
+        ageConfirmed: age,
+        powBits: policy.signup.powBits,
+        pow: (em, bits) => {
+          setProgress(0);
+          return runPow(em, bits, Date.now(), (n) => setProgress(n), ac.signal);
+        },
+      });
+      if (r.kind === "sent") setStep({ kind: "code", pin: r.pin });
+      else if (r.kind === "refused" || r.kind === "failed") setErr(refusalText(r.error));
+      else setErr(stoppedBeforeSendingText(r, "sign_up"));
     } finally {
-      setRetrying(false);
+      setBusy(false);
+      setProgress(null);
     }
   };
 
-  const fp = policy?.recoveryFingerprint ?? "";
-  const shortOk = shortFormMatches(shortFp, fp);
-  const pwStrongEnough = meetsMasterPasswordFloor(password);
-  // Posture-specific gate: waived → ack; required-affirm → eyeball-confirm the scanned rfp;
-  // required-typed → the typed-sheet ceremony against the server's advertised fingerprint.
-  const postureOk =
-    posture === "waived"
-      ? waivedAck
-      : posture === "required-affirm"
-        ? affirmConfirmed && !!linkRfp && inPersonOk
-        : !!fp && shortOk && fpConfirmed;
-  const canSubmit = !!invite && !!email && pwStrongEnough && password === confirm && postureOk;
-
-  const submit = async (e: React.FormEvent) => {
+  const verifyCode = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!policy) return setErr(policyErrorMessage ?? (policyError ? POLICY_UNAVAILABLE : "Server settings are unavailable — try again in a moment."));
-    if (posture !== "waived" && !fp) return setErr("This server has no recovery key configured — the admin backstop can't be set up. Ask your admin, or set up without a backstop.");
-    if (!meetsMasterPasswordFloor(password)) return setErr("Choose a stronger master password — mix length with upper/lower case, digits, or symbols.");
+    if (step.kind !== "code") return;
     setBusy(true);
     setErr("");
     try {
-      // Resolve the escrow decision. Waived seals NOTHING; the two required paths bind the seal to a
-      // HUMAN anchor (a scanned QR rfp or a typed sheet) and fail closed on any mismatch — the server
-      // pubkey is never trusted on its own.
-      let recoveryPublicKey: Uint8Array | undefined;
-      let recoveryFingerprint: string | undefined;
-      // A5c: the in-person evidence, built from the human's two acts at submit (the effect above may lag a
-      // keystroke) and handed to the state layer raw — the escrow gate and the admin pin both re-check it.
-      const inPersonEvidence: InPersonEvidence = {
-        typedCode: inPersonEntry,
-        inPersonAffirmed: posture === "required-affirm" ? affirmConfirmed : inPersonAffirmed,
-      };
-      if (posture !== "waived") {
-        // Audit F15: ApiClient owns this endpoint (the escrow re-seal path already calls it).
-        // The hand-rolled fetch this replaces omitted the X-Andvari-Client header every other
-        // call carries and flattened the server's real code into a synthetic
-        // `no_recovery_pubkey` — so a 426 could never raise App's "reload to update" bar on the
-        // enrollment path, only on the re-seal one. It works unauthenticated: raw() simply omits
-        // the Authorization header when no tokens are held.
-        const pub = fromB64((await net(client.recoveryPubkey())).trim());
-        // Re-check the in-person evidence at submit: the typed code AND the first-person affirmation (A5c).
-        const inPersonVerified = !!linkPayload && (await enrolInPerson(linkPayload, inPersonEvidence));
-        const gate = escrowGate({ posture, linkRfp, inPersonVerified, typedSheet: shortFp, serverFullFp: fp, pubFullFp: await fingerprint(pub) });
-        if (!gate.seal || !gate.verifiedFp) {
-          return setErr("The recovery key this server offers does not match the code your admin gave you. STOP and contact your admin.");
-        }
-        recoveryPublicKey = pub;
-        // A4 carry-forward closed (A5): the seal's verified fingerprint is the HUMAN-anchored value, the
-        // link's full rfp (affirm) or the advertised fingerprint the typed 32 hex matched (typed), never
-        // fingerprint(servedKey) anchored by a short prefix.
-        recoveryFingerprint = gate.verifiedFp;
-      }
-
-      const { request, account, recoverySecret } = await Account.enroll({
-        inviteToken: invite,
-        email,
-        displayName: name || email.split("@")[0]!,
-        password,
-        kdfParams: policy.kdfParams,
-        recoveryPublicKey,
-        recoveryFingerprint,
-        installId: installId(), // F28: same stable id as sign-in
-      });
-      const s = await net(client.register(request));
-      recordSelfIdentityPub(s.userId, account, email); // design §2.4: this browser now knows the real identity key
-      // register() succeeded → the invite is CONSUMED. Stash the secret bytes for the ONE-TIME reveal
-      // BEFORE anything can bounce us back to the form (a resubmit could only yield "invite used").
-      secretRef.current = recoverySecret;
-      clearPendingEnroll();
-      // A14 review W3: installed without the persistence hook and bound to the new account; the
-      // saveSession right below is the only writer of this pair.
-      client.useSessionTokens({ accessToken: s.accessToken, refreshToken: s.refreshToken });
-      client.boundUserId = s.userId;
-      // No breach check on the new master password (security review 2026-10, root cause C): its
-      // SHA-1 prefix would go to this server, which now holds the Argon2id verifier for it.
-      saveSession({
-        baseUrl: client.baseUrl,
-        userId: s.userId,
-        personalVaultId: request.personalVault.vaultId,
-        email,
-        isAdmin: s.isAdmin,
-        tokens: client.getTokens(),
-      });
-      const store = new VaultStore(client, account);
-      await store.sync().catch(() => {});
-      // Root cause A §7.2 (A5): the enrolment pin of the admin. Only on in-person evidence — the code the
-      // human typed from the admin's screen AND their first-person affirmation (A5c), both re-checked by
-      // pinFromEnrolLink from the raw inputs — and only when the key the server serves for `iu` hashes to
-      // the link's `ifp` in full; anything else pins nothing and the admin stays a pending verification
-      // (ADMIN_PIN_PENDING: the member verifies them later from Settings).
-      if (linkPayload?.ifp && linkPayload.iu && inPersonEvidence.inPersonAffirmed) {
-        try {
-          const served = await client.userIdentity(linkPayload.iu);
-          const c = await pinFromEnrolLink(linkPayload, inPersonEvidence, { userId: served.userId, identityPub: served.identityPub }, served.displayName, Date.now());
-          if (c) {
-            await store.accountState.pin(c);
-            setAdminPinned(true);
-          }
-        } catch {
-          /* best effort: no pin, never a failed enrolment */
-        }
-      }
-      // Do NOT go straight to the vault — render the un-skippable recovery-phrase reveal first (§F.7).
-      // `recoveryPieceId` is register-only (design 2026-07-13); an old server omits it ⇒ unbound confirm.
-      setReady({ account, store, meta: { isAdmin: s.isAdmin, mustChangePassword: s.mustChangePassword, escrowStale: s.accountKeys.escrowStale ?? false, escrowFingerprint: s.accountKeys.escrowFingerprint }, pieceId: s.recoveryPieceId ?? null });
-    } catch (e) {
-      // Static error strings only — NEVER interpolate secret material.
-      setErr(e instanceof KdfPolicyError ? WEAK_KDF_MESSAGE : e instanceof NetworkError ? UNREACHABLE : e instanceof ApiError ? enrollError(e.code) : "Enrollment failed.");
+      const v = await ctx.wire.signupVerify(email, code.trim());
+      setStep({ kind: "account", pin: step.pin, ticket: v.signupTicket });
+    } catch (e2) {
+      setErr(refusalText(e2));
     } finally {
       setBusy(false);
     }
   };
 
-  // design 2026-07-13: the stale-confirm notice — un-skippable acknowledgment BEFORE vault landing, so
-  // the user never walks away believing the (dead) phrase they saved still works.
-  if (ready && pieceStale) {
+  const writeRecord = async (s: { opened: OpenedAccount; keys: { kdfSalt: string; kdfParams: ClientPolicyV2["kdfParams"] }; wrap: SessionKeys; kit: FreshKit; pin: WebPin }) => {
+    const kind = await writeSignupRecovery(ctx, s.opened, Date.now(), chosen.current);
+    if (kind === "written" || kind === "unchanged") setStep({ kind: "kit", ...s });
+    // PLACEHOLDER copy: the recovery record did not reach the account state.
+    else setStep({ kind: "record", ...s, error: `Your recovery choice couldn't be saved to your account (${kind}).` });
+  };
+
+  const register = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (step.kind !== "account") return;
+    const nameRefused = nameText(displayName.trim() || email.trim()); // spec 03 §0.1 `text`, before anything is sent
+    if (nameRefused !== null) return setErr(nameRefused);
+    setBusy(true);
+    setErr("");
+    setEarlier(null);
+    setForgotLine("");
+    try {
+      // The flow's own record: a way out ends only the pair this registration's own answer installed.
+      const flow = beginSignIn(ctx.client);
+      flowRef.current = flow;
+      const r = await completeSignup({
+        boundHere: boundAccountAt,
+        installed: flow.installed,
+        wire: ctx.wire,
+        pins: ctx.pins,
+        origin: ctx.origin,
+        pin: step.pin,
+        policy,
+        email,
+        displayName: displayName.trim() || email.trim(),
+        password,
+        signupTicket: step.ticket,
+        ageConfirmed: age,
+        deviceName: deviceName(),
+        nowMs: Date.now(),
+        operator: recovery.posture === "operator" && offer !== null ? { offer, understood: recovery.understood, keepDespiteUnsignedChange: recovery.keepNewKey } : null,
+      });
+      switch (r.kind) {
+        case "registered":
+          chosen.current = recovery.posture === "operator" && offer !== null ? { posture: "operator", fp: offer.fp } : { posture: "private", fp: NONE };
+          await writeRecord({ opened: r.opened, keys: r.session.accountKeys, wrap: r.wrap, kit: { secret: r.recoverySecret, pieceId: r.recoveryPieceId }, pin: step.pin });
+          return;
+        case "stored_unchecked":
+          // The account exists: its session ends (by its own token), nothing is written, and its kit is shown first.
+          void abandonSignIn(ctx.client, flow);
+          setPassword("");
+          setConfirmPw("");
+          setStep({ kind: "stored", kit: r.kit, accountId: r.accountId, pin: step.pin, line: SIGNUP_STORED_UNCHECKED, gone: SIGNUP_STORED_KIT_GONE });
+          return;
+        case "unknown":
+          // The account may exist: its kit is shown the same way, with the line that says how to tell.
+          void abandonSignIn(ctx.client, flow);
+          setPassword("");
+          setConfirmPw("");
+          setStep({ kind: "stored", kit: r.kit, accountId: r.accountId, pin: step.pin, line: unknownLine("signup", r.why), gone: SIGNUP_UNKNOWN_KIT_GONE });
+          return;
+        case "password_rule":
+          setErr(stoppedBeforeSendingText(r, "sign_up"));
+          return;
+        case "not_sent":
+          // The gate stopped the registration before it left: nothing was sent, no account was made.
+          setErr(SIGNUP_NOT_SENT);
+          return;
+        case "recovery_choice":
+          setErr(RECOVERY_CHOICE_REFUSED);
+          return;
+        case "identity_fault": {
+          // Nothing was sent: the address is bound here to an earlier account. The ticket stays for the next try. The
+          // offer's own lines say the refusal; where its records disagree (no offer) its refusal line alone.
+          const o = earlierOfferFor(email, r.reason, "new");
+          setEarlier(o);
+          setErr(o === null ? fill(REMADE_ACCOUNT_REFUSAL, emailNorm(email) ?? email.trim(), shownName(pin)) : "");
+          return;
+        }
+        case "name":
+          // Checked above already for the display name; the device name is the browser's own (plain text by making).
+          setErr(nameText(r.field === "displayName" ? displayName.trim() || email.trim() : deviceName()) ?? NAME_TOO_LONG);
+          return;
+        case "refused":
+          if (r.error.code === "bad_ticket") setStep({ kind: "email" });
+          setErr(refusalText(r.error));
+          return;
+        case "failed":
+          setErr(refusalText(r.error));
+          return;
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (step.kind === "stored") {
+    const line = step.line;
+    return <StoredKitCard line={line} gone={step.gone} kit={step.kit} email={emailNorm(email) ?? email} pin={step.pin} accountId={step.accountId} onSeen={(stays) => setStep({ kind: "after", line: stays })} />;
+  }
+  if (step.kind === "after") return <Msg kind="err">{step.line}</Msg>;
+  if (step.kind === "record") {
     return (
       <div>
-        <Msg kind="err">{RECOVERY_PIECE_STALE_NOTICE}</Msg>
-        <button
-          type="button"
-          className="primary"
-          onClick={() => {
-            const r = ready;
-            setReady(null);
-            onReady(r.account, r.store, r.meta);
-          }}
-        >
-          I understand — continue
-        </button>
+        <Msg kind="err">{step.error}</Msg>
+        <button className="primary" disabled={busy} onClick={() => { setBusy(true); void writeRecord(step).finally(() => setBusy(false)); }}>Try again</button>
       </div>
     );
   }
-
-  // design 2026-07-13: the awaited bound confirm is settling — show explicit feedback instead of the
-  // reveal (whose secret zero() nulls mid-flight), so the screen never blanks on the slow tunnel path.
-  // Ordered after the stale branch (a 409 during settle wins) and before the reveal.
-  if (ready && settling) {
+  if (step.kind === "kit") {
     return (
-      <div>
-        <p className="muted"><Busy>Saving your confirmation…</Busy></p>
-      </div>
-    );
-  }
-
-  // §F.7: the shown-once recovery-phrase reveal gates account usability — rendered after a successful
-  // register, holding the secret in secretRef, and it won't hand the account to the vault until the
-  // member types the phrase back (confirmMatches). No skip affordance (silent-total-loss guard).
-  if (ready && secretRef.current) {
-    return (
-      <RecoveryReveal
-        secretRef={secretRef}
-        clipboardClearSeconds={policy?.clipboardClearSeconds ?? 30}
-        account={ready.account}
-        onConfirmed={() => {
-          if (settlingRef.current) return;
-          settlingRef.current = true;
-          setSettling(true);
-          const r = ready;
-          // §F.9 + design 2026-07-13: flip the server's recoveryConfirmed flag — the register-committed
-          // piece IS what was just shown + confirmed (NO regenerate — that would clobber the phrase the
-          // user saved) — now BOUND (register's recoveryPieceId) and AWAITED. Stale ⇒ the saved phrase
-          // was rotated away: static notice, proceed unconfirmed on acknowledgment. Any other failure
-          // proceeds as before — it only re-nudges via the vault-entry capture gate on the next unlock.
-          void settleRecoveryConfirm(client, r.pieceId, {
-            zero: () => { secretRef.current?.fill(0); secretRef.current = null; },
-            onStale: () => { if (aliveRef.current) setPieceStale(true); },
-            onProceed: () => {
-              if (!aliveRef.current) return;
-              setReady(null);
-              // An in-person enrolment ends on this member's identity QR for the admin to scan (A5).
-              if (inPersonLink) setShowIdentity({ account: r.account, store: r.store, meta: r.meta, adminPinned });
-              else onReady(r.account, r.store, r.meta);
-            },
-          });
+      <EntryKitGate
+        ctx={ctx}
+        flow={flowRef.current}
+        kit={step.kit}
+        email={emailNorm(email) ?? email}
+        pin={step.pin}
+        opened={step.opened}
+        rotate={() => rotateFor(ctx, step.opened, email, password, step.wrap)}
+        onDone={() => void enter({ opened: step.opened, keys: step.keys, wrap: step.wrap, email, pin: step.pin, cardNotice, flow: flowRef.current })}
+        onTimeout={() => {
+          wipeOpened(step.opened);
+          onForget(KIT_TIMEOUT_NOTICE);
         }}
       />
     );
   }
-
-  // Root cause A §7.2 (A5): the last enrolment screen of an in-person enrolment — the admin's client scans
-  // this (or the admin types the code) on "Verify a household member", which pins this member.
-  if (showIdentity) {
+  if (step.kind === "code") {
     return (
-      <div>
-        <h2>Let your admin verify you</h2>
-        {showIdentity.adminPinned
-          ? <Msg kind="info">Your admin is now a verified household member on this account.</Msg>
-          : <Msg kind="info">{ADMIN_PIN_PENDING}</Msg>}
-        <MyIdentityCard account={showIdentity.account} intro="Show this to your admin. They scan the QR, or type the code, under Settings → Verify a household member." />
-        <button
-          type="button"
-          className="primary"
-          onClick={() => {
-            const r = showIdentity;
-            setShowIdentity(null);
-            onReady(r.account, r.store, r.meta);
-          }}
-        >
-          Done
-        </button>
-      </div>
+      <form onSubmit={verifyCode}>
+        <p>{fill(CODE_SENT_DAILY, email.trim())}</p>
+        <p className="muted">{EMAIL_CHECK_SPAM}</p>
+        {err && <Msg kind="err">{err}</Msg>}
+        <Field label="Code">
+          <input inputMode="numeric" autoComplete="one-time-code" autoFocus value={code} onChange={(e) => setCode(e.target.value)} />
+        </Field>
+        <button className="primary" disabled={busy || !code.trim()}>{busy ? <Busy>Checking…</Busy> : "Continue"}</button>
+        <button type="button" className="link" onClick={() => { setCode(""); setStep({ kind: "email" }); }}>Send a new code</button>
+      </form>
     );
   }
-
+  if (step.kind === "account") {
+    const strong = meetsMasterPasswordFloor(password);
+    return (
+      <>
+      <form onSubmit={register}>
+        {err && <Msg kind="err">{err}</Msg>}
+        {forgotLine && <Msg kind="info">{forgotLine}</Msg>}
+        <Announcer text={busy ? UNSEALING_NOTICE : ""} />
+        <Field label="Your name">
+          <input autoComplete="name" autoFocus value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+        </Field>
+        <Field label="Master password">
+          <input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} />
+        </Field>
+        <MasterPasswordHint password={password} />
+        <Field label="Master password again">
+          <input type="password" autoComplete="new-password" value={confirmPw} onChange={(e) => setConfirmPw(e.target.value)} />
+        </Field>
+        {offer !== null ? <RecoveryChoice offer={offer} value={recovery} onChange={setRecovery} /> : <p className="muted">{recoveryLine}</p>}
+        <button className="primary" disabled={busy || !strong || password !== confirmPw || !recoveryChoiceReady(recovery, offer)}>{busy ? <Busy>Creating your account…</Busy> : "Create account"}</button>
+      </form>
+      {earlier && <EarlierAccountOffer offer={earlier} server={shownName(pin)} onKeep={() => setEarlier(null)} onDone={(l) => { setEarlier(null); setErr(""); setForgotLine(l); }} />}
+      </>
+    );
+  }
   return (
-    <form onSubmit={submit}>
+    <form onSubmit={sendCode}>
       {err && <Msg kind="err">{err}</Msg>}
-      {linkValid && (
-        <div className="msg info" style={{ display: "block" }}>
-          Setting up a <strong>new account</strong> at <strong>{window.location.origin}</strong>.
-        </div>
+      <Field label="Email">
+        <input type="email" autoComplete="email" autoFocus value={email} onChange={(e) => setEmail(e.target.value)} />
+      </Field>
+      {ageRequired && (
+        <label className="check">
+          <input type="checkbox" checked={age} onChange={(e) => setAge(e.target.checked)} /> {AGE_13_OR_OLDER}
+        </label>
       )}
-      <Field label="Invite token">
-        <input className="mono" value={invite} onChange={(e) => setInvite(e.target.value)} placeholder="from your administrator" />
-      </Field>
-      <div className="row">
-        <Field
-          label="Email"
-          style={{ flex: 1 }}
-          hint={linkValid ? <span className="muted">from your invite — wrong address? ask your admin for a new one</span> : undefined}
-        >
-          <input type="email" value={email} readOnly={linkValid} onChange={(e) => setEmail(e.target.value)} />
-        </Field>
-        <Field label="Name" style={{ flex: 1 }}>
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="optional" />
-        </Field>
-      </div>
-      <Field label="Master password" hint={<MasterPasswordHint password={password} />}>
-        <input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} />
-      </Field>
-      <Field
-        label="Confirm master password"
-        hint={confirm && confirm !== password ? <span className="muted" style={{ color: "var(--danger)" }}>passwords don't match</span> : undefined}
-      >
-        <input type="password" autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
-      </Field>
-
-      {inPersonLink && (
-        <div className="check-block">
-          {/* A5c: the stop warning comes FIRST, in every posture, so the human reads it before either
-              affirmation tick (the waived tick just below; the required-affirm tick FingerprintProvenance
-              renders after this block) and before the code field (A5c review LOW-1/LOW-2). */}
-          <div className="msg err" style={{ display: "block" }}>{IN_PERSON_CODE_WARNING}</div>
-          {/* In the waived posture the code field sits BEHIND the first-person in-person affirmation
-              (required-affirm has its own tick below, and the seal needs the code regardless). Unticked,
-              the enrolment goes ahead with no admin pin: a pending verification, not an error. */}
-          {posture !== "required-affirm" && (
-            <label className="check">
-              <input type="checkbox" checked={inPersonAffirmed} onChange={(e) => setInPersonAffirmed(e.target.checked)} />
-              <span>I'm with my admin <strong>right now</strong>, reading the in-person code from their screen.</span>
-            </label>
-          )}
-          {posture === "required-affirm" || inPersonAffirmed ? (
-            <>
-              <Field
-                label="In-person code — type the 32 characters your admin's screen shows beside the QR"
-                prompt
-                hint={
-                  <span className="muted">
-                    {inPersonOk
-                      ? "matches"
-                      : posture === "required-affirm"
-                        ? "required: it proves this invite came from your admin in person. Got this link any other way (email, chat)? Stop and ask your admin."
-                        : "once it matches, your admin becomes a verified household member on this account."}
-                  </span>
-                }
-              >
-                <input className="mono" value={inPersonEntry} onChange={(e) => setInPersonEntry(e.target.value)} placeholder="from your admin's screen, not this one" />
-              </Field>
-            </>
-          ) : (
-            <p className="muted">{ADMIN_PIN_PENDING}</p>
-          )}
-        </div>
+      {progress !== null && (
+        <p className="muted" role="status">
+          <Busy>{POW_PROGRESS}</Busy> {progress > 0 ? `(${progress.toLocaleString()})` : ""}
+        </p>
       )}
-
-      <FingerprintProvenance
-        posture={posture}
-        linkRfp={linkRfp}
-        fp={fp}
-        policyError={policyError}
-        retrying={retrying}
-        onRetryPolicy={retryPolicy}
-        hasSheet={hasSheet}
-        onToggleSheet={setHasSheet}
-        affirmConfirmed={affirmConfirmed}
-        onAffirm={setAffirmConfirmed}
-        shortFp={shortFp}
-        onShortFp={setShortFp}
-        shortOk={shortOk}
-        fpConfirmed={fpConfirmed}
-        onFpConfirm={setFpConfirmed}
-        waivedAck={waivedAck}
-        onWaivedAck={setWaivedAck}
-      />
-
-      <button className="primary" disabled={busy || !canSubmit}>{busy ? "Forging your vault…" : "Create vault"}</button>
+      <button className="primary" disabled={busy || emailNorm(email) === null || (ageRequired && !age)}>{busy ? <Busy>Sending…</Busy> : "Send me a code"}</button>
     </form>
   );
 }
 
-/**
- * The fingerprint-provenance UI (§F.1) — renders EXACTLY the anchor a posture allows, never a
- * server-sourced fingerprint presented as verified:
- *  - waived         → NO fingerprint UI; the "no admin backstop" acknowledgment (distinct copy).
- *  - required-affirm→ display the IN-PERSON-scanned rfp and a one-tap eyeball affirmation.
- *  - required-typed → the pre-rfp typed-sheet ceremony (deliberately not showing the value first).
- */
-function FingerprintProvenance(p: {
-  posture: EnrollPosture;
-  linkRfp: string | undefined;
-  fp: string;
-  policyError: boolean;
-  retrying: boolean;
-  onRetryPolicy: () => void;
-  hasSheet: boolean;
-  onToggleSheet: (v: boolean) => void;
-  affirmConfirmed: boolean;
-  onAffirm: (v: boolean) => void;
-  shortFp: string;
-  onShortFp: (v: string) => void;
-  shortOk: boolean;
-  fpConfirmed: boolean;
-  onFpConfirm: (v: boolean) => void;
-  waivedAck: boolean;
-  onWaivedAck: (v: boolean) => void;
-}) {
-  if (p.posture === "required-affirm") {
-    // Security review 2026-10 (A5): the link's recovery fingerprint is NOT shown for eyeballing any more.
-    // The human types the in-person code from the admin's screen (field above), which authenticates the
-    // link's full 64-hex rfp; the app then compares the served recovery key with it at full length.
-    return (
-      <div className="check-block">
-        <div className="msg info" style={{ display: "block" }}>
-          This invite sets up an <strong>admin backstop</strong>. Your app checks the recovery key against your admin's sheet once you type the in-person code.
-        </div>
-        <label className="check">
-          <input type="checkbox" checked={p.affirmConfirmed} onChange={(e) => p.onAffirm(e.target.checked)} />
-          <span>I scanned this QR from my admin's screen <strong>in person</strong>, and typed the code they showed me.</span>
-        </label>
-      </div>
-    );
-  }
+// ---- Recover with the kit (§10, §13) ----------------------------------------------------------------------
 
-  if (p.posture === "required-typed") {
-    // The pre-rfp ceremony (spec 04 §2(3)): the fingerprint is deliberately NOT displayed until typed
-    // — showing it first would reduce the check to transcription.
-    return (
-      <div className="check-block">
-        {p.fp ? (
-          <>
-            <Field
-              label="Recovery check — type the FIRST 32 characters of the fingerprint on your printed recovery sheet"
-              prompt
-              hint={
-                <>
-                  {p.shortFp.trim() && !p.shortOk && (
-                    <span className="muted" style={{ color: "var(--danger)" }}>
-                      doesn't match this server's recovery key — if you copied the sheet correctly, STOP and contact your admin
-                    </span>
-                  )}
-                  {p.shortOk && <span className="muted">matches — full fingerprint: {groupHex(p.fp)}</span>}
-                </>
-              }
-            >
-              <input className="mono" placeholder="from the sheet, not this screen" value={p.shortFp} onChange={(e) => p.onShortFp(e.target.value)} />
-            </Field>
-            <label className="check">
-              <input type="checkbox" checked={p.fpConfirmed} onChange={(e) => p.onFpConfirm(e.target.checked)} disabled={!p.shortOk} />
-              <span>This fingerprint matches the recovery sheet. I understand this account also has an admin backstop.</span>
-            </label>
-          </>
-        ) : p.policyError ? (
-          <div className="msg err" style={{ display: "block" }} role="alert">
-            {POLICY_UNAVAILABLE}{" "}
-            <button type="button" className="link" disabled={p.retrying} onClick={p.onRetryPolicy}>{p.retrying ? "Retrying…" : "Retry"}</button>
-          </div>
-        ) : (
-          <Msg kind="err">This server has no recovery key configured — the admin backstop can't be set up.</Msg>
-        )}
-        <div style={{ marginTop: 8 }}>
-          <button type="button" className="link" onClick={() => p.onToggleSheet(false)}>I don't have a recovery sheet — set up without an admin backstop</button>
-        </div>
-      </div>
-    );
-  }
+type RecoverStep =
+  | { kind: "input" }
+  | { kind: "confirm"; input: KitInput; email: string }
+  | { kind: "password"; verified: KitVerified }
+  | { kind: "kit"; opened: OpenedAccount; keys: { kdfSalt: string }; wrap: SessionKeys; kit: FreshKit; email: string; pin: WebPin }
+  /**
+   * The server stored the recovery and this browser refused its answer, or whether it stored it cannot be told: the new
+   * kit is shown with [line] before anything is wiped.
+   */
+  | { kind: "stored"; kit: FreshKit; accountId: string; email: string; pin: WebPin; line: string; gone: string }
+  /** The end of a stored or untold recovery: its line alone, no form (the master password is not typed here again). */
+  | { kind: "after"; line: string };
 
-  // waived — no fingerprint anywhere (there is no org pubkey to substitute). Distinct posture ack.
-  return (
-    <div className="check-block">
-      <div className="msg err" style={{ display: "block" }} role="alert">
-        <strong>There is NO admin backstop.</strong> Only your recovery phrase can restore this account. Lose
-        both your master password and this phrase and this account is gone forever.
-      </div>
-      <label className="check">
-        <input type="checkbox" checked={p.waivedAck} onChange={(e) => p.onWaivedAck(e.target.checked)} />
-        <span>I understand: without my master password AND my recovery phrase, this account cannot be recovered by anyone.</span>
-      </label>
-      {p.linkRfp === undefined && (
-        <div style={{ marginTop: 8 }}>
-          <button type="button" className="link" onClick={() => p.onToggleSheet(true)}>My admin gave me a printed recovery sheet (add the admin backstop)</button>
-        </div>
-      )}
-    </div>
+function KitRecover({ ctx, policy, pin, cardNotice, onReady, onForget, onCommitted }: { ctx: WebContext; policy: ClientPolicyV2; pin: WebPin; cardNotice: CardStatus | null; onReady: Ready; onForget: (notice?: string) => void; onCommitted?: (committed: boolean) => void }) {
+  const [step, setStep] = useState<RecoverStep>({ kind: "input" });
+  const committed = step.kind === "kit" || step.kind === "stored";
+  useEffect(() => onCommitted?.(committed), [committed, onCommitted]);
+  const [text, setText] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPw, setConfirmPw] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  // The kit check was refused on this browser's own record of the address: the offer to forget the earlier account.
+  const [earlier, setEarlier] = useState<EarlierOffer | null>(null);
+  const [forgotLine, setForgotLine] = useState("");
+  const enter = useEnter(ctx, onReady, onForget, "recovered");
+  // The recovery's own record (tabsession.ts), kept for its later steps (the kit gate, the vault's entry).
+  const flowRef = useRef<SignInFlow | null>(null);
+  const { name, origin } = instanceLabel(pin);
+  const stepRef = useRef(step);
+  stepRef.current = step;
+  useEffect(
+    () => () => {
+      const s = stepRef.current;
+      if (s.kind === "confirm") (s.input.kind === "qr" ? s.input.kit.secret : s.input.secret).fill(0);
+      if (s.kind === "password") abandonKit(s.verified);
+      if (s.kind === "stored") s.kit.secret.fill(0);
+    },
+    [],
   );
-}
 
-/**
- * §F.7 shown-once recovery-phrase reveal. The secret lives in `secretRef` (never useState, never
- * storage); the phrase renders as TEXT (never type=password); the "type it back" confirm input is
- * bound to its own `typed` state (never to the secret) with autoComplete off and sits OUTSIDE any
- * credential <form>; the copy button uses the SECRET clipboard-clear path. The gate is un-skippable
- * (no dismiss) — matching today's fpConfirmed gate.
- *
- * Cut M (v2 #7): the Copy button used to sit ABOVE the type-back, so copy → paste → confirm passed
- * the gate without the phrase ever being saved — and the clipboard auto-wipe then destroyed the only
- * copy (silent total loss for a waived account). Now the confirm input refuses pastes, and copying
- * is offered only AFTER the type-back has proven a saved copy exists (for the password-manager
- * use-case). This component is the ONE gate body — both surfaces (enroll reveal + vault-entry
- * capture gate) render it, so both are covered.
- */
-function RecoveryReveal({
-  secretRef,
-  clipboardClearSeconds,
-  onConfirmed,
-  account,
-}: {
-  secretRef: React.MutableRefObject<Uint8Array | null>;
-  clipboardClearSeconds: number;
-  onConfirmed: () => void;
-  account?: Account;
-}) {
-  const [typed, setTyped] = useState("");
-  const [copied, setCopied] = useState(false);
-  // spec 04 §6 / spec 01 §5: the sheet also carries this account's identity fingerprint, so it can
-  // anchor a household (admin) recovery later. Derived on this device from the seed, never a server value.
-  const [idShort, setIdShort] = useState("");
-  const [idFull, setIdFull] = useState("");
-  useEffect(() => {
-    if (!account) return;
-    let alive = true;
-    void Promise.all([account.identityFingerprintShort(), account.identityFingerprintFull()]).then(([s, f]) => {
-      if (alive) {
-        setIdShort(s);
-        setIdFull(f);
-      }
-    });
-    return () => {
-      alive = false;
-    };
-  }, [account]);
-  // Audit F05: the copy was refused / the auto-clear was refused. Both were silent before —
-  // the first swallowed by a bare catch, the second by a `.catch(() => {})` on the wipe.
-  const [copyErr, setCopyErr] = useState(false);
-  const [wipeStuck, setWipeStuck] = useState(false);
-  // Cut M (v2 #7): a refused paste/drop into the type-back sets this so the refusal is
-  // explained in place rather than looking like a broken input.
-  const [pasteTried, setPasteTried] = useState(false);
-  const secret = secretRef.current;
-  if (!secret) return null;
-  const phrase = displayForm(secret); // base64url of the raw 32 bytes — computed per render, not stored
-  const grouped = phrase.replace(/(.{4})/g, "$1 ").trim();
-  const matches = confirmMatches(secret, typed);
-
-  const copy = async () => {
-    // Audit F05: the guarded write (clipboard.ts) instead of a bare writeText behind a silent
-    // catch — a refused copy on THIS screen means the phrase was never copied at all, at the one
-    // moment it is shown and unrecoverable.
-    if (!(await writeClipboard(phrase))) {
-      setCopied(false);
-      setCopyErr(true);
-      return;
+  const parse = (e: React.FormEvent) => {
+    e.preventDefault();
+    setErr("");
+    setEarlier(null);
+    setForgotLine("");
+    const r = parseKitInput(text, email);
+    if (r.kind === "bad_kit") return setErr("That isn't a recovery kit.");
+    if (r.kind === "invalid_email") return setErr("Type the email address of the account this kit is for.");
+    if (r.kind === "qr" && (r.kit.origin !== ctx.origin || r.kit.card0Hash !== pin.card0Hash)) {
+      r.kit.secret.fill(0);
+      return setErr(KIT_WRONG_SERVER);
     }
-    setCopyErr(false);
-    setWipeStuck(false);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1200);
-    // SECRET clipboard-clear (Vault.useCopy parity): wipe after the policy window, CLAMPED into
-    // [1, CLIPBOARD_CLEAR_MAX_SECONDS] (design 2026-07-15 §2.3, B1-1) — a hostile server value
-    // can never pin a recovery phrase on the clipboard past the ceiling. Audit F05: the SHARED
-    // single slot, so double-clicking Copy no longer stacks two wipes (the second of which fired
-    // early against a later copy), and a refused wipe says so instead of being swallowed.
-    scheduleClipboardClear(clampClipboardClearSeconds(clipboardClearSeconds), (outcome) => setWipeStuck(outcome === "stuck"));
+    setText("");
+    setStep({ kind: "confirm", input: r, email: r.kind === "qr" ? r.kit.emailNorm : r.email });
   };
 
-  return (
-    <div>
-      <div className="msg info" style={{ display: "block" }}>
-        <strong>Save your recovery phrase now.</strong> It is the only thing that can restore this account if you
-        forget your master password. It is shown <strong>once</strong> — write it down or store it somewhere safe.
-      </div>
-      <div className="field">
-        {/* Audit F10: the phrase renders as TEXT (never an input — §F.7), so this heads a
-            block with no control in it. */}
-        <div className="field-head">Your recovery phrase</div>
-        {/* Rendered as TEXT (never type=password); never written to storage (§F.7). */}
-        {/* H137: `print-keep` is the ONE exception to the print blanking — this phrase is shown
-            once, is never stored, and printing it is a way the design expects a user to save it. */}
-        <div
-          className="mono print-keep"
-          style={{ userSelect: "all", wordBreak: "break-all", padding: "10px 12px", border: "1px solid rgba(128,128,128,0.35)", borderRadius: 8 }}
-        >
-          {grouped}
-        </div>
-        {/* Cut M (v2 #7): no Copy button here — it moved BELOW the type-back gate (see the
-            post-confirm section) so a clipboard round-trip can't stand in for saving. */}
-      </div>
-      {/* spec 04 §6 / spec 01 §5: the member's identity fingerprint also rides the sheet, so it can
-          anchor a household (admin) recovery later without a separate out-of-band step. */}
-      {idShort && (
-        <div className="field">
-          <div className="field-head">Your identity fingerprint (give this to your admin if you ever need a household recovery)</div>
-          <div className="mono print-keep" style={{ whiteSpace: "pre-line", userSelect: "all" }}>{groupedShort(idShort)}</div>
-          {idFull && <div className="mono muted" style={{ wordBreak: "break-all", userSelect: "all" }}>full: {idFull.replace(/(.{4})/g, "$1 ").trim()}</div>}
-        </div>
-      )}
-      {/* Audit F10: `Field` associates the prompt with the box (the enrollment path's
-          recovery-check twin already does). This gate is UN-SKIPPABLE and one-shot — a screen
-          reader landing on an unnamed "edit, blank" here has nothing telling it what to type,
-          and pasting is deliberately refused, so there is no way to guess around it. */}
-      <Field
-        label="Type your recovery phrase back to confirm you saved it"
-        prompt
-        hint={
-          <>
-            {pasteTried && !matches && (
-              <span className="muted" style={{ display: "block", color: "var(--gold-text)" }}>
-                Type it from your written note — pasting doesn't prove you saved it.
-              </span>
-            )}
-            {typed.trim() && !matches && <span className="muted" style={{ color: "var(--danger)" }}>doesn't match — check what you saved</span>}
-          </>
-        }
-      >
-        <input
-          className="mono"
-          autoComplete="off"
-          autoCapitalize="off"
-          autoCorrect="off"
-          spellCheck={false}
-          value={typed}
-          onChange={(e) => setTyped(e.target.value)}
-          // Cut M (v2 #7): pasting (or dropping selected text) proves nothing about a saved
-          // copy — refuse it and say why. Typing stays the only way through the gate.
-          onPaste={(e) => { e.preventDefault(); setPasteTried(true); }}
-          onDrop={(e) => { e.preventDefault(); setPasteTried(true); }}
-          placeholder="type it in from where you saved it"
-        />
-      </Field>
-      {/* Cut M (v2 #7): the gate is open — the phrase demonstrably exists outside this screen —
-          so offering the clipboard here can no longer defeat it. Same SECRET clipboard-clear
-          path as before (the secret is still live; it's only zeroed by onConfirmed). */}
-      {matches && (
-        <div className="msg info" style={{ display: "block" }}>
-          That matches — your phrase is saved. Want it in another password manager too?{" "}
-          <button type="button" className="ghost" onClick={copy}>{copied ? "Copied ✓" : "Copy phrase"}</button>
-        </div>
-      )}
-      {/* Audit F05: both halves of the clipboard truth, on the one screen where the phrase is
-          shown once and cannot be re-shown — a refused copy, and a refused auto-clear that left
-          a 256-bit recovery secret sitting on the system clipboard. */}
-      {copyErr && <Msg kind="err">{CLIPBOARD_FAILED}</Msg>}
-      {wipeStuck && <Msg kind="err">{CLIPBOARD_NOT_CLEARED}</Msg>}
-      <Announcer text={wipeStuck ? CLIPBOARD_NOT_CLEARED : copyErr ? CLIPBOARD_FAILED : copied ? "recovery phrase copied" : ""} />
-      <button type="button" className="primary" disabled={!matches} onClick={onConfirmed}>I've saved it — open my vault</button>
-    </div>
-  );
-}
-
-/**
- * §F.9 vault-entry capture gate. Reached from Unlock / SignIn when the server reports this account's
- * recovery piece was never durably CONFIRMED (`recoveryConfirmed !== true`) — an interrupted reveal on
- * some device, or a pre-flag migration account. On mount it regenerates + COMMITS a fresh piece
- * (setupAndCommitRecovery → PUT /recovery/self-setup, which does NOT flip the flag — it runs before
- * capture), hands the fresh secret to the SAME un-skippable {@link RecoveryReveal}, and only on the
- * type-back confirm flips `recoveryConfirmed` via /recovery/self/confirm — BOUND to the committed
- * piece's `pieceId` and AWAITED (design 2026-07-13) — before proceeding to the vault. A stale confirm
- * (409: another device's gate rotated the piece mid-capture) shows the static replaced-phrase notice
- * and re-runs setup + reveal; the gate stays closed. `currentAuthKey` is the login authKey the caller
- * derived from the freshly-typed master password (the server re-verifies it, like changePassword).
- * Renders content only — callers wrap it in the card appropriate to their context. A failed commit
- * keeps the gate closed with a retry (never proceeds to the vault, never leaves a live secret
- * dangling — the secret is zeroed on failure). `onSignOut` (A.5) is the gate's only escape — safe:
- * the flag stays false, so the gate re-fires at the next sign-in.
- */
-function RecoveryCaptureGate({
-  client,
-  account,
-  store,
-  meta,
-  currentAuthKey,
-  clipboardClearSeconds,
-  onReady,
-  onSignOut,
-  onTimeout,
-}: {
-  client: ApiClient;
-  account: Account;
-  store: VaultStore;
-  meta: LoginMeta;
-  currentAuthKey: string;
-  clipboardClearSeconds: number;
-  onReady: (a: Account, s: VaultStore, m: LoginMeta) => void;
-  onSignOut: () => void;
-  /** CR-02: idle-timeout escape — the caller drops the held session and lands on the sign-in/unlock
-   *  card with the timeout notice; the gate re-fires with a fresh phrase at next sign-in. */
-  onTimeout: () => void;
-}) {
-  const secretRef = useRef<Uint8Array | null>(null);
-  // design 2026-07-13: the server-minted id of the piece THIS gate committed + revealed — presented at
-  // confirm so it can never attest a piece a concurrent setup rotated away. Lives beside secretRef;
-  // the two are zeroed/cleared together (unmount, confirm, stale).
-  const pieceIdRef = useRef<string | null>(null);
-  const [stage, setStage] = useState<"working" | "reveal" | "confirming" | "error">("working");
-  // design 2026-07-13: a confirm answered 409 recovery_piece_stale — the static notice explains the
-  // fresh phrase the re-run is about to reveal. Sticky for the gate's lifetime (the old phrase stays dead).
-  const [pieceStale, setPieceStale] = useState(false);
-  const [err, setErr] = useState("");
-  const startedRef = useRef(false);
-  // One settlement per reveal (the confirm is awaited now, so the reveal outlives the first click).
-  const settlingRef = useRef(false);
-  const aliveRef = useRef(true);
-
-  // CR-02: this gate holds a fully-unlocked Account for its whole lifetime and displays the raw
-  // recovery phrase (a UVK-equivalent, TM-R9) once it reaches the reveal — bound it by the same idle
-  // auto-lock the vault uses. On expiry zero the secret + its piece id and hand control to the
-  // caller's timeout escape (drop the session, land on sign-in with the notice; the gate re-fires
-  // with a fresh phrase next sign-in). Activity resets it, so a member actively typing the phrase
-  // back is never interrupted.
-  useAutoLock(REVEAL_TIMEOUT_S, () => {
-    secretRef.current?.fill(0);
-    secretRef.current = null;
-    pieceIdRef.current = null;
-    onTimeout();
-  });
-
-  // §F.7: zero the raw secret (and clear its piece id — together) on unmount as well as on confirm.
-  // aliveRef re-arms across a StrictMode remount so a settlement landing after unmount can't onReady.
-  useEffect(() => {
-    aliveRef.current = true;
-    return () => { aliveRef.current = false; secretRef.current?.fill(0); secretRef.current = null; pieceIdRef.current = null; };
-  }, []);
-
-  const run = useCallback(async () => {
-    setStage("working");
+  const verify = async () => {
+    if (step.kind !== "confirm") return;
+    setBusy(true);
     setErr("");
     try {
-      const { recoverySecret, pieceId } = await net(setupAndCommitRecovery(client, account, currentAuthKey));
-      if (!aliveRef.current) { recoverySecret.fill(0); return; } // unmounted mid-flight — never leave the secret live
-      secretRef.current = recoverySecret;
-      pieceIdRef.current = pieceId;
-      setStage("reveal");
-    } catch (e) {
-      // Static copy only — NEVER interpolate secret material (§F.7).
-      setErr(e instanceof NetworkError ? UNREACHABLE : "Couldn't set up your recovery phrase just now — try again in a moment.");
-      setStage("error");
+      const r = await verifyKit({ wire: ctx.wire, pins: ctx.pins, origin: ctx.origin, input: step.input, knownIdentityPub: (u, em) => knownIdentity(em)(u) });
+      switch (r.kind) {
+        case "verified":
+          setStep({ kind: "password", verified: r.verified });
+          return;
+        case "invalid_credentials":
+          setStep({ kind: "input" });
+          setErr("That kit doesn't open an account here."); // PLACEHOLDER
+          return;
+        case "wrong_server":
+          setStep({ kind: "input" });
+          setErr(KIT_WRONG_SERVER);
+          return;
+        case "operator":
+          setStep({ kind: "input" });
+          setErr(OPERATOR_NOT_ON_WEB);
+          return;
+        case "identity_fault": {
+          setStep({ kind: "input" });
+          // With the offer, its own refusal line stands alone; the identity fault's plate only where nothing is offered.
+          const f = identityRefusal(step.email, r.reason, r.servedUserId);
+          setErr(f.err);
+          setEarlier(f.offer);
+          return;
+        }
+        case "pin":
+        case "password_rule":
+          setStep({ kind: "input" });
+          setErr(stoppedBeforeSendingText(r, "kit_recovery"));
+          return;
+        case "refused":
+        case "failed":
+          setStep({ kind: "input" });
+          setErr(refusalText(r.error));
+          return;
+      }
+    } catch {
+      setStep({ kind: "input" });
+      setErr(IDENTITY_FAULT);
+    } finally {
+      setBusy(false);
     }
-  }, [client, account, currentAuthKey]);
+  };
 
-  // Run once on mount (guarded against a StrictMode double-invoke so it can't double-commit).
-  useEffect(() => {
-    if (startedRef.current) return;
-    startedRef.current = true;
-    void run();
-  }, [run]);
+  const commit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (step.kind !== "password") return;
+    setBusy(true);
+    setErr("");
+    try {
+      // The flow's own record: a way out ends only the pair this recovery's own commit installed.
+      const flow = beginSignIn(ctx.client);
+      flowRef.current = flow;
+      const v = step.verified;
+      const r = await commitKitRecovery({ wire: ctx.wire, pins: ctx.pins, origin: ctx.origin, verified: v, newPassword: password, kdfParams: policy.kdfParams, deviceName: deviceName(), installed: flow.installed });
+      if (r.kind === "recovered") {
+        setStep({ kind: "kit", opened: r.opened, keys: r.session.accountKeys, wrap: r.wrap, kit: r.kit, email: v.email, pin: v.pin });
+        return;
+      }
+      const s = kitCommitScreen(r);
+      if (s.endSession) void abandonSignIn(ctx.client, flow);
+      if (s.show === "stored") {
+        setPassword("");
+        setConfirmPw("");
+        setStep({ kind: "stored", kit: s.kit, accountId: s.accountId, email: v.email, pin: v.pin, line: s.line, gone: s.gone });
+        return;
+      }
+      setStep({ kind: "input" });
+      setErr(s.err);
+    } finally {
+      setBusy(false);
+    }
+  };
 
-  const body =
-    stage === "reveal" && secretRef.current ? (
-      <RecoveryReveal
-        secretRef={secretRef}
-        clipboardClearSeconds={clipboardClearSeconds}
-        account={account}
-        onConfirmed={() => {
-          if (settlingRef.current) return;
-          settlingRef.current = true;
-          setStage("confirming");
-          // §F.9 (round-3) + design 2026-07-13: flip the durable flag only AFTER the type-back capture —
-          // never at self-setup commit time — now BOUND to the piece this gate revealed and AWAITED.
-          // Stale ⇒ the typed phrase attests a rotated-away piece: static notice + re-run (fresh
-          // setup/reveal; the gate stays closed). Any other failure proceeds unconfirmed — the flag
-          // stays 0, so the gate re-fires next entry (safe); it never marks an uncaptured phrase confirmed.
-          void settleRecoveryConfirm(client, pieceIdRef.current, {
-            zero: () => { secretRef.current?.fill(0); secretRef.current = null; pieceIdRef.current = null; },
-            onStale: () => {
-              if (!aliveRef.current) return;
-              settlingRef.current = false;
-              setPieceStale(true);
-              void run();
-            },
-            onProceed: () => { if (aliveRef.current) onReady(account, store, meta); },
-          });
+  if (step.kind === "stored") {
+    const line = step.line;
+    return <StoredKitCard line={line} gone={step.gone} kit={step.kit} email={step.email} pin={step.pin} accountId={step.accountId} onSeen={(stays) => setStep({ kind: "after", line: stays })} />;
+  }
+  if (step.kind === "after") return <Msg kind="err">{step.line}</Msg>;
+  if (step.kind === "kit") {
+    return (
+      <EntryKitGate
+        ctx={ctx}
+        flow={flowRef.current}
+        kit={step.kit}
+        email={step.email}
+        pin={step.pin}
+        opened={step.opened}
+        rotate={() => rotateFor(ctx, step.opened, step.email, password, step.wrap)}
+        onDone={() => void enter({ opened: step.opened, keys: step.keys, wrap: step.wrap, email: step.email, pin: step.pin, cardNotice, flow: flowRef.current })}
+        onTimeout={() => {
+          wipeOpened(step.opened);
+          onForget(KIT_TIMEOUT_NOTICE);
         }}
       />
-    ) : stage === "error" ? (
-      <div>
-        <Msg kind="err">{err}</Msg>
-        <button type="button" className="primary" onClick={() => void run()}>Try again</button>
-      </div>
-    ) : (
-      <p className="muted"><Busy>{stage === "confirming" ? "Saving your confirmation…" : "Preparing your recovery phrase…"}</Busy></p>
     );
-
+  }
+  if (step.kind === "password") {
+    const strong = meetsMasterPasswordFloor(password);
+    return (
+      <form onSubmit={commit}>
+        <p>{fill(KIT_RECOVER, step.verified.email, name, origin)}</p>
+        {err && <Msg kind="err">{err}</Msg>}
+        <Field label="New master password">
+          <input type="password" autoComplete="new-password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} />
+        </Field>
+        <MasterPasswordHint password={password} />
+        <Field label="New master password again">
+          <input type="password" autoComplete="new-password" value={confirmPw} onChange={(e) => setConfirmPw(e.target.value)} />
+        </Field>
+        <button className="primary" disabled={busy || !strong || password !== confirmPw}>{busy ? <Busy>Recovering…</Busy> : "Set the new master password"}</button>
+      </form>
+    );
+  }
+  if (step.kind === "confirm") {
+    return (
+      <div>
+        <p><strong>{fill(KIT_RECOVER, step.email, name, origin)}</strong></p>
+        <p>{KIT_RECOVER_SETS_PASSWORD}</p>
+        {err && <Msg kind="err">{err}</Msg>}
+        <button className="primary" disabled={busy} onClick={() => void verify()}>{busy ? <Busy>Checking the kit…</Busy> : "Continue"}</button>
+        <button
+          className="link"
+          onClick={() => {
+            (step.input.kind === "qr" ? step.input.kit.secret : step.input.secret).fill(0);
+            setStep({ kind: "input" });
+          }}
+        >
+          {GATE_CANCEL}
+        </button>
+      </div>
+    );
+  }
   return (
-    <div>
-      {pieceStale && <Msg kind="err">{RECOVERY_PIECE_STALE_NOTICE}</Msg>}
-      {body}
-      {/* A.5: the un-skippable gate still needs an escape that isn't "close the tab" — the same
-          affordance as the Unlock card. Safe: recoveryConfirmed stays false, so the gate re-fires
-          at the next sign-in (an un-captured phrase is replaced by the next run's fresh one). */}
-      <SignOutLink userId={account.userId} onSignOut={onSignOut} />
-    </div>
+    <>
+    <form onSubmit={parse} autoComplete="off">
+      {err && <Msg kind="err">{err}</Msg>}
+      {forgotLine && <Msg kind="info">{forgotLine}</Msg>}
+      <Field label={KIT_PASTE_LABEL} prompt>
+        <textarea rows={3} spellCheck={false} autoCapitalize="off" value={text} onChange={(e) => setText(e.target.value)} />
+      </Field>
+      {!text.trim().startsWith("andvari-kit:") && (
+        <Field label="Email">
+          <input type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} />
+        </Field>
+      )}
+      <button className="primary" disabled={!text.trim()}>Continue</button>
+    </form>
+    {earlier && <EarlierAccountOffer offer={earlier} server={shownName(pin)} onKeep={() => setEarlier(null)} onDone={(l) => { setEarlier(null); setErr(""); setForgotLine(l); }} />}
+    </>
   );
 }
 
-// ---- helpers ----
+/**
+ * What the kit recovery's screen does with a commit that did not open the vault: show a kit the person must keep with
+ * its line, say a line alone (the form is gone: the new password must not be typed here again), or go back to the kit's
+ * form with a line. [endSession]: a session may have been answered, and the sign-in's abandon ends it.
+ */
+export type KitCommitScreen =
+  /** [gone]: the line that stays when the idle limit took the kit off the screen before it was typed back. */
+  | { readonly show: "stored"; readonly kit: FreshKit; readonly accountId: string; readonly line: string; readonly gone: string; readonly endSession: true }
+  | { readonly show: "form"; readonly err: string; readonly endSession: boolean };
 
-function groupHex(hex: string): string {
-  return hex.replace(/(.{4})/g, "$1 ").trim();
+/** The line of a write whose outcome cannot be told, by why: "the server didn't answer" only when it did not. */
+export function unknownLine(flow: "kit_recovery" | "signup", why: UnknownWhy): string {
+  if (flow === "kit_recovery") return why === "no_answer" ? KIT_RECOVERY_UNKNOWN : why === "server_error" ? KIT_RECOVERY_UNKNOWN_SERVER_ERROR : KIT_RECOVERY_UNKNOWN_UNREADABLE;
+  return why === "no_answer" ? SIGNUP_UNKNOWN : why === "server_error" ? SIGNUP_UNKNOWN_SERVER_ERROR : SIGNUP_UNKNOWN_UNREADABLE;
 }
 
-/**
- * Every refusal `Service.register` can throw, in the wording core HouseholdCopy's `apiCopy`
- * code map now carries — ONE table all five clients read (audit F26). Byte-equal to the Kotlin
- * rows and pinned that way in enroll-errors.test.ts; do not reword one side.
- *
- * Two rows changed meaning when the table was promoted, and both mattered:
- *  - `escrow_required` (the invite wants the admin backstop, this enrollment offered none —
- *    the DEFAULT-path refusal when an invite is passed on as a bare token) had NO row here at
- *    all and printed the raw wire code, because the sentence that fits it was keyed to…
- *  - `recovery_required`, which is a different condition entirely: the server refuses because
- *    the per-member recovery block was absent or malformed. Every client always sends one, so
- *    that is an app fault, never something the user did.
- */
-export function enrollError(code: string): string {
-  switch (code) {
-    case "invalid_invite": return "That invite code is not valid.";
-    // Benign double-use dominates (a second family device scanning the same QR) — nudge to
-    // Sign in rather than alarming.
-    case "invite_used": return "That invite has already been used. Already set up this account? Switch to Sign in.";
-    case "invite_expired": return "That invite has expired.";
-    case "email_taken": return "An account with that email already exists.";
-    case "invite_email_mismatch": return "This invite was created for a different email address — ask your admin for a new invite.";
-    // A tampering signal (the sealed escrow would go to a key the printed sheet doesn't attest)
-    // — never softened into retry copy.
-    case "escrow_fingerprint_mismatch": return "Recovery fingerprint mismatch — do not proceed; contact your admin.";
-    // design §F.4 posture gate: the client offered the wrong posture for this invite. The
-    // invitee CAN fix the first two by switching the recovery-sheet step; the third is the
-    // admin's to clear.
-    case "escrow_required": return "This invite needs the admin backstop — set up with the recovery-sheet step (you'll need the printed sheet your admin gave you), or ask your admin for a member-only invite.";
-    case "escrow_not_allowed_when_waived": return "This invite is set to “member-only” (no admin backstop) — set up without the recovery-sheet step, or ask your admin for a new invite.";
-    case "escrow_not_configured": return "This server hasn't finished setting up the admin backstop — ask your admin to finish it, or to send you a member-only invite.";
-    case "recovery_required": return "andvari couldn't finish setting up your recovery phrase — start the setup again, and update andvari if it keeps happening.";
-    // Not a register refusal core curates — keep the code visible so it can be reported.
-    default: return "Enrollment failed (" + code + ").";
+export function kitCommitScreen(r: Exclude<KitCommitResult, { kind: "recovered" }>): KitCommitScreen {
+  switch (r.kind) {
+    case "stored_unchecked":
+      // The server holds the new password and this kit; the old kit is dead. Nothing is written, and the kit is shown
+      // with the refusal before anything is wiped.
+      return { show: "stored", kit: r.kit, accountId: r.accountId, line: KIT_RECOVERY_STORED_UNCHECKED, gone: KIT_RECOVERY_STORED_KIT_GONE, endSession: true };
+    case "unknown":
+      // It may be stored: the new kit is shown the same way, and kept beside the old one (the line says so).
+      return { show: "stored", kit: r.kit, accountId: r.accountId, line: unknownLine("kit_recovery", r.why), gone: KIT_RECOVERY_UNKNOWN_KIT_GONE, endSession: true };
+    case "operator":
+      // After the commit: the password was already reset and the kit replaced without being shown.
+      return { show: "form", err: OPERATOR_KIT_RESET_NOT_ON_WEB, endSession: true };
+    case "password_rule":
+      // Nothing was sent and no card failed: the rule's own line (CARD_REFUSED is the card's refusal, not true here). A
+      // person recovering with the kit has no password to sign in with: the confirmation has a line of its own here.
+      return { show: "form", err: r.decision === "trust_gate" ? KIT_RECOVERY_CONFIRM_SERVER_REFUSED : passwordRuleText(r.decision), endSession: false };
+    case "not_sent":
+      // The gate stopped the commit before it left: nothing was sent, no kit is shown, the old kit and password stand.
+      return { show: "form", err: KIT_RECOVERY_NOT_SENT, endSession: false };
+    case "refused":
+    case "failed":
+      return { show: "form", err: refusalText(r.error), endSession: false };
   }
 }
 
-// The F60 master-password hint used to live here and Settings imported it from this file. It
-// moved to passwordadvice.tsx when F31's pattern caution had to reach Recover too:
-// Welcome imports Recover, so a hint defined HERE could never be shared with it, and Recover grew
-// a near-copy instead that then drifted. Three surfaces, one component, no import cycle.
+/** Ends a session the web must not keep (the operator account): revoke, then drop the pair. */
+export async function dropSession(ctx: WebContext): Promise<void> {
+  await revokeSessionBestEffort(ctx.client);
+  ctx.client.setTokens(null);
+}

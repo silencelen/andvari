@@ -40,6 +40,8 @@ object FillBinding {
     private const val F_OPTIONS = "options"
     private const val F_MAXLEN = "maxLen"
     private const val F_NEWPW = "newPw"
+    private const val F_SCHEME = "scheme"
+    private const val F_HTML = "html"
 
     /** Put [form] into [intent] (the PendingIntent's base) and return it. */
     fun bake(intent: Intent, form: ParsedForm): Intent = intent.putExtra(EXTRA_BINDING, toBundle(form))
@@ -72,6 +74,8 @@ object FillBinding {
         putStringArrayList(F_OPTIONS, ArrayList(f.options))
         f.maxLength?.let { putInt(F_MAXLEN, it) }
         putBoolean(F_NEWPW, f.isNewPassword)
+        putString(F_SCHEME, f.webScheme)
+        putBoolean(F_HTML, f.isHtml)
     }
 
     /** Null on anything malformed — a binding that does not read back whole is no binding. */
@@ -86,6 +90,9 @@ object FillBinding {
     private fun fieldFrom(b: Bundle): ParsedField? {
         val id = b.autofillId(F_ID) ?: return null
         val kind = b.getString(F_KIND)?.let { n -> FieldKind.entries.firstOrNull { it.name == n } } ?: return null
+        // "This is an HTML field" rides the bake; a bake without it (made before it existed) is no
+        // binding, never a field read as native.
+        if (!b.containsKey(F_HTML)) return null
         return ParsedField(
             id = id,
             kind = kind,
@@ -95,6 +102,8 @@ object FillBinding {
             options = b.getStringArrayList(F_OPTIONS) ?: emptyList(),
             maxLength = if (b.containsKey(F_MAXLEN)) b.getInt(F_MAXLEN) else null,
             isNewPassword = b.getBoolean(F_NEWPW),
+            webScheme = b.getString(F_SCHEME),
+            isHtml = b.getBoolean(F_HTML),
         )
     }
 

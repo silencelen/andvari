@@ -62,8 +62,13 @@ export type SealKind = (typeof SEALED_KINDS)[number];
 /** The records left plain, none secret: the idle-lock notice (`{kind:"idle", seconds}`, the reason line on the unlock
  *  form), the update-check throttle stamp and the update channel's quiet marker (a reason from a fixed set). A write by
  *  anyone else can at most show a false reason line or move an update check; the forced check at start re-derives the
- *  last two. */
-export const PLAIN_KINDS = ["lockNotice", "updateCheckedAt", "updateChannelQuiet"] as const;
+ *  last two. `forkSeen` (per origin, `true`) is the backstop of a fork whose durable write to the trusted store failed
+ *  (design 2026-11-15 §4.4): it keeps the origin stopped across worker restarts for the rest of the
+ *  browser session. A write by anyone else can only stop an origin, never start one. `capturesLost` (a number, one
+ *  global slot like the idle-lock notice) is how many captured logins and cards a lock nobody was asked about deleted
+ *  unsaved, for the popup's next render to say (design §4.4, decided on 2026-11-17): only the number, never what they
+ *  held. A write by anyone else can at most show a false count. */
+export const PLAIN_KINDS = ["lockNotice", "updateCheckedAt", "updateChannelQuiet", "forkSeen", "capturesLost"] as const;
 export type PlainKind = (typeof PLAIN_KINDS)[number];
 
 /** Kinds sealed under the custody epoch, which every lock advances. */
@@ -72,7 +77,7 @@ const EPOCH_BOUND: ReadonlySet<SealKind> = new Set<SealKind>(["session", "tabs"]
 /** The storage.session key a record lives under: the worker's existing keys (two global slots, the rest under the
  *  origin's `ns.<originKey>.` namespace). */
 export function slotKey(kind: SealKind | PlainKind, originKey: string): string {
-  return kind === "session" || kind === "tabs" || kind === "lockNotice" ? kind : nsKey(originKey, kind);
+  return kind === "session" || kind === "tabs" || kind === "lockNotice" || kind === "capturesLost" ? kind : nsKey(originKey, kind);
 }
 
 /** The two lock-scoped slots ([EPOCH_BOUND]), which every lock erases. */
@@ -84,11 +89,12 @@ export type SessionKeyClass = { cls: "sealed"; kind: SealKind } | { cls: "plain"
 export function classifySessionKey(key: string): SessionKeyClass {
   if (key === "session" || key === "tabs") return { cls: "sealed", kind: key };
   if (key === "lockNotice") return { cls: "plain", kind: "lockNotice" };
+  if (key === "capturesLost") return { cls: "plain", kind: "capturesLost" };
   const m = /^ns\.[0-9a-f]{16}\.([A-Za-z]+)$/.exec(key);
   if (m) {
     const k = m[1]!;
     if (k === "quickUnlock" || k === "knownLogins") return { cls: "sealed", kind: k };
-    if (k === "updateCheckedAt" || k === "updateChannelQuiet") return { cls: "plain", kind: k };
+    if (k === "updateCheckedAt" || k === "updateChannelQuiet" || k === "forkSeen") return { cls: "plain", kind: k };
   }
   return { cls: "other" };
 }
@@ -226,6 +232,13 @@ export class SessionSeal {
   /** How many times the key was replaced in this worker life ([rotate]). */
   generation(): number {
     return this.gen;
+  }
+
+  /** How many times [kind]'s slot for [originKey] was removed in this worker life. A caller that reads a record, changes
+   *  it and writes it back compares this before the read and before the write: a removal in between (a wipe) means the
+   *  write must not put the record back. [set] alone cannot see it, since the removal came before the write was issued. */
+  removalCount(kind: SealKind, originKey: string): number {
+    return this.removals.get(slotKey(kind, originKey)) ?? 0;
   }
 
   /** Resolves once no decision is pending, following any rotation started meanwhile: whether sealing works. */

@@ -37,13 +37,11 @@ test("resolve: a username match the banner never named, in a non-personal vault,
   assert.deepEqual(resolveSaveAction(decoy, [decoy], "me@example.com", "new", P), { kind: "update", target: decoy });
 });
 
-test("the banner names the destination vault, and says so explicitly for a non-personal vault", () => {
+test("the banner names the destination vault; a login in a shared vault is the notice, never an Update (§12.2 rule 4)", () => {
   const upd = saveOfferCopy({ host: "example.com", username: "me", updatesItemId: "x", updatesItemName: "Example", updatesItemUsername: "me", vaultName: "Family", vaultShared: true });
   const text = upd.parts.map((p) => p.text).join("");
-  assert.ok(text.includes("“Family”") || text.includes("Family"), text);
-  assert.match(text, /shared vault/i, text);
-  assert.match(text, /can read it|can see it/i, text);
-  assert.equal(upd.primary, "Update in Family");
+  assert.equal(text, "This login is in Family. Update it in the andvari app.");
+  assert.equal(upd.primary, "OK");
   const own = saveOfferCopy({ host: "example.com", username: "me", updatesItemId: "x", updatesItemName: "Example", updatesItemUsername: "me", vaultName: "Personal", vaultShared: false });
   const ownText = own.parts.map((p) => p.text).join("");
   assert.ok(ownText.includes("Personal") && !/shared vault/i.test(ownText), ownText);
@@ -51,7 +49,7 @@ test("the banner names the destination vault, and says so explicitly for a non-p
   assert.ok(save.parts.map((p) => p.text).join("").includes("Personal"), "a new login names its destination too");
   // No name decrypted: neutral words, never an empty or server label.
   const anon = saveOfferCopy({ host: "example.com", username: "me", updatesItemId: "x", updatesItemName: "E", updatesItemUsername: null, vaultName: null, vaultShared: true });
-  assert.match(anon.parts.map((p) => p.text).join(""), /a shared vault/i);
+  assert.equal(anon.parts.map((p) => p.text).join(""), "This login is in a shared vault. Update it in the andvari app.");
 });
 
 test("the worker carries the destination vault, re-checks it at resolve, and the banner renders the shared copy", () => {
@@ -60,7 +58,8 @@ test("the worker carries the destination vault, re-checks it at resolve, and the
   assert.match(pub, /vaultShared: p\.vaultShared/);
   assert.doesNotMatch(pub, /updatesVaultId/, "the vault id stays SW-side");
   const cap = bg.slice(bg.indexOf("async function capturedCredential("), bg.indexOf("\nasync function ", bg.indexOf("async function capturedCredential(") + 10));
-  assert.match(cap, /saveTargetFor\(matchesFor\(host\), username, msg\.password, session\?\.personalVaultId\)/);
+  // F4: matched as the page it was captured on, scheme included (bound.uri), never by its bare host.
+  assert.match(cap, /saveTargetFor\(matchesFor\(bound\.uri\), username, msg\.password, session\?\.personalVaultId\)/);
   assert.match(cap, /updatesVaultId: updatable\?\.vaultId/);
   const commit = bg.slice(bg.indexOf("async function commitPendingSave("), bg.indexOf("\nasync function ", bg.indexOf("async function commitPendingSave(") + 10));
   assert.match(commit, /frozenTarget/, "the frozen target must still be in the vault the banner named");

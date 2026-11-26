@@ -25,6 +25,8 @@ import { digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
 import { bumpLabelGeneration, chooseEnteredCapture, demoteCsc, fieldWrapperOf, findCardForms, findLoginForms, isSubmitLike, labelSourcesOf, MIN_OPACITY, probeVisibility, proxiedAtFill, visibilityOf, type CardFieldKind, type CardForm, type CardFormFieldRef, type FillableControl, type LoginForm } from "./detect";
 import { isCardEntryDocument, isCardProviderOrigin, providerAccountOf } from "./cardproviders";
 import { frameCounts } from "./cardrelease";
+import { sharedLoginNotice } from "./saveoffer";
+import * as T from "./copy";
 /**
  * In-page card fill is in this build (cardfillflag.ts), read straight from build.mjs's define as the worker reads it: every
  * card chip, choice, report and fill path below is gated on it, so esbuild folds each gate and a build without card fill
@@ -32,7 +34,7 @@ import { frameCounts } from "./cardrelease";
  * for saving) and the login fill's card-field guards are not in-page card fill, and stay in every build.
  */
 declare const __ANDVARI_CARDFILL__: boolean;
-import { fillErrorCopy, saveErrorCopy, SAVE_SENT_TO_APP, SAVE_UNLOCK_PROMPTED, SAVE_UNLOCK_TOOLBAR } from "./errors";
+import { fillErrorCopy, saveErrorCopy, SAVE_SENT_TO_APP, SAVE_UNLOCK_PROMPTED, SAVE_UNLOCK_TOOLBAR, SAVED_IN_OTHER_ACCOUNT } from "./errors";
 import {
   send,
   type CaptureCardFields,
@@ -323,14 +325,18 @@ function fillForm(f: LoginForm, s: RevealedSecret): FillOutcome {
   return { filled: wroteUser && wrotePass ? "both" : wroteUser ? "username" : "password" };
 }
 
+/** The toast after a login's one-time code was copied, and its lead when the code is shown instead (copy.ts). */
+const TOTP_COPIED_TOAST = T.TOTP_COPIED_TOAST;
+const TOTP_SHOWN_TOAST = T.TOTP_SHOWN_TOAST;
+
 async function copyTotp(code: string): Promise<void> {
   try {
     await navigator.clipboard.writeText(code);
-    showToast("2FA code copied — paste when asked");
+    showToast(TOTP_COPIED_TOAST);
     await scheduleClipboardClear(); // E1-4: clear this post-fill 2FA copy on the policy window
   } catch {
     // a11y 6d (AM-7): assertive — the code is shown ONLY in this 5 s toast (safety-critical path).
-    showToast(`2FA code: ${code}`, true); // clipboard needs document focus — surface the code instead
+    showToast(`${TOTP_SHOWN_TOAST} ${code}`, true); // clipboard needs document focus — surface the code instead
   }
 }
 
@@ -1034,8 +1040,8 @@ function offerCardBanner(pending: PendingCardSave): void {
     pending,
     async () => {
       const r = await safeSend({ type: "resolvePendingCardSave", action: "save" });
-      if (r?.ok) return { ok: true, text: "Card saved to the hoard." };
-      return { ok: false, text: saveErrorCopy(r?.code) };
+      if (r?.ok) return { ok: true, text: T.CARD_SAVED };
+      return { ok: false, text: saveErrorCopy(r?.code, r?.reason) };
     },
     () => void safeSend({ type: "resolvePendingCardSave", action: "dismiss" }),
   );
@@ -1071,7 +1077,7 @@ function dismissCardChip(): void {
 async function activateCardChip(): Promise<void> {
   dismissCardChip();
   const r = await safeSend({ type: "openPopupForCards" });
-  if (r?.opened !== true) showToast("Open andvari from the toolbar to fill this card");
+  if (r?.opened !== true) showToast(T.OPEN_FROM_TOOLBAR_TO_FILL_CARD);
 }
 
 /** The chip trigger. `viaClick` distinguishes the two call sites [K15] folds into one retarget
@@ -1206,7 +1212,7 @@ async function fillItem(itemId: string, f: LoginForm): Promise<FillOutcome> {
 async function fillFromDropdown(itemId: string, f: LoginForm): Promise<FillOutcome> {
   const o = await fillItem(itemId, f);
   if (o.filled === "nothing") showToast(fillErrorCopy(o.code));
-  else showToast(o.filled === "both" ? "Login filled" : o.filled === "username" ? "Username filled" : "Password filled");
+  else showToast(o.filled === "both" ? T.LOGIN_FILLED : o.filled === "username" ? T.USERNAME_FILLED : T.PASSWORD_FILLED);
   return o;
 }
 
@@ -1219,7 +1225,7 @@ async function fillFromDropdown(itemId: string, f: LoginForm): Promise<FillOutco
 async function searchAllInPopup(): Promise<void> {
   closeDropdown();
   const r = isTop ? await safeSend({ type: "openPopupForSearch" }) : undefined;
-  if (!r?.opened) showToast("Click the andvari toolbar icon to search all your logins");
+  if (!r?.opened) showToast(T.SEARCH_FROM_TOOLBAR);
 }
 
 async function useStrongPassword(f: LoginForm): Promise<void> {
@@ -1250,7 +1256,7 @@ async function useStrongPassword(f: LoginForm): Promise<void> {
     filling = false;
   }
   updateSnapshot(live); // the generated secret must reach the save banner, not just the page
-  showToast("Strong password filled"); // Cut M (v2 #14): success is visible too, not just failure
+  showToast(T.STRONG_PASSWORD_FILLED); // Cut M (v2 #14): success is visible too, not just failure
 }
 
 // ---- signup reuse alert (owner ask 2026-08-22) ----
@@ -1429,11 +1435,23 @@ function captureNow(f: LoginForm): void {
 }
 
 function offerBanner(pending: PendingSave): void {
+  // §12.2 rule 4: a login in a shared vault is not updated here; the notice's one button only closes it.
+  if (sharedLoginNotice(pending)) {
+    showSaveBanner(
+      pending,
+      async () => {
+        void safeSend({ type: "resolvePendingSave", action: "dismiss" });
+        return { ok: true, text: T.NOTHING_CHANGED };
+      },
+      () => void safeSend({ type: "resolvePendingSave", action: "dismiss" }),
+    );
+    return;
+  }
   showSaveBanner(
     pending,
     async () => {
       const r = await safeSend({ type: "resolvePendingSave", action: "save" });
-      if (r?.ok) return { ok: true, text: r.viaApp === true ? SAVE_SENT_TO_APP : "Saved to the hoard." };
+      if (r?.ok) return { ok: true, text: r.viaApp === true ? SAVE_SENT_TO_APP : r.otherAccount === true ? SAVED_IN_OTHER_ACCOUNT : T.SAVED_TO_HOARD };
       if (r?.code === "locked") {
         // Unlock-prompt (2026-08-12): don't just NAME the unlock — summon it. The SW kept this
         // Save click as approval (pending.approved), so unlocking lands the save with no second
@@ -1447,7 +1465,7 @@ function offerBanner(pending: PendingSave): void {
       // fired on undefined, so the SW's internal "locked"/"save failed (conflict)" strings leaked
       // straight into the red result line). saveErrorCopy: conflict → open-in-web-vault,
       // failed/undefined → generic retry.
-      return { ok: false, text: saveErrorCopy(r?.code) };
+      return { ok: false, text: saveErrorCopy(r?.code, r?.reason) };
     },
     () => void safeSend({ type: "resolvePendingSave", action: "dismiss" }),
   );
@@ -1833,7 +1851,7 @@ function init(): void {
       // Unlock-prompt (2026-08-12): the approved save the user clicked while locked just landed
       // on unlock — confirm it. Sent to frame 0 only, and ONLY on a real write (a 2a suppress
       // stays silent SW-side). Same sentence as the banner's own success line.
-      if (msg.type === "pendingSaveCommitted" && isTop) showToast("Saved to the hoard.");
+      if (msg.type === "pendingSaveCommitted" && isTop) showToast(msg.otherAccount === true ? SAVED_IN_OTHER_ACCOUNT : T.SAVED_TO_HOARD);
       return undefined;
     },
   );

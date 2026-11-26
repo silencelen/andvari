@@ -2,336 +2,961 @@
 
 ## Assets
 A1 vault plaintext (credentials, TOTP seeds, notes, attachments). A2 master
-passwords. A3 UVKs/VKs/identity keys. A4 the org recovery seed. A5 account
-availability (lockout = losing access to everything). A6 metadata (who has how many
-items, sizes, timing). A7 the at-rest quick-unlock secret — the on-device artifact
-that, combined with a live unlocking factor, opens a vault without the master
-password. Two variants with **different at-rest posture**: **A7-android** (the
-Keystore-wrapped UVK blob + its non-exportable hardware key, spec 01 §8.1) is
-*durable* but *hardware-gated*; **A7-extension** (the PIN-wrapped, session-scoped UVK
-blob double-wrapped under a non-extractable WebCrypto co-key, spec 01 §8.4) is
-*non-durable* (browser-session-scoped, dies at browser exit) but *hardware-less*.
+passwords. A3 UVKs/VKs/identity keys. A4 an instance recovery seed (private instances that
+offer operator recovery). A5 account availability (lockout = losing access to everything). A6
+metadata (who has how many items, sizes, timing, who connected with whom). A7 the at-rest
+quick-unlock secret — the on-device artifact that, combined with a live unlocking factor, opens a
+vault without the master password. Two variants with **different at-rest posture**:
+**A7-android** (the Keystore-wrapped UVK blob + its non-exportable hardware key, spec 01 §8.1) is
+*durable* but *hardware-gated*; **A7-extension** (the PIN-wrapped, session-scoped UVK blob
+double-wrapped under a non-extractable WebCrypto co-key, spec 01 §8.4) is *non-durable*
+(browser-session-scoped, dies at browser exit) but *hardware-less*. A8 the trust records: pinned
+instance cards, contact pins, the account's vault records and genesis, and the operator's signing
+key, which signs the instance card.
 
 ## Adversaries & guarantees
 
+Adversaries named by the onboarding and trust design: **T1** the server (on an instance someone
+runs, that person is T1); **L** the link channel (reads, replaces or races a link or QR on its way
+between people); **E** a mailbox (reads the recipient's mail, or controls the sending tenant); **A**
+an abuser (creates many accounts, floods codes, fills the cap); **M** a member colluding with T1;
+**D** a device (T3/T4).
+
+**Goals.** G1 no trust decision rests on a value only the server vouches for: a person's key is
+pinned only from a link that person's own app made, or from a device the account already trusts.
+G2 only a vault's owner can change who holds its key; every membership, role, ownership and lifecycle
+change is signed by the account that made it, and an M+T1 coalition can forge none of them. G3 two
+people verify each other once, and the result reaches every device either of them links. G4 nobody is
+asked a question they cannot answer (no raw fingerprints, no "which vault is personal"). G5
+withholding and forking by T1 are detected where a device holds enough history to tell, and fail safe
+everywhere else. G6 the public instance admits strangers without a third-party CAPTCHA, bounds the
+damage they can do, and never reveals whether an email address has an account. G7 the operator's
+power over members is exactly what spec 03 §7 and §18.6 list, plus whatever T1 already has; an
+**honest** operator's every use of it is audited and emailed to the member, which is transparency for
+an honest operator, not a control against a hostile one (the operator is the host and can suppress
+both).
+
 | # | Adversary | Outcome (by design) |
 |---|---|---|
-| T1 | **Server compromise (root on the instance host)** — reads DB, blobs, memory, logs | Sees only spec 02 §5 plaintext + traffic patterns. No item content, no keys, no master passwords (authKey is one-way; verifier re-hashed). CAN: serve stale data, drop writes, swap ciphertexts *between* slots — blocked by AD binding; roll back the DB — mitigated by client caches noticing rev regression (clients warn, never delete local newer state). CAN corrupt/deny service → availability handled by offline caches + the operator's backups. |
-| T2 | **Passive network (anything between a client and its instance)** | TLS everywhere: the operator's front terminates it (reverse proxy, tunnel, or the bundled caddy overlay — `docs/self-hosting.md`), and the server emits HSTS where the operator has said TLS is the only way in (an armed break-glass twin origin, or `ANDVARI_FORCE_HSTS=1` on a single-origin TLS instance) — deliberately NOT by default, since an HSTS pin on a plain-http dev origin bricks it. A **plain-http LAN/dev origin is a supported but explicit choice** — never a default, never silently adopted. Every client that lets a user *type* a server address carries a plain-http caution on that screen (Android, desktop, and the extension's trust gate), and an operator who picks it accepts an on-path attacker within that LAN. |
-| T3 | **Stolen/lost device, locked** | At-rest cache is ciphertext (the native offline cache persists only §5-table ciphertext + metadata in SQLite, and the **web client persists the same set in per-account IndexedDB inside the browser profile** — spec 02 §8/§8.1; keys only in memory or hardware-wrapped quick-unlock per spec 01 §8). Offline unlock accepts the master password current at last online contact; **remote device revocation / password change take effect only at next connectivity** (then the client wipes the cache + cached accountKeys). Local data remains ciphertext without the master password; a stolen locked device with a known-old master password can read the last-synced cached vault until it reconnects — an accepted narrowing in exchange for offline availability. Web deltas (spec 02 §8.1): the browser profile cannot be excluded from OS backup, so OS backups may carry the ciphertext DB (⊆ T7); the Unlock screen discloses an existing copy ("Offline copy on this device — last synced <t>") so a borrowed-machine user can see and remove it. **Durable-cache consent record (2026-07-15 pivot, B1-4 — the origin gate is replaced by declared policy + per-device consent):** **web** persists at rest only after an explicit per-device opt-in, default OFF on *every* origin (the walk-up browser is the T3 case; a one-time boot migration keeps existing private-origin users' caches). **Desktop** likewise moves to per-device consent default OFF — desktops are routinely shared/portable/work machines, closer to web's borrowed-machine case than to a phone; an existing install that already holds a cache adopts consent=ON during the namespacing one-shot so nobody's offline access silently vanishes. Until the desktop user answers that consent with an explicit yes (declined OR not yet answered), or whenever the origin forbids the cache, the desktop's access+refresh tokens are not written to `session.json` either — they live in memory for the run and the next launch signs in again (security review 2026-10, branch A12; where they ARE written the file is owner-only, with no DPAPI wrapping on Windows yet). **Android stays policy-driven default-ON — the exemption justified on the record:** installing an APK on one's own phone *is* the device-consent act, and the cache is at-rest encrypted, gated by the hardware quick-unlock co-key (A7-android), bounded by the 7-day staleness ceiling, protected by the KDF cache-read floor (T8), and purged on policy-`false`. In every case `offlineCacheAllowed=false` remains a forbid + wipe of that origin's own namespace (R11). |
-| T4 | **Stolen device, UNLOCKED with vault open** | Out of scope: an open vault is an open vault. The window is bounded by the inactivity auto-lock (`autoLockSeconds`, enforced by all three clients incl. the Android autofill path — spec 01 §8 "Auto-lock") + policy clipboard clearing. **Both timers are clamped on the client since the 2026-07-15 pivot (B1-1):** effective auto-lock ∈ `[floor, 900 s]` and clipboard-clear ∈ `[1 s, 300 s]` — a server-supplied 0/absent/oversized value clamps into range, so a hostile or misconfigured server can neither disable auto-lock nor pin secrets on the clipboard (spec 03 §1.1; core `ClientPolicyClamps` constants with byte-pinned web/ext mirrors, clamp-down tested on all four clients). |
+| T1 | **Server compromise (root on the instance host)** — reads DB, blobs, memory, logs. On an instance someone runs for the public, that person is T1. | Sees only spec 02 §5 plaintext + traffic patterns. No item content, no keys, no master passwords (authKey is one-way; verifier re-hashed). CAN: serve stale data, drop writes, swap ciphertexts *between* slots — blocked by AD binding; roll back the DB — mitigated by client caches noticing rev regression (clients warn, never delete local newer state); withhold, delay, replay, reorder and fork what it serves (R20, R21); register accounts of its own. CANNOT: forge a signed log entry, card, genesis, link offer or answer; pin its own key into anyone's contacts; make a device adopt a vault key that fails the genesis commitment. CAN corrupt/deny service → availability handled by offline caches + the operator's backups. **What the records tell of a typed address** (2026-11-18; spec 03 §14.1): every record the server keeps of a typed address, other than an account's own address and a queued mail's recipient, is the address's keyed hash under a key derived from the instance's own secret, so rows of one address still tie together, and whoever reads the audit page, the system's journal, the logs or a copy of the database (a backup, T7) and guesses an address confirms nothing, of people with no account either; T1, who can read the environment file that holds the secret, can. A refusal by a limit leaves one record per address, device or account per period (spec 03 §8), so such a reader learns that an address or a device was locked for a while and when, and, for an address with an account, which account, but not how many tries were refused. **What a hostile server can do to availability, said and not changed (2026-11-17):** (a) it can name a password-hashing cost at the top of the clients' limits (10 passes over 1 GiB, spec 01 §7) in its policy; a device then derives at that cost at a recovery and at every later unlock. That costs time and memory, discloses nothing, and is what the limits are for. (b) The question by which a device link stops before anything is committed on a device that keeps another account (design §8.2) cannot compare the account's identity key before the pickup, because the link's bundle does not carry it in the clear; so an address that this device knows bound to the same account under another key is refused only afterwards, when the session reaches the part that keeps sessions. Only a hostile server can produce that case; the link is then spent and the session it opened is ended alone (spec 01 §7). (c) A recovery on a device that keeps no copy of the account makes its new wrap at the cost the server serves, so a hostile server can hold that account at the floor; the floor is the least any client takes (accepted on 2026-11-17, spec 01 §7). **What it can no longer do (2026-11-17):** serve an account's key texts (the salt, the wrapped account key, the sealed identity seed, the personal vault's wrap) in a non-canonical spelling: they are taken only in canonical form and anything else is refused before it is stored, so a server cannot have a healthy copy judged damaged and talk the person into removing it; and serve another identity under the right account key for a device to take over its copy: a take is held to the identity the device knows (spec 01 §7). **What it gains from a forgetting it talked a person into** (rules of 2026-11-17; design §4.4): after "Forget the earlier account on this device", the device takes the next account served under that address as on a new device, so the server may serve any other account there; the same account id under another key is not among them (rules of 2026-11-19): the offer is made only where the server serves another account than the one the address is tied to, never where it serves the same account under another key or an account whose key the device keeps under another key, and the forgetting keeps the record of the earlier account's identity key, so a server that first shows another account to obtain a forgetting and then serves the old account under a key of its own is refused at that second step. The record kept is the account's id and identity key, as a record of the server's: that account is refused here under any other key, under any address at that server, for as long as the server is not forgotten; "Forget this server" removes these records, so a device that then pins the same server again knows those accounts no more. **The rule for an account tied elsewhere** (rules of 2026-11-19 to 2026-11-21, design §3.11; kept in the shared code since 2026-11-21, and for the identity record at "Forget this server" since 2026-11-19): where one account id is known at two addresses on a device (a server that moved and whose move was not followed, or one that serves a copy of another's accounts), an end at one server (a sign-out, a confirmed deletion, "Forget this server", the forgetting of an earlier account) is that server's word alone: what is held for the account at the other server stays (its copy with what waits in it unsent, its marks against an older state, its records kept per server), and the records kept by the account's id alone, its identity record among them, go only where nothing at another server ties the account, read once before anything is removed. A tie is an address record there naming the account, or one that cannot be read; a record there kept under the account's id; or a record there for the same address, unless that server's own address record for the address names another account, and, for a device's row, only where it holds a device id (a row that only records a sign-in attempt ties nothing) or cannot be read as one; a store that cannot list its records ties. So neither server can make the device forget what the other serves, and a server the device forgot (by "Forget this server", or with a confirmed deletion that forgot it) is a first sight behind the trust gate when it is met again. Before 2026-11-21 a confirmed deletion or a forgetting at one removed them for the other, whose next read was then a first sight, where it could be served an older state once without being caught and another key for that account without the record that would refuse it. **What the tie leaves behind** (a limit, 2026-11-21): where the tie keeps a record it no longer needs, the deleted account's records stay on the device, most of them readable without the account's keys (its identity key, the stored state's marks, the vault logs' hashes, the recovery mirror, the escrow mark); in the states known (design §3.11) this is a damaged store or a rare sequence, not an everyday state. Since 2026-11-21 the phone and the desktop app (the shared code's app engine) remove them once the device knows the account nowhere (R48); they stay where that removal is held back, and in `andvari-cli`, which has no such removal (R46). One such state found on 2026-11-19: the same address used at two servers left an identity record behind after both servers were forgotten, which refused only that account under another key; by reading, the removal of 2026-11-21 takes it at the second "Forget this server" (not yet shown by a test of that state). The command-line tool's own deletion and forgetting of an earlier account do not read the tie yet (R46). So a server that shows another account under a known address can, with the person's two taps on the offer's two sentences, make the device forget the tie and the copy, and cannot make it take any account it knows under another key. Where a device link stops before its pickup on a device that holds a record of the link's account's key, the device cannot tell a key substitution from a mistaken forgetting: it offers nothing there, and a sign-in with the password decides. A sign-in's late answer that races another refusal raises no offer (a retry gets it; accepted). A confirmed deletion of an account removes everything of its server on the device only where nothing of another account is kept there, and a kept identity key of an earlier account counts as something kept, so the server and that record stay (without that, the account taken in the earlier one's place, once deleted, would take the kept key with the server, and the earlier account could then be served under another key). Forgetting an account after a deletion of unknown outcome keeps the device's records of the address's account and of its key: the same account served later under another key is refused, and another account under the address gets the offer to forget it. Under a policy that keeps the account's keys at the server, the unlock that asks the server for the keys holds them to the device's record of the account's identity key and to the address's record, and the same account under another key is refused there as the identity fault. (Rules of 2026-11-19; the shared code and the web client keep them since that day, spec 01 §7; in both a forgotten account's key record also survives the confirmed deletion of the account taken in its place (the browser because it never forgets the server at a deletion).) **The extension** (rules of 2026-11-19, spec 01 §7; kept since 2026-11-19, before which it kept no record of an identity key or of an address's account and took both substitutions at a fresh sign-in without a word): it keeps, per server, which account each address is and each account's identity key; a password sign-in, its one-time-code step and the quick unlock refuse the same account under another key, and a sign-in refuses another account under a known address. The quick unlock (PIN, biometrics) compares the served identity key with the kept record as the password sign-in does, so a server that holds an account's vault key (a party that delivered a recovery holds it) cannot open that account there under a key of its own. The key's record keeps the verified key in one fixed form and keys are compared as decoded bytes, so the server that serves an account at its first sign-in in a browser does not choose the stored encoding and cannot later get the true key refused there; any value under a record's name counts as a record, and one that is not a record (a null included) refuses that account as the identity fault until "Forget this server" (denial only). When the extension cannot read what it remembers of a server, it takes nothing and writes nothing; a browser with no store cannot choose a server at all. A record is written only where none exists. These records outlive every sign-out, lock and "Remove data for this server"; "Forget this server" removes them with everything else of that server, and after it the extension takes whatever card, account and key that server serves next. **The extension's "Forget the earlier account on this device"** (rules of 2026-11-19, spec 01 §7; kept since 2026-11-19) is offered only at a password or one-time-code sign-in refused because another account was served under a known address, never for the same account under another key, at a quick unlock, or where the records could not be read. It removes, at that server only, the record tying the address to the earlier account and that account's own records (item homes, cached personal wrap, account-state memory, the device record, its quick unlock), and keeps the record of the earlier account's identity key and everything of the server, so that account served later under another key is still refused, with no offer. Only the person can forget, from the extension's own popup: the second step is taken only from a press that began at least one second after the confirmation stood (or a click with no press whose own time is that late), so repeated or doubled clicks and held keys cannot pass it; nothing is sent to the server by the forgetting. The offer lasts only until the next sign-in attempt, lock, server switch or worker stop; after that a new sign-in brings back the refusal, and the offer with it. The notice that the extension now remembers the new account is kept at rest, with the server's records, until it is said; "Forget this server" and "Remove data for this server" remove it. An account forgotten by mistake and served again under its own key is taken as itself; its account-state memory starts again, so a server can serve it an older account state once without being caught (as in every client). A login the person asked to save while the extension was locked is saved into whichever account is signed in next, a newly taken account included; the confirmation says so. A sign-in refused for an identity reason ends at the server the session it was given (at its own address, with the pin in force, and never an open session of that account); one refused because the records could not be read does not, and that session lapses or is ended by the next sign-in on the same device row; each refusal of another account under a known address leaves one signed-out row for that account at an honest server; nothing of a refused sign-in's session is kept in the browser. The first password sign-in after the update, where no record exists yet, is trust on first use: it is taken as on a new browser. A server can always produce "another account under this address"; after a forgetting the device trusts whatever new account the server next serves there. It gains no token, no key and no waiting change of the forgotten account, provided nothing of that account is left on the device, which is why the forgetting removes every store of it. The second confirmation says that forgetting means trusting whatever the server serves under that address. What it cannot gain from one: the forgetting is only ever the person's act, after the second confirmation, and no answer of a server, no flow, no link, no timer and no start of the app calls it; it sends nothing, so the server learns of it only from what the device does next; it leaves what the device knows of the server (its card and its pin), so a forgetting never makes the device accept another server; it is judged by the account's id, so an account the device keeps (open or locked, at another address of the same server after a followed move, under another address, or held as the server's operator) loses nothing and keeps its identity record, and a server cannot use a forgetting to weaken the check of an account the device still keeps; and while a flow for that address is under way it removes nothing. A hostile server can keep such a hold alive until the person cancels the flow (a kept request for the operator's help with a far end, a link poll answered "nothing yet", a two-step code asked for again), which only refuses the forgetting meanwhile (accepted on 2026-11-18). A forgetting at an old address of an account while a flow under its new address runs gives the same result as a forgetting just before that flow, which is harmless because that account is not kept (accepted on 2026-11-18). The app deletes everything it holds for the forgotten account at that server (its own store and its mirror among them) without condition, whatever the device kept of its session, so that a server which later serves the same account id under another key finds nothing to reuse (design §4.4). **A refusal it can produce at will:** a server can answer an account deletion with a log that moved on at any time, and so can any signed-in member of a shared vault by leaving a leaf out; the device's budgets are given back for it, so an honest person is not made to wait by it; the account's ceiling for deletions, drawn before the password is judged, never is, so a member who produces it cannot keep the server's hashing permits busy and make everyone's sign-in wait (spec 03 §13). The server keeps the deletion's give-back and its ceiling since 2026-11-18. The web client keeps the narrowed offer and the kept key record since 2026-11-19, and both apps draw the shared code's offer since 2026-11-19. The shared code no longer offers the forgetting for the same account under another key on any road, and its forgetting keeps the key's record (since 2026-11-19, closing that day's gap). **Not kept yet (2026-11-18):** the shared code leaves the forgotten account's own store and its mirror for the app to delete, which the app does only when the forgetting removed a kept copy (2026-11-18). |
+| T2 | **Passive network (anything between a client and its instance)** | TLS everywhere: the operator's front terminates it (the bundled caddy with HTTP-01 or DNS-01, a tunnel, `tailscale serve`, or the operator's own proxy — `docs/self-hosting.md`), and `ANDVARI_FORCE_HSTS=1` is mandatory whenever the origin is https (`andvari setup` sets it). The origin grammar (spec 01 §5.1) admits plain http only for `localhost` and `127.0.0.1`, for development; no client stores, dials or shows any other plain-http origin, and test mode refuses every non-loopback origin. |
+| T3 | **Stolen/lost device, locked** | At-rest cache is ciphertext (the native offline cache persists only §5-table ciphertext + metadata in SQLite, and the **web client persists the same set in per-account IndexedDB inside the browser profile** — spec 02 §8/§8.1; keys only in memory or hardware-wrapped quick-unlock per spec 01 §8). Offline unlock accepts the master password current at last online contact; **remote device revocation / password change take effect only at next connectivity, and what they end there is the session, not the copy** (design §4.4 "A session the server ends does not delete the device's copy"; spec 03 §2, a refused refresh). Per client: the **apps on the shared engine** (Android, desktop) drop the tokens, the quick-unlock key and the keys in memory, and keep the copy, its queue of unsent changes and the account, which opens read-only with the master password the copy is wrapped under until the person signs in again, signs out or forgets the server; the **web client** with the offline copy on does the same (it keeps no quick-unlock material), and without it signs out; the **extension** drops its tokens and its quick-unlock record and keeps what the session holds, readable, until its next lock (it keeps no copy across a lock); the **iPhone app**, still on the older client code, deletes its cache, its cached accountKeys and its quick-unlock material. Local data remains ciphertext without the master password; a stolen locked device with a known-old master password can read the last-synced cached vault: on the iPhone until it reconnects, on the engine apps and the web for as long as the copy stays on the device — an accepted narrowing in exchange for offline availability, and so that no single answer of a server deletes changes not yet sent. The Devices screen says it: revoking a lost device stops it syncing and does not wipe it. Web deltas (spec 02 §8.1): the browser profile cannot be excluded from OS backup, so OS backups may carry the ciphertext DB (⊆ T7); the Unlock screen discloses an existing copy ("Offline copy on this device — last synced <t>") so a borrowed-machine user can see and remove it. **Durable-cache consent:** **web** persists at rest only after an explicit per-device opt-in, default OFF. **Desktop** likewise asks per device, default OFF; until the desktop user answers yes, or whenever the origin forbids the cache, its access+refresh tokens live in memory for the run (where they ARE written, the file is sealed under the operating system's key store; what that protects and what it does not: "Desktop kept sign-in" below). **Android stays policy-driven default-ON — the exemption justified on the record:** installing an APK on one's own phone *is* the device-consent act, and the cache is at-rest encrypted, gated by the hardware quick-unlock co-key (A7-android), bounded by the 7-day staleness ceiling, protected by the KDF cache-read floor (T8), and purged on policy-`false`. In every case `offlineCacheAllowed=false` remains a forbid + wipe of that origin's own namespace (R11). **A save with files that is kept to be finished later** (spec 03 §5) stays with its set-aside files on the device under that account's own name at that server, sealed with that account's own check, until its item has landed or it is given up; a record that is not that account's is removed, never used. Another account signed in on the same device never loads, sends or shows it, and nothing of it travels on another account's session. It goes with the copy at a sign-out, a forgetting of the server, an account deletion and a policy that forbids the copy; a session the server ended removes nothing of it, by design, so that the next sign-in finishes it. |
+| T4 | **Stolen device, UNLOCKED with vault open** | Out of scope: an open vault is an open vault. The window is bounded by the inactivity auto-lock (`autoLockSeconds`, enforced by all three clients incl. the Android autofill path — spec 01 §8 "Auto-lock") + policy clipboard clearing. Both timers are clamped on the client: effective auto-lock ∈ `[floor, 900 s]` and clipboard-clear ∈ `[1 s, 300 s]` — a server-supplied 0/absent/oversized value clamps into range (spec 03 §1.1). **A recovery kit on show** (rules of 2026-11-17; spec 01 §7, design §10) is a secret on the screen of a device nobody may be watching: a lock, by hand or by the idle limit, wipes it on every road, a kit shown with a refusal that came after a commit included, and a kit screen with no account open has its own idle limit (five minutes without a touch or a key, warned thirty seconds before). The person is told afterwards that the kit is gone and that the next sign-in shows a new one. The app interface wipes such a kit at every lock and keeps the notice until it is dismissed, and the browser's kit screens warn before their limit acts (2026-11-18). **Every kit on an app's screen** (rules of 2026-11-18; design §10) takes its limit and its warning from the shared code, is under the lock clock on every road (the print screen, the autofill road, visible without the focus, through the phone's sleep), keeps the phone's screen on up to its limit, offers no Copy or Cut in the fields it is typed into, and leaves nothing to print or on the clipboard after a lock. Since 2026-11-18 the Android app draws the notice that a kit is gone, locks a kit that came on show while it was away before it is drawn, keeps the lock clock on the print and autofill roads and while visible without the focus, keeps the screen on, and offers no Copy or Cut from the menu or a keyboard there. Since 2026-11-19 the shared code hands every kit its limit and its warning; on Android a lock empties what a kit's screens draw from, also while the app is away, a kit left for the print screen is covered with a clock that counts sleep, and an accessibility service cannot copy or cut from a kit's fields; the desktop app draws the notice, takes every kit's limit and warning from the kit, signals the warning to the operating system once, and after a lock leaves nothing to print and nothing it put on the clipboard. Since 2026-11-19 an unlock from Android's autofill window makes no kit (the app locks first where a kit is due when its own window comes on show), and a kit made in Settings runs from the kit's own limit. Since 2026-11-19 both apps tell the shared code when nothing of them is on show without a lock (on the desktop: the window minimised or hidden), and at the return a lock that fell due comes first, so a kit made while the app was away and wiped unseen is said as never shown. **What no app can keep from a kit on show** (known limits, 2026-11-18): while a computer sleeps a kit on show stays in memory, and hibernation writes memory to disk; an operating system's session lock without sleep is not noticed by the desktop app (the kit's own limit applies); text on the screen is readable by assistive technology and by anything that uses its interface; once a page has gone to the printer, the spooler's own timing is the system's, and a system's "Print to PDF" dialog left open after a lock stays on the screen, though it can save nothing of the kit; on Android, what the toolkit's own drawn nodes still hold until the first redraw after the return cannot be reached by the app, and whether a keyboard's own editing panel can copy from the fields a kit is typed into is up to the keyboard. |
 | T5 | **Malware on a client device** | Out of scope (keylogger gets the master password). This is the boundary every password manager shares. |
-| T6 | **Malicious/compromised web origin** (server serving hostile JS) | Accepted gap of the web client: page-load-time trust. Mitigations: CSP `default-src 'self'`, immutable versioned bundles, no third-party origins, no CDN; native apps are the trust anchor; an armed break-glass twin origin additionally refuses any sign-in without server-TOTP, and whatever access control the operator puts in front of that origin is theirs to add — andvari does not assume one. High-value operations (escrow ceremony) never run in the web client. The durable web cache (spec 02 §8.1) sharpens T6's **timing**, not its ceiling: hostile same-origin script can now exfiltrate persistent ciphertext + the wrapped accountKeys from a LOCKED/idle tab — an offline-cracking surface, floored by T8's KDF math and client-enforced at cache read (a planted weak-KDF payload refuses offline unlock) — where previously it had to wait for the next unlock. That next unlock still hands hostile JS the master password itself, which strictly dominates ciphertext theft; controls unchanged. **Correction on the record (2026-07-15, B1-2):** a web cross-origin enroll affordance would enable **full existing-account compromise**, not merely exposure of a new vault — an actionable "switch to this server" prompt escorts the user onto attacker-controlled origin, where post-navigation JS (this row's page-load trust) phishes the plaintext master password and replays it against the victim's REAL server. Both link composers mint authority == `payload.o`, so genuine web links land same-origin by construction; a web-visible mismatch's only real-world trigger is a crafted URL. The web client therefore REJECTS a mismatched invite link terminally — origin rendered as plain text, no link, no button, no continue affordance (design 2026-07-15 §4.4 / B2-2). |
+| T6 | **Malicious/compromised web origin** (server serving hostile JS) | Accepted gap of the web client: page-load-time trust. Mitigations: CSP `default-src 'self'`, immutable versioned bundles, no third-party origins, no CDN; native apps are the trust anchor. High-value operations never run in the web client. **The web client binds no identities** (spec 03 §15.9): it does not create, show, open or answer links, scan or display identity QRs, run or approve device links, sign instance cards, process link answers, or sign in as the operator account; those code paths are compiled out of the bundle and a source pin test enforces it. It may still recover its own account with the recovery kit, typed or pasted, from "Forgot your master password?" only (the kit was shown to this same web client at sign-up, so this exposes nothing new to its server), and cancel (veto) a recovery request for its own account. It pins the card chain of the one origin that serves it (spec 01 §5.3), so it notices a fork or a rollback on a later visit; it cannot follow a move. So a hostile bundle cannot learn a link secret and put its own key into *another* person's contacts. It still holds the user's UVK and can write account state (a planted contact, a wrong vault record): native devices ask before using a contact made elsewhere (R35). The durable web cache (spec 02 §8.1) sharpens T6's **timing**, not its ceiling: hostile same-origin script can exfiltrate persistent ciphertext + the wrapped accountKeys from a LOCKED/idle tab — an offline-cracking surface, floored by T8's KDF math and client-enforced at cache read — where previously it had to wait for the next unlock, which still hands hostile JS the master password itself. |
 | T7 | **Backup theft** (the operator's snapshots, and any offsite copy of them) | Backups contain only what T1 sees (ciphertext + metadata). Neutralized by design. |
-| T8 | **DB leak → offline cracking** | authKey verifier is argon2id-hashed server-side; vault security rests on Argon2id(master password) at ≥64 MiB — weak master passwords remain the user's risk (policy enforces minimum strength at enrollment). The client offline caches (native SQLite / web IndexedDB, spec 02 §8/§8.1) widen **where** this sentence applies — a stolen device, a browser-profile leak, or an OS backup of one is the same offline-cracking surface as a server DB leak — not its math: the identical H1 floor is enforced server-side, client-side at every unlock, and at cache READ (a cached sub-floor `kdfParams` payload refuses offline unlock outright, so the cache can never become a floor bypass). **Pattern-aware strength estimate (0.21.0, audit F31):** "minimum strength" is a class-diversity × length proxy, and length used to be the raw one — so `Password1!Password1!` scored as twice its real entropy and a 40-character run of one letter cleared the floor, exactly the shapes a cracking rig tries first. The estimator now collapses a repeated block (charged once, `period + 1`) and a ±1 run (charged 2) before the length term — spec 07 §2.3 `effectiveLength`, vector-pinned so both impls collapse identically. Deliberately asymmetric: the **enrollment / change-password floor still scores the pre-collapse proxy**, so the sharper estimate lowers what the meter *displays* but never what it *refuses* — a floor that gates a password change must not tighten under a user who is mid-way through fixing a weak password. The residual is unchanged and owned by the user: a weak-but-non-repetitive master password is still accepted, and this row's Argon2id cost is what stands behind it. |
-| T9 | **Recovery-sheet thief** | Holds A4 ⇒ can decrypt every escrowed UVK **given the sealed blobs** (needs server data too). Physical security of the two sheets + USB is the control; annual drill verifies presence. Compromise response: re-ceremony + full re-escrow + item re-key (manual runbook). Since security review 2026-10 (plugin scan F4) the re-escrow actually retires the old blobs: a replaced blob is retained (`escrow_legacy`, spec 04 §3) only when it is sealed to the CURRENT org key, every retained blob under any other key is purged when the instance restarts with the new fingerprint, and the admin download never serves one — so the thief's later DB/backup/admin-session access (T7, T5) finds no UVK sealed to the stolen key. Since server scan 2026-10-26 (F5) that purge also leaves no residue: the connection runs `secure_delete=ON` and the purge checkpoints and truncates the WAL (spec 04 §3), so the retired-key bytes are gone from the live file too, not only from the rows. Residual: backups taken before the rotation still hold them and must be rotated out as part of the response. |
-| T10 | **Malicious server during enrollment** (pubkey substitution) | Blocked by triple pinning + human fingerprint check (spec 04 §2). **Per-member recovery (spec 04 §6):** `waived` members carry no org escrow ⇒ no pubkey to substitute ⇒ T10 N/A to them; for `required` members the fingerprint reaches the invitee out-of-band via the **client-composed** in-person QR (or the typed-sheet fallback), never a server-stamped pin (`rfp=null` on the server-composed emailed link — spec 04 §6.5). Since security review 2026-10 (A5) the QR's `rfp` is the FULL fingerprint, compared at full length, and honoured only after the invitee types the in-person code from the admin's screen, so a server-composed link carrying an `rfp` cannot pass either. The symmetric member-recovery blob has no pubkey and is T10-immune by construction. |
-| T11 | **User enumeration / credential stuffing** | Deterministic fake prelogin salts, uniform 401s, per-IP rate limits, and — since the 2026-07-15 pivot — **email-keyed exponential backoff on LOGIN only** (5 consecutive failures → `2^(n-5)` s capped 900 s, applied **uniformly to existing and unknown emails** so throttling is not an account oracle; since server scan 2026-10-26 F3 the backoff state is keyed on a SHA-256 of the normalised email and login/prelogin refuse an email over 254 characters with `400 invalid_email` BEFORE any lookup — the raw attacker-chosen string, bounded only by the 256 KiB body cap and swept only above 100 000 entries, was an unauthenticated heap-exhaustion path). **Password-before-second-factor oracle (server scan 2026-10-26 F7):** for an enrolled account a correct password without a code answers `401 totp_required` and a wrong one the uniform 401, so an attacker holding the email can confirm the master password without a code — bounded by the per-IP 5/min and the email backoff (the missing-code branch counts as a failure). The break-glass origin's `403 public_login_requires_totp` for an un-enrolled account was the same oracle WITHOUT the email bound (deliberately exempt as "a policy refusal"); since F7 it counts toward the backoff. **Accepted residual:** the `totp_required` signal itself — every client renders the code field off it, so removing it means always asking for a code (a wire + UX change across five clients), scheduled for the next format-changing release (the A8 window). `/recovery/self/*` deliberately keeps **per-IP fixed-window only, NO per-account backoff** (§F.8: never lock a victim out of last-resort recovery; the 256-bit recovery secret makes per-IP sufficient — review 2026-07-16 D1). Break-glass twin-origin lockdown (TOTP + register/refresh disabled) applies only where that opt-in origin is configured; login rate is a flat 5/min per IP on every origin (R12). |
+| T8 | **DB leak → offline cracking** | authKey verifier is argon2id-hashed server-side; vault security rests on Argon2id(master password) at ≥64 MiB — weak master passwords remain the user's risk (policy enforces minimum strength at enrollment). The client offline caches (native SQLite / web IndexedDB, spec 02 §8/§8.1) widen **where** this sentence applies — a stolen device, a browser-profile leak, or an OS backup of one is the same offline-cracking surface as a server DB leak — not its math: the identical H1 floor is enforced server-side, client-side at every unlock, and at cache READ (a cached sub-floor `kdfParams` payload refuses offline unlock outright). **Pattern-aware strength estimate:** the estimator collapses a repeated block (charged once, `period + 1`) and a ±1 run (charged 2) before the length term — spec 07 §2.3 `effectiveLength`, vector-pinned. Deliberately asymmetric: the **enrollment / change-password floor still scores the pre-collapse proxy**. The residual is unchanged and owned by the user: a weak-but-non-repetitive master password is still accepted, and this row's Argon2id cost is what stands behind it. The recovery kit's secret is generated (256 bits) and never typed into a KDF, so a leaked `recoveryVerifier` is not crackable (spec 01 §2.1). |
+| T9 | **Recovery-sheet thief** (private instances with operator recovery) | Holds A4 ⇒ can decrypt every escrowed UVK of an operator-posture account **given the sealed blobs** (needs server data too), and act as those accounts (R3). Physical security of the two sheets + USB is the control; the annual drill verifies presence. Compromise response: a new recovery key with a signed rotation (spec 04 §5), every opted-in device re-seals, the old blobs are replaced with no copy retained and with `secure_delete` and a WAL truncate (spec 04 §3). Residual: backups taken before the rotation still hold the old blobs and must be rotated out. The sheet's seed also signs rotations and assisted-recovery payloads, so its thief can sign a rotation to a key of their own; opted-in devices follow a signed rotation, which is why the seed lives only offline. No public instance holds such a sheet under variant R. |
+| T10 | **Malicious server substituting a recovery key** | The escrow anchor is the **pinned card's `recoveryFp`** — from the baked root, a link offer, or the operator's own setup — at full length, never a typed sheet and never a served value alone (spec 04 §2). A key change without a rotation signed by the old seed reaches opted-in people only as a warning that defaults to turning operator recovery off, and the first-consent walk shows the same warning to anyone opting in afterwards. The weak case is a typed-address or enrol pin made on a server that was already hostile (R22). The kit is symmetric (no public key) and T10-immune by construction; the public instance has no escrow under variant R. |
+| T11 | **User enumeration / credential stuffing** | Deterministic fake prelogin salts, uniform 401s, per-IP rate limits, and **email-keyed exponential backoff on LOGIN and device-link pickup** (5 consecutive failures → `2^(n-5)` s capped 900 s, applied **uniformly to existing and unknown emails** so throttling is not an account oracle; the backoff state is keyed on a SHA-256 of the normalised email, and an email over 254 characters is refused `400 invalid_email` BEFORE any lookup). Sign-up and recovery requests answer uniformly (`202`) whether or not the address has an account; `link_required` is answered only after the password and any code verified. There is no email lookup route. **Password-before-second-factor oracle:** for an enrolled account a correct password without a code answers `401 totp_required` and a wrong one the uniform 401, so an attacker holding the email can confirm the master password without a code — bounded by the per-IP 5/min and the email backoff (the missing-code branch counts as a failure). **Accepted residual:** the `totp_required` signal itself — every client renders the code field off it; removing it means always asking for a code. `/recovery/self/*` deliberately keeps **per-IP fixed-window only, NO per-account backoff** (never lock a victim out of last-resort recovery; the 256-bit recovery secret makes per-IP sufficient). |
+| T12 | **Link channel** (L) | Whoever reads a link or QR first can answer or claim it first. **Controls:** single use (the first answer or claim wins, and the real recipient then sees "already used"); the creator fingerprint `F` in the fragment (an interceptor cannot swap in its own offer); creator-side expiry; the committed comparison code (spec 01 §5.5), compared by typing, in person or on a call, and required before any vault is shared through a link; for device links, the committed code typed on the existing device plus the master password before any session; for device links, the new device acts only on a link opened from its own "Link from your other device" screen, and pins the link's origin before it claims, so the password goes only to an origin it pinned (spec 01 §5.3). **Residual:** a remote connect link sent over a compromised channel, whose codes the two people never compare, pins the wrong person. Such a contact is `compared = false`: it cannot receive vaults automatically, and the UI says it is unconfirmed. |
+| T13 | **Sign-up abuse** (A) | Mass accounts, code floods, cap exhaustion. Controlled, in the order they bite, by per-IP and per-address limits, the daily account maximum, the cap (which bounds the total damage), the operator closing sign-up with one switch, an optional proof of work, an optional domain blocklist, and per-recipient email caps (spec 03 §14). **Residual:** an attacker can fill the remaining cap slots, which the operator answers by disabling the junk accounts (disabled accounts free their slot) or closing sign-up. |
+| T14 | **Mail** (E) | The mailbox holds only sign-up and recovery-request codes and notices, and beside a recovery-request code its mailbox value, which opens nothing but one more request for the same address (R37), never secrets or acting links (spec 03 §14.5). A compromised sending tenant can phish as the product (DMARC, plus "we never send links that sign you in" on the website). A recipient's mailbox can complete a sign-up for that address, which is the address owner's own risk. The sending app registration has send-only access, scoped to one mailbox. |
 
 ## Accepted risks (signed off by owner at hardening gate)
 R1 JVM/JS cannot guarantee secret zeroization (GC copies) — industry-standard gap.
-R2 Web client page-load trust (T6). R3 Escrow key holder can decrypt all (deliberate
-— the recovery feature). **Amended for per-member recovery (spec 04 §6):** under the
-Hybrid default the admin backstop **persists** for `escrowPolicy=required` members (the
-admin can still decrypt them — R3 stands); for a **`waived`** member R3 is **retired** (no
-org escrow blob exists ⇒ private from admin) at the cost of **no backstop** — losing both
-the master password and the generated recovery piece ⇒ permanent data loss (the accepted
-hard-loss trade, R9). R4 Server metadata visibility (A6) — includes a residual
-prelogin oracle: after a KDF-policy change, an account whose stored params differ
-from the current default answers prelogin with diverged params (existence confirmed)
-until it re-keys via password change; unknown emails always answer the current
-org-default params. The same residual has a second channel (server scan 2026-10-26 F9,
-LOW, accepted): a real account's salt and params CHANGE on password change or re-key,
-a fake salt never does, so an observer polling prelogin over time can tell the two
-apart. Closing either channel means making fake accounts mimic the real distribution
-(an HMAC-chosen parameter set from those actually enrolled, an epoch-rotated fake salt);
-not done, because the signal needs a population of diverged accounts or a before/after
-pair around a password change, and the per-IP 10/min bucket bounds the polling. Same
-class, same scan (F10, LOW, accepted): a former member of a shared vault who kept an
-attachment id can learn from the upload route whether that file still exists (spec 03 §8,
-audited as `attachment_cross_vault`). R5 Single server per
-instance — availability comes from offline-first clients plus the operator's own backups,
-never from HA. R6 TOTP seeds
-co-located with passwords (accepted eggs-in-one-basket, user decision). R7 removed
-shared-vault member retains decryption capability for ciphertext they held while granted
-(and future leaks of *unchanged* items) until P6 VK rotation + lazy re-encryption —
-removal in v1 is server-side revocation only; future-secrecy loss only, the server itself
-still holds only ciphertext. **R7 extended (vault lifecycle, spec 03 §11):** vault deletion
-removes the server's copies after a 7-day grace and triggers fleet-wide client purge, but is
-NOT cryptographic erasure toward ex-members — anyone granted while the vault lived may retain
-ciphertext + the VK they already held, and the operator's server backups keep copies
-until their own retention expires (~30 d); the ex-owner after a transfer retains VK likewise.
-True erasure needs P6 VK rotation. **R8 (cut 4 email-invite — INERT unless the owner configures
-it):** with `ANDVARI_SMTP_*` + `ANDVARI_INVITE_BASE_URL` set, a **bearer invite token transits the
-operator's mail relay and rests in the invitee's inbox** — bounded by a forced ≤60-min TTL,
-private-origin-only links (an emailed public-origin link dies at `register`), and `register` still
-needing reach to the private enroll origin; a real widening of R3-adjacent out-of-band delivery.
-**T1 widens with it:** a server compromise reading `andvari.env` now also gains the stored
-`ANDVARI_SMTP_PASS` = send-as the operator's mail domain (phishing) + a new outbound
-internet egress — capabilities the T1 row above ("sees only spec 02 §5 plaintext + traffic
-patterns") otherwise excludes. **Lifecycle threat posture (T1):** lifecycle ops on
-existing vaults are member-verifiable — the server never holds VK and cannot mint proofs; it
-can still WITHHOLD, delay, or serve stale state (availability-class, accepted). Replay is
-bounded by expiry+seq binding and by soft-hide-until-purgeAt; residuals: a device offline
-since before the newest verified seq may be shown stale-but-genuine older state; proofs are
-keyholder-forgeable (server authz is the gate). **Forged or replayed removal attribution** (the removal
-half of F16; security review 2026-10, root cause A §6, review A-6: a removal proof replayed after a
-re-add, or a `left` the server simply asserted, suppressed the "server may be misbehaving" warning) is
-closed by removal proofs v2 (branch A7; spec 01 §6): every removal and leave carries a MAC over a
-16-byte nonce and the actor's clock, each device of the target consumes the nonce (device set ∪
-account state) and checks it against its OWN `liveSince` window, and neither the window nor the
-consumed set ever comes from the server. It remains open, as a bounded residual, only through the
-compatibility window's legacy rows (a v1 removal proof is "valid (legacy)" iff its nonce is unconsumed;
-a `left` with no proof is shown as "You left" plus "Didn't do this? Tell your admin"); branch A8
-retires both with the window. **Cross-vault re-seal (review A-4, the campaign HIGH "web conflict-sync
-re-seal", and its core twin) — CLOSED (branch A1b; spec 02 §7.2):** a served row can no longer move an item
-this device holds into another vault, so a conflict row the server flags under a vault it (or a colluding
-co-member) keys can no longer make a client re-seal another vault's plaintext under that key and push it.
-Every client records each item's home vault (INV-HOME), seals plaintext only under its provenance vault
-(INV-SEAL), builds conflict copies from the flagged envelope itself (INV-CONFLICT), binds an editor to the
-vault it opened on (INV-EDIT), and never seals under a legacy-read-only key or one that contradicts the
-device's vouch / held-key memory (INV-WRITE-KEY); residuals in R17. Grant injection for NEW vaults (F16) is closed for
-v2 grants by owner-signed grants (security review 2026-10, root cause A, branch A6; spec 01 §6): a
-key is adopted only from a grant signed by the identity this account PINNED for the sender it names,
-and "You were added to <vault> by <contact>" names that verified contact. It remains open, as a
-bounded residual, only through the compatibility window's v1 seals (R15); it is retired when branch
-A8 closes the window. Shared-vault membership
-topology (which userId holds which role on which vaultId) is server-visible metadata,
-subsumed by A6/R4.
-**R8 extended (per-member recovery `rfp`, spec 04 §6.5):** the emailed enroll link is
-**server-composed**, so any org recovery fingerprint it carried would be server-attested
-(TOFU-from-server, T1-bounded) rather than out-of-band — which is exactly why the
-server-composed emailed link carries **no authoritative `rfp` (`rfp=null`)** and emailed
-invites **default to `escrowPolicy=waived`** (no fingerprint needed → frictionless and
-safe). A required-backstop invite that needs a genuine org pubkey uses the
-client-composed in-person QR (fingerprint out-of-band via the admin's screen) or the
-typed-sheet fallback; a missing `rfp` fails safe to typed-sheet, never to server
-auto-trust. No new server capability beyond the existing R8 email relay.
-**R8 delta (endpoint-agnostic pivot 2026-07-15):** R8's containment claim — that an
-emailed link is private-origin-only and a leaked inbox still can't reach the enroll
-origin (also asserted in `docs/design/2026-07-12-email-invite.md`) — is **superseded on
-single-origin instances**, which are now the DEFAULT topology (`ANDVARI_PUBLIC_HOSTNAME`
-unset — the reference instance and the self-host default): emailed invites legitimately
-carry the public canonical origin (`ANDVARI_CANONICAL_ORIGIN`, replacing the deprecated
-`ANDVARI_INVITE_BASE_URL`), so the invite token in a leaked inbox CAN reach `register`.
-This is a deliberate, accepted trade; compensating controls: the forced ≤60-min TTL,
-single-use token, invite-row-bound escrow policy (read server-side, never from the
-client body), register rate limits, **https now required for the minting origin on
-non-local hosts** (with private-origin containment gone, transport secrecy is the
-remaining control on the bearer link), and `signupMode` gating — a leaked token still
-only creates the one account the admin intended, redeemable solely at its issuing
-server (invite-ROW gate). Dual-origin deployments keep the old A5 guard verbatim:
-emailed links must never point at the break-glass twin origin.
-**R9 (per-member recovery piece — a member holds a UVK-equivalent secret, spec 01 §2.1 /
-spec 04 §6).** The generated `recoverySecret` wraps that member's own UVK, so possession
-of the piece is UVK-equivalent **for that one account** (never the fleet). Two faces:
-(1) **LOSS** — a `waived` member who loses **both** master password and piece has **no
-backstop ⇒ permanent data loss** (accepted; the register-time posture acknowledgment,
-spec 04 §6.3, makes the trade explicit and un-skippable); a `required` member is covered
-by the admin escrow backstop (R3), so their loss is recoverable. (2) **THEFT** — the piece
-is the self-held analogue of the org recovery-sheet thief (T9): whoever holds it can, *with
-server data*, decrypt/reset that one account. Controls: physical/digital custody of the
-member's sheet/QR (same class as T9's sheet custody); and the online reset is gated by the
-phase-1 **verifier** (a thief still needs the piece), the **per-IP rate-limit** (per-IP
-fixed-window ONLY — deliberately NO per-account backoff, §F.8: a targeted flood can never
-lock a victim out of their own recovery; the 256-bit recovery secret makes per-IP
-sufficient), and the **single-use replay-bound ticket** (spec 03 §12), so the stolen piece alone is not a remote
-reset/lockout oracle. The recovery unlock **preserves the identity-pubkey hard-fail
-linchpin** (spec 01 §5): `recover()` routes through the shared UVK-unlock tail, so a server
-substituting an identity pubkey is caught during recovery exactly as on every normal unlock
-(spec 04 §6.2) — untouched by this change. The **opt-out authorization** (who may waive) is
-**server-trusted state with admin-visible, non-silent reconciliation — NOT tamper-proof**:
-the admin UI distinguishes "waived (intended)" from "escrow missing/failed"
-(`escrowFingerprint == null` on a `required` invite), so a hostile-server policy flip is
-*visible* on reconciliation but not *prevented* (acceptable under T1 for the household
-model; spec 04 §6.5).
-**R10 (hostile endpoint / endpoint-agnostic operation — 2026-07-15 pivot,
-`docs/design/2026-07-15-multi-tenant-endpoints.md`).** Clients are endpoint-agnostic: any
-client may be pointed at ANY server, including a hostile one, at any time — including
-mid-enrollment, since the invite carries its issuing server's origin. What holds the line:
-(1) **The policy-trust boundary** (spec 03 §1.1) — the client-side hostname trust
-heuristic (a tailnet or private-range hostname ⇒ trusted) is deleted; device posture derives from
-server-declared policy fetched from an unauthenticated endpoint on an untrusted server,
-applied under the invariant *trusted-as-declared iff the field governs the server's own
-behavior; client-floor-only iff it touches the device's at-rest posture, factor floors, or
-timer windows; decorative otherwise — a hostile server may make a client safer, never
-laxer* (see R11 for the monotonicity consequences). (2) **Origin-clean switching** — a
-`serverUrl` change drops access+refresh tokens before the first request to the new origin
-(no `Authorization` header ever crosses a baseUrl change — test-gated on all four
-clients); native/extension data is namespaced by `(origin, userId)` so a foreign origin's
-policy can neither read nor wipe another origin's material; the raw-origin anti-phishing
-trust gate (punycode-rendered IDN, plain-http caution, no server-supplied branding)
-precedes every switch; while an invite-driven switch is pending, sign-in is hidden so a
-hostile pending server cannot harvest an offline-crackable authKey digest of the user's
-REAL master password; web gets no cross-origin affordance at all (T6 correction above).
-**Security review 2026-10 (branch A12):** the restore point of a pending switch is captured
-ONCE, from the verified home origin; a second invite re-point while one is pending replaces
-only the target, stops dialing the first target, and every cancel/failure path restores
-exactly that home origin (desktop and Android). Desktop also refuses sign-in at the state
-layer whenever it dials an origin other than the persisted default. Every policy probe is
-tagged with its origin and a generation counter, bounded in time, and cancelled on an
-origin change; a reply whose origin or generation is no longer current is dropped whole, so
-a hostile origin the user connected to and abandoned cannot answer late and decide the home
-origin's in-memory policy (its `offlineCacheAllowed`, auto-lock) on the next bind. Recover verify and reset
-honour the same lockout on desktop and Android (the recovery authKey and the reset commit never
-go to an unverified origin), and an Android reset whose origin moved mid-flow aborts rather than
-seal under the departed origin's policy.
-**Quick-unlock clock residuals (Android, security review 2026-10, branch A12 — accepted).**
-(a) When `Settings.Global.BOOT_COUNT` is unavailable, or the stamp predates A12 and carries no
-boot count, "same boot" falls back to the clock-derived reference (`wall − elapsedRealtime`),
-which a stepped-back clock can still make look like a reboot. What still holds in that case: the
-always-on monotonic belt (an `elapsedRealtime` a full window past the stamp's fails closed) and
-`now < stamp` failing closed; the gap is a stepped-back clock within one boot, under 30 days of
-uptime since the stamp, with a server anchor taken after it. A pre-A12 stamp heals at the next
-full-password unlock. (b) Across a genuine reboot the cross-boot branch trusts the server anchor:
-a device powered off for more than 30 days whose clock was stepped back BEFORE its last boot can
-still pass, provided the origin's last server-attested time fell within the window of the stamp
-(the floor only advances when the app reaches the server). Closing either needs a trusted clock
-on the device; the master password remains one tap away in every case.
-(3) **Blast radius is stated conditionally (B2-8):** enrolling at a hostile server exposes
-what the user gives THAT server — a new vault there plus the email/activity metadata of
-one account; it does not move or expose any existing vault **provided the master password
-is unique**, which is why the enrollment trust-gate copy instructs "choose a master
-password you don't use anywhere else" (reuse would hand the hostile server a crackable
-digest of the real one). (4) **Recovery endpoints** (`/recovery/self/*`), LAN-only in
-practice before the pivot, are **internet-reachable on single-origin instances**: kept at
-per-IP 5/min with **NO per-account backoff** (§F.8 — never lock a victim out of last-resort
-recovery; the 256-bit recovery secret makes per-IP sufficient, review 2026-07-16 D1), and a
-build-time confirmation asserts the recovery secret's ≥128-bit (verified 256-bit) entropy and
-a constant-time verify comparison; the residual —
-reachability itself — is accepted (the phase-1 verifier gate and single-use replay-bound
-ticket stand, R9). Decorative fields (`instanceName`, `canonicalOrigin`,
-`selfHostDocsUrl`, `recoveryFingerprint`) are never rendered as verified identity; the
-human-anchored escrow fingerprint ceremony remains the only cryptographic anchor (T10).
+R2 Web client page-load trust (T6).
+**R3 Operator recovery holder.** Applies only to operator-posture accounts on private instances,
+which chose it after the warning (spec 04 §2). For them the operator, or anyone holding the recovery
+sheet and a copy of the server's data, can do more than decrypt: the escrow yields the identity seed,
+so they can **act as the member**, sign as them, and read every shared vault the member belongs to;
+once opened, the keys never change (R33). On the public instance under variant R, R3 does not apply
+at all.
+R4 Server metadata visibility (A6) — includes a residual prelogin oracle: after a KDF-policy change,
+an account whose stored params differ from the current default answers prelogin with diverged params
+(existence confirmed) until it re-keys via password change; unknown emails always answer the current
+default params. The same residual has a second channel (LOW, accepted): a real account's salt and
+params CHANGE on password change or re-key, a fake salt never does, so an observer polling prelogin
+over time can tell the two apart; the per-IP 10/min bucket bounds the polling. Same class (LOW,
+accepted): a former member of a shared vault who kept an attachment id can learn from the upload route
+whether that file still exists (spec 03 §9, audited as `attachment_cross_vault`).
+R5 Single server per instance — availability comes from offline-first clients plus the operator's own
+backups, never from HA.
+R6 TOTP seeds co-located with passwords (accepted eggs-in-one-basket, user decision).
+**R7 No VK rotation.** A removed shared-vault member who kept the key, working with the server, can
+still **read and write** later items: items carry no author signature, and a hostile server accepts
+writes it should refuse. The remove dialog says so and offers "Move everything to a new vault" (spec 02
+§10.8), the app-level rotation until P6. Vault deletion removes the server's copies after a 7-day grace
+but is NOT cryptographic erasure toward ex-members, and the operator's backups keep copies until their
+own retention expires; an ex-owner after a hand-over keeps the key likewise.
+**R8** (server-composed invites) is retired: the server composes no invite and mails no link
+(spec 03 §14.5).
+**R9 The recovery kit.** The kit's secret wraps the account's own UVK, so possession of the kit (with
+the email address) is UVK-equivalent **for that one account**. Two faces: (1) **LOSS** — an account
+without operator recovery (every account on the public instance) that loses **both** master password
+and kit has **no way back**: if a device is still unlocked, export and start a new account; otherwise
+the data is gone (accepted; the sign-up copy says so). (2) **THEFT** — whoever holds the kit can reset
+that one account against an honest server. Controls: custody of the printed kit; the online reset is
+gated by the phase-1 **verifier**, the **per-IP rate-limit** (no per-account backoff, so no targeted
+lockout), and the **single-use replay-bound ticket** (spec 03 §12); the commit revokes every session,
+replaces the kit and emails the person, so a stolen kit used against an honest server is visible and
+cannot be reused. A kit is accepted only on the kit-recovery screen, which names the account and
+server, so a kit handed over as an "invite" cannot walk someone into an account its maker controls. The
+recovery unlock **preserves the identity-pubkey hard-fail** (spec 01 §5).
+**R10 Hostile endpoint.** Any client may be pointed at any server, including a hostile one. What holds
+the line: (1) **the policy-trust boundary** (spec 03 §1.1) — a hostile server may make a client safer,
+never laxer (R11); (2) **the instance card and the password rule** (spec 01 §5.2–§5.3) — a client sends
+a value derived from an account's secrets only to the origin of a session it holds for that account,
+or to an origin with a password pin (baked, or confirmed through the Trust Gate, or a kit or setup pin
+for its own account), and the Trust Gate names the origin and the operator key; (3) **origin-clean
+switching** — a server change drops access+refresh tokens before the first request to the new origin,
+native/extension data is namespaced by origin and account, and one app talks to one instance at a time;
+(4) **blast radius** — creating an account on a hostile server exposes what the user gives THAT server:
+a new vault there and one account's metadata, provided the master password is unique, which is why the
+gate's copy says to use a master password used nowhere else. Every policy probe is tagged with its
+origin and a generation counter, bounded in time, and cancelled on an origin change, so a hostile
+origin the user abandoned cannot answer late and decide the home origin's policy.
+**Quick-unlock clock residuals (Android — accepted).** (a) When `Settings.Global.BOOT_COUNT` is
+unavailable, "same boot" falls back to the clock-derived reference (`wall − elapsedRealtime`), which a
+stepped-back clock can still make look like a reboot; the always-on monotonic belt and `now < stamp`
+failing closed still hold. (b) Across a genuine reboot the cross-boot branch trusts the server anchor:
+a device powered off for more than 30 days whose clock was stepped back BEFORE its last boot can still
+pass, provided the origin's last server-attested time fell within the window of the stamp. Closing
+either needs a trusted clock on the device; the master password remains one tap away in every case.
 **R11 (policy monotonicity — forbid-only fields and clamped timers).** Clients treat
-`offlineCacheAllowed` as **forbid-only**: `false` ⇒ prohibition + immediate wipe of the
-declaring origin's own namespace (never another origin's); `true` is **necessary but
-never sufficient** — at-rest persistence additionally requires per-device consent on web
-and desktop (Android's default-ON exemption is on the record in T3), so a hostile
-`offlineCacheAllowed=true` alone can never switch a device to durable storage. Oversized
-or absent `autoLockSeconds`/`clipboardClearSeconds` clamp into the client-side ceilings
-(T4/B1-1). `kdfParams` floors — including the cache-read sub-floor (T8) — are unchanged
-and remain the backstop that makes even a consent-granted cache non-catastrophic under a
-weak-params-planting server. A monotonicity test suite asserts a hostile policy object
-can never leave any client laxer than its floors/ceilings.
-**R12 (online guessing with TOTP optional — B1-3/B1-6).** With mandatory TOTP retired
-from the reference instance (`totpRequired` is per-instance, default false), online
-password guessing is resisted by: the flat per-IP login limit
-(`ANDVARI_LOGIN_RATE_PER_MIN`, default 5/min — the old private-origin 10/min relaxation
-is **revoked**, spec 03 §8), the email-keyed exponential backoff (5 consecutive failures
-→ `2^(n-5)` s capped 900 s, uniform across existing and unknown emails, reset on
-success — per-IP alone is botnet-bypassable), and the score ≥ 3 master-password floor at
-enrollment (T8's own estimator, spec 07 §2.3 — andvari ships no zxcvbn; this line named one
-for years). An **accepted, compensated risk**; enrolled TOTP is now verified on EVERY
-origin (closing the latent gap that an enrolled secret was only ever checked on the
-public origin). Residual: distributed low-rate guessing below both rate keys — bounded by
-the password-strength floor (T8's math applies online too, one attempt at a time).
+`offlineCacheAllowed` as **forbid-only**: `false` ⇒ prohibition + prompt wipe of the declaring
+origin's own namespace (never another origin's), which stays unconditional. **Changes that wait to be
+sent** (decided on 2026-11-17, spec 03 §1.1): the client first tries ONCE to send them, then wipes as
+specified, whatever the attempt brought, and afterwards says how many could not be sent. Once means one
+run through what waits, each request with its ordinary limit, no second try, no waiting for a
+connection to come back, no question to the person; the run ends at the first request that gets no
+answer, and a session that has ended sends nothing, so the wipe then follows at once. The attempt
+uses only the copy's own account's session, has one limit of sixty seconds for the whole, runs once
+per copy under one lock with every other wipe, and counts three outcomes (sent, may or may not have
+arrived, not sent); a wipe that could not be made is never said as made and is tried again only
+while the policy still forbids the copy (rules of 2026-11-17, spec 03 §1.1). A change the server
+answers with a conflict counts by what the server did with it (rule of 2026-11-18). On a device
+(rules of 2026-11-18, design §4.4) nothing is removed before it is counted, a kept policy record that
+cannot be read deletes nothing, and the account's wrapped keys at rest go with the copy, so that
+without the server there is no unlock. Logins the Android app has caught and not yet answered stay
+sealed on the phone under such a policy (decided on 2026-11-18), which is safe only because such a
+login cannot be opened on the phone without an unlock that the server answers; where that does not
+hold, the decision is not built. Under such a policy the device keeps none of the account's wrapped
+keys, its salt, its sealed identity seed or the quick-unlock key, on any road that takes a session (an
+unlock, a sign-in, a recovery, the operator's help, a device link's pickup; a refresh writes no keys),
+and a record marked as having its keys at the server is stripped of any wrap when it is written at
+rest (rules of 2026-11-19); a caught login stays sealed to the account's identity key, and opening it
+needs the identity seed, which then comes only from the server, and the master password. **A session
+that ends while the account is open** leaves in memory exactly what the device keeps at rest, as a
+lock does (kept in the shared code since 2026-11-20): at every end, the server's (a refused renewal,
+or the live channel's word that the device was revoked) and this device's own (it could not confirm
+the session and no try is left), no wrapped key of the account stays, the lock screen says that the
+keys are at the server and that the server ended the session, and with the server silent a right and
+a wrong password are both answered that the session ended; nothing opens, and no caught login opens
+or is said as saved, until an unlock the server answers after a new sign-in; a restart changes
+nothing. Shown by tests for the end by the live channel's word, by a refused renewal and by no try
+left, with the policy recorded before the opening and while open, logins caught before and after the
+end, and a restart; by reading only for the policy recorded while open together with a refused
+renewal or with no try left. **Fixed on 2026-11-20:** until then a session that ended while the
+account was open under such a policy left the keys the server served in the app's memory, so that
+until the app was started again the master password opened the account, and a login caught after the
+end, with the server silent; it needed the master password. Two states still keep served keys in the
+keeper's memory (2026-11-20): an account held as its server's operator (every unlock refuses it before
+any key is touched) and the record a sign-in call that was left puts back; no sequence is known in
+which either opens anything without the server, and each is to be made what is kept at rest. An
+answer with the status of "not signed in" from anything in front of the server starts a renewal, and
+where an earlier renewal was cut off more than a minute before, the session then ends as one this
+device could not confirm (said, not changed). **Who can still guess the master password under such a policy**
+(rules of 2026-11-19): the account's wrapped keys leave the device when the policy is recorded and
+every unlock asks the server for them, so whoever holds the device with its session can ask the
+server for the wrapped key and guess the master password away from the device for as long as that
+session lives (each try sends nothing derived from the password). A session has no end of its own:
+its access token lives an hour (the operator's policy) and each refresh gives a refresh token that
+lives thirty days from then, with no limit on the chain's age, so a device that refreshes at least
+once a month keeps the road open until the session is ended. The session ends at once when the
+account's owner removes the device from another device, when the password is changed on another
+device (every other session of the account ends), when an operator disables the account or removes
+the device, and when the account is deleted; a sign-out ends only the signing-out device's own
+sessions, there is no sign-out of every device, and an operator's enable does not revive ended
+sessions. Removing the device ends that device's road only: whoever knows the master password signs
+in again as a new device, unless the account requires a link. What such a policy adds is that the
+server can end the session, which stops every further fetch at once (the very next call is
+refused), but a wrapped key already fetched stays open to guessing away from the server for good; a
+password change does not close it, because it re-wraps the same account key, so the old wrap still
+opens the account to whoever guesses the old password (R33). Without the server nothing on
+the device can be guessed against, and nothing is wiped or lost while the server cannot be reached
+(decided on 2026-11-19: no unlock and no wipe then; the one try and the wipe at the first unlock the
+server answers). **Whoever holds a device's live session can fetch the account's wrapped keys with
+one call and then try master passwords without the server** (spec 03 §3): that is true of every
+client that signs in, with or without a policy; the route's read limit does not bound it, and only
+ending the session ends that road for every further fetch (a wrap already fetched stays open to
+guessing, above). **An older wrapped key** (a limit, 2026-11-19, left open on
+purpose): under such a policy a server that serves an OLDER wrapped key makes an older master
+password work on the device, and nothing is said; a device that keeps its own wrapped key would
+refuse it, and a new device accepts it today. It is one face of R33 (no account re-key): the
+wrapped key carries no generation the device can check against a record it keeps (the account's
+state document is protected against an older state; the wrapped key is not). A copy of the
+device's storage taken before the policy was read still holds the wrapped key and its salt; with
+the master password it opens everything caught before and after, offline.
+**What the count says, and its limits** (2026-11-19): a request that may have left is never said as
+"never left". **"Never left" is the transport's word**, given only for a failure of the connect
+itself with no earlier attempt attached: a connection refused, no route to host, a timeout while
+connecting, or a name that did not resolve (five failure classes, looked for along the failure's
+causes), and never where the failure carries an earlier attempt, as a second try of a request whose
+first attempt was written does; none of the five is thrown after a byte of the request was written
+(established for the JVM's client and Android's as built, not for every version of their libraries,
+and for a real Android device and the iPhone by reading only), so a renewal that left the device is
+never sent a third time or after its minute.
+The session keeper and the policy's one attempt take that word as it is, and no failure that can
+also come after bytes were written is added to it. So in the other direction a secure connection
+that fails while it is being set up, a proxy that refuses its tunnel, and an unreachable network
+that the platform reports as a plain socket failure (as the JVM's own sockets do) are said as "sent,
+no answer came" although nothing left, because the same word decides whether a refresh may be tried
+again (R41); on Android an unreachable network is reported as a failed connect, so there it is "never
+left", as "no route to host" is everywhere. On an iPhone
+the transport never says that a request did not leave, so there an unreachable server's changes read
+as "may or may not have arrived" (an edit stopped before it was queued is said as not made since
+2026-11-19). The web client keeps the attempt since 2026-11-18, and judges a conflict by what the
+server did since 2026-11-19; the shared code keeps the count, the attempt and what is said since
+2026-11-19, and since 2026-11-19 also the keys' leaving and the unlock that asks the server, on every
+road (no road walked, and none read, opened a caught login without an unlock the server answers,
+except a session that ended while the account was open, fixed on 2026-11-20 as above; a
+password change answered after a lock leaves no key material at rest; the race in which a pending wrap
+is written into a stripped record is covered by the strip by reading only), the caught logins kept
+sealed and sent once after a removal, the kept saves finished by the attempt, the number of
+unfinished moves, and both apps draw the notice (spec 03 §1.1). Also kept since 2026-11-19: the
+shared code's answer to the apps whether a removal is still owed, which the desktop reads instead of
+its disk; both apps' lines for keys kept at the server (with the server stopped nothing the phone's
+screens offer opens a caught login); and the attempt at an opening that records a newly forbidding
+policy does not send a change beside a request already out: it counts that request's changes by its
+answer and gives them its one try only where that request got no answer (spec 03 §1.1). `true` is **necessary but never sufficient** —
+at-rest persistence additionally requires per-device consent on web and desktop (Android's default-ON
+exemption is on the record in T3), so a hostile `offlineCacheAllowed=true` alone can never switch a
+device to durable storage. Oversized or absent `autoLockSeconds`/`clipboardClearSeconds` clamp into
+the client-side ceilings (T4). `kdfParams` floors — including the cache-read sub-floor (T8) — remain
+the backstop that makes even a consent-granted cache non-catastrophic under a weak-params-planting
+server. A monotonicity test suite asserts a hostile policy object can never leave any client laxer than
+its floors/ceilings.
+**R12 (online guessing with TOTP optional).** `totpRequired` is per instance, default false, so online
+password guessing is resisted by: the flat per-IP login limit (`ANDVARI_LOGIN_RATE_PER_MIN`, default
+5/min, spec 03 §8), the email-keyed exponential backoff (5 consecutive failures → `2^(n-5)` s capped
+900 s, uniform across existing and unknown emails, reset on success), and the score ≥ 3
+master-password floor at enrollment (T8's own estimator, spec 07 §2.3). Enrolled TOTP is verified on
+every login. Residual: distributed low-rate guessing below both rate keys — bounded by the
+password-strength floor.
+**A wrong secret on any route is refused and recorded, and does nothing else that can be turned
+against the account's owner (rules of 2026-11-16 and 2026-11-17; spec 03 §2, §8 and §18.2).** (a) A
+two-step code tried on a signed-in session counts on a back-off of its own, with the proofs' curve,
+which refuses only the checking of codes; the routes' per-minute buckets alone let a stolen session
+try thousands of codes a day. That back-off and the proofs' back-off are kept per device, not per
+account: kept per account, a session held without the password could keep the account's counter at
+its cap with about a hundred requests a day, and the owner, on any device, was then refused every
+action that asks for the password again. Per device, a stolen session still has only its own 109
+guesses a day of each, and the owner's other devices are not touched. (b) Turning two-step sign-in
+off, replacing its secret on an account that has one, and setting it up at all (also right after a
+sign-in) need the master-password proof, checked before the code is looked at, so a session in the
+wrong hands can neither remove the second factor by guessing codes nor add a factor of its own. (c) The code that verifies an
+operator-assisted recovery request has a rate bucket per caller address, and each wrong code leaves
+an audit row that names the account only when the request is real, so that a decoy answers exactly as
+a real request does. (d) The sign-in back-off per address stays: anyone who knows an address can make
+its sign-ins wait, and a signed-in session is not affected; an exemption for a device the account
+already knows is a possible later improvement, not built. A stranger using up an applicant's sign-up
+codes stays as well: the daily cap bounds it, and it touches no account. (e) The rate buckets of the
+routes that need a session are kept per device too, with a ceiling per account of four times the
+device's limit (rule of 2026-11-17, spec 03 §0.1), so a session held without the password spends only
+its own device's budget and cannot keep the owner from any route on another device; spec 03 §8 says
+what such a session can still do. The server keeps (a), (b), (c) and (e) since 2026-11-17. The
+released 0.29 line, and
+0.30.0, which is cut as it is (decided on 2026-11-16: the fix goes on the new line only), have the
+weakness (b) closes: there a session alone can turn two-step sign-in off with a guessed code.
+**R13 (unanchored assisted recovery).** An assisted recovery (spec 04 §7) is anchored by the person's
+account ID, which must come from outside the server (the kit, a notice older than the request, a
+co-member). When no anchor exists, `recovery-cli assist --no-identity-anchor` runs after a typed
+acknowledgment: it still refuses a copy that names another address than the one the operator typed,
+but cannot detect a wholesale server-minted identity that claims the person's address. Every device that
+unlocked the account before refuses the forged identity at the next unlock (spec 01 §5 self-identity
+backstop, kept per user id and per typed address: the web client and the shared code each bind the
+address typed at an origin to the user id and identity key of the first account opened for it, so a
+minted account under a new user id meets a mismatch, never a fresh pin); an account with no such
+device has no backstop. (The temporary-password form of this row is retired with the temporary password.)
+**R14 (account state).** The account-state blob (contacts, vault records, accepted vaults, the recovery
+record) is UVK-sealed, so the server alone cannot add to it, but it can withhold it or roll it back;
+each device keeps a high-water mark of the in-blob `seq` and its own sealed copy and refuses the
+rollback, but a device that never held a newer copy cannot tell. The shared code reads the blob again
+only when the sync's counter (`accountStateSeq`, spec 03 §4) says another device wrote it; a server
+that lies about that counter can make a device read less often or more often, which is withholding
+again, never make it accept a record it did not open. Every record only ever refuses (a
+missing record never blocks anything), so a rollback fails safe. Pins are pairwise: a family of N
+people connects per pair, and there are no introductions (no transitive trust). Whoever holds the UVK
+can write the blob (R35).
+**R15** (signed grants in the compatibility window) and **R16** (removal proofs) are retired with the
+clean break: grants are bound to the signed log (spec 01 §6.3), and removals are signed log entries.
+**R20 Withholding.** T1 can delay or hide new log entries, card updates, link answers and account-state
+tombstones. Devices detect it only against a head or checkpoint they hold, and otherwise see stale but
+genuine state. Every case fails safe: nothing unsigned is accepted. A hostile server can also store a
+far-future `at` in a vault log and so freeze offers on that vault (denial of service).
+**R21 Equivocation.** T1 can show different members different genuine prefixes of a log, or race two
+genuine entries at one position. A device that sees both freezes the vault; a device that sees only one
+cannot tell. Partly detected: the account's own vault records (spec 02 §9) and item-carried log heads
+(spec 02 §3). An item head only makes a device fetch and, if nothing new comes, note it in the vault's
+details and mark the member list "may be incomplete"; it never freezes the vault on its own, so a server
+that keeps serving one consistent branch is not caught by items alone. No cross-member gossip beyond
+items exists. A withheld later `add` makes the shown member list **understate** the audience.
+**R22 Trust on first use.** A hand-typed self-hosted origin pins whatever card it serves first. So does
+the link's origin on a new device that links to a private instance, and a link-offer origin that someone
+signs in to. Each passes the Trust Gate, which names the origin; for a device link the existing device
+shows its address beside the QR, and the bundle must agree afterwards. Invites (for creating accounts)
+and setup links avoid the gate. **Residual:** a person who confirms the gate for an address that is not
+their server's gives that server their `authKey`. A pin made on a server that was already hostile cannot
+detect a recovery key that server named from card 0 (spec 04 §2).
+**R23 Password-only devices.** The one-tap contacts list (spec 02 §9) trusts the account-state copy the
+server serves. The server alone can hide contacts or restore a removed one, never add one. A holder of
+the UVK can add one (R35), and the copy says so. Linking from another device avoids it.
+**R24 Web client and extension.** A web user's own vault remains T6-exposed; identity binding is
+unavailable there by construction. The Chrome and Firefox extension verifies the card and the genesis
+but not vault logs (spec 01 §6.5). It relies on UVK wraps that full clients minted after their own
+checks, opens a shared wrap only for a vault the account accepted, and never writes to a shared vault.
+So a log anomaly that only a full client would catch does not stop the extension from **reading** that
+vault until a full client acts on it, a hostile server can keep a shared vault readable there after the
+person was removed, and after a re-add a replayed old wrap can still open there (it cannot check
+`addSeq`). It cannot plant a key, move the personal vault, or get a shared-vault write out of it. A
+hostile web bundle can also write contacts into account state; native devices ask before using any
+contact made elsewhere.
+**R25 Connection metadata.** Who connected with whom, and when, is visible to the server (links and
+connections rows), as vault membership topology already was (the vault log is in the clear). The log
+rows of a purged vault are kept a year after the purge.
+**R26 Cap denial.** Covered by T13.
+**R27 Assisted recovery** (operator-posture accounts on private instances; the public instance only
+under variant K). A request needs the emailed code; 7 days without a veto from any of the account's
+signed-in devices; the person reading a request code to the operator over a channel the operator trusts;
+and a payload signed by the offline recovery key. **Residuals:** an attacker who holds the victim's inbox
+**and** passes the operator's identity check, while the victim has no signed-in device to veto, gets the
+account (the copy names this). Since 2026-11-16 the recovery copy
+names its account's address inside the account's own signature, the operator types the address of the
+person they help and the offline tool compares, and the answer names the address and the person's device
+compares it with the one they typed: another account's copy, or an answer for another address, is
+refused. Without an account ID from the kit, or from a notice older than the request (no mail sent
+because of an assisted recovery carries one, spec 03 §14.5), the identity check is unanchored (R13). Repeated requests can pester a victim within the email cap; the emailed code
+allows 5 tries per request, and requests are capped at 5 per address per window of 24 hours, so at
+most 25 tries a window (no per-address cap on tries: it let a stranger use up the owner's; R37); the
+mailbox's holder, who reads the code anyway, can open up to five more requests a window with a
+mailbox value (spec 03 §18.1); the route also
+has a bucket per caller address and an audit row for each wrong code (R12 (c)). **These checks bind an honest server only:** a
+server that is itself the attacker can open a request with its own key, mark it verified and its hold
+passed, suppress the bell and the mail, give the operator its own contact details, and pose as the
+person; an honest operator who believes it then seals the person's UVK to it. Only the operator's own
+check, through a channel they already had, stops this: natural on a family server, absent for
+strangers. No small fix exists. On a fresh install pinned by typed address such a server can also
+answer the person's own request itself with a minted account that claims their address: it gets an
+account whose keys it holds, not the person's vault. The full list of what these checks do and do not
+cover is spec 04 §7, "What these checks do not cover".
+**R28 Availability.** The public instance is one server run best-effort, with tested off-site
+backups. Offline caches keep vaults readable: an app's copy whenever the app holds one, the web client's only in
+a tab already open when the server goes away, because the page itself comes from the server and there
+is no offline app shell (spec 02 §8.1, 2026-11-16). "Best effort" is stated plainly on the first screen and on the website.
+**R29 Age and region.** Enforced by terms and store distribution, not technically.
+**R30 Operator signing key.** Whoever holds the operator's signing key (a stolen operator device, or a
+captured operator password with server access) can sign card updates. **Moves:** private-instance
+devices follow a move only after a one-tap prompt that shows both origins; store builds never follow a
+move of the public instance. **Renames and handovers:** possible. **Recovery:** it cannot redirect
+operator recovery **silently**: a rotation needs the offline seed's signature; a card with a new
+`recoveryFp` and no such signature reaches every opted-in person as a prompt that defaults to turning
+operator recovery off, says the change may mean a takeover, and needs the master password to keep it.
+Anyone who keeps it has handed their escrow to the key thief. **New consents** are covered too: the
+first-consent walk starts at card 0 for every pin, so anyone opting in after such a card sees the same
+warning, except someone whose only pin is an enrol or Trust Gate pin made after the swap (R22). Under
+variant R the public instance has no operator recovery to redirect, and its `kind` cannot be changed in
+store builds. **Controls:** the operator account is never anyone's everyday account and never signs in
+on the web. A phones-only family that keeps the operator account in `andvari-cli` on the server host
+accepts that the host can sign moves, renames and an unsigned recovery-key change too. Recovery from a
+stolen operator key is `reset-instance-identity` (spec 03 §17.5): a new chain, every device re-pins.
+**R31 Address kept for the deletion email.** The `account_deleted` (or `account_deleted_by_operator`)
+message keeps the deleted address in `mail_outbox` until it is sent, at most 24 hours (spec 03 §14.5).
+This amends R19's "no column holds the address".
+**R32 The product origin.** `andvaripass.com` serves the join pages for **every** instance. Its host, CDN
+or DNS could serve a scripted page that reads the fragment of every link opened in a browser (when the
+app is not installed, or an in-app browser keeps the link), giving the reader `s`, enough to race the
+real recipient. It cannot swap the creator's key (`F`), cannot pass a compared code, and cannot get a
+session without the master password. Controls: a static host with no scripts and CSP
+`script-src 'none'`, separate from any instance; apps that handle links directly; and "Paste a link".
+**R33 No account re-key.** The UVK and the identity key never rotate. Someone who captured them
+(malware, an operator restore under R3, a stolen unlocked device) keeps them after a master-password
+change. The remedy is **start fresh**: a new account, export and import, re-connect, then delete the old
+account. The help page "I think my account is compromised" says exactly that.
+The same holds for an older master password. A change of the master password re-wraps the same
+account key (spec 01 §7). A server that kept an older wrap, together with whoever knows the older
+password, can open the account for as long as that key lives. No client rule changes that: a device
+takes a served wrap only when it opens to the key the device already holds, and an older wrap does.
+The sign-in over a device's kept copy (spec 01 §7, rule of 2026-11-17) works the same way: a sign-in
+replaces what the device keeps only when the key it opened is shown to be that account's key as the
+device knows it, so a server cannot slip another account's keys under a kept copy; but a server that
+kept an older wrap, and a person who types the older password into a sign-in on that device, bring the
+older password back on that device. The person is told in one line, after signing in, that the copy
+was sealed under another master password than the one typed and now follows the server's. The server
+gains nothing it could not do with that password already. A device link on a device that keeps the
+account follows the same rule in full. A recovery, with the kit or with the operator's help, cannot:
+the password is lost, so no kept wrap opens to be compared, and the recovery replaces the kept and
+pending wraps; but the recovered key must still open the kept copy's sealed identity seed to the kept
+identity key, so a server cannot slip another account's keys under a kept copy by way of a recovery
+either: another key commits nothing and changes nothing kept (rules of 2026-11-17, spec 01 §7). An
+answer to a request for the operator's help that names another account than the one the device keeps
+for the request's address is refused at the pick-up, before the person is asked anything: whoever holds
+the operator's recovery key can make such an answer. For the same account, the part of the shared code
+that keeps sessions takes no session whose key is not shown to be the kept account's: a sign-in whose
+kept wrap opened to the same key shows it (and the kept seed is then written again from the verified
+session, so a damaged copy is repaired); every other flow must open the kept seed. Spec 01 §7 lists,
+with their date, the gaps that remain beside these rules (among them a recovery on a device that keeps
+another account, which still commits at the server before the device refuses its session, an answer
+for another account that passes the pick-up, and a damaged copy refused even at a sign-in with the
+right password).
+**R34 Key changes of contacts.** A contact whose key changes (reinstall, re-registration) must be
+re-confirmed with a matched comparison code. Until then the old key stays pinned and the new one is
+untrusted. People will see this after reinstalls; it is the price of not trusting the server's say-so.
+**R35 Account-state writers.** Any holder of the account's UVK can write its account state: the
+account's own devices, a hostile web bundle while the person uses the web client (T6), and the operator
+of an operator-posture account who opened its escrow (R3). Such a writer can plant a contact (native
+devices ask before using it), write a vault record that makes every device of the account see that
+vault withheld or frozen and read-only (a record ahead of or beside its log, spec 02 §10.4 (e)) or
+refuse it (a record of another genesis), or replay an old recovery choice (devices act on it only with their own mirror). It
+can already read and change every vault the account holds, so these add denial of service and
+confusion, not access; a vault frozen this way is left through copy-out and "Move everything". **Device
+links:** because `approveMac` covers `outer` alone (spec 03 §16.6), a UVK holder that also works with the
+server can pair the existing device's genuine `outer` with an `inner` of its own; it already owns the
+account, and its one gain is that contacts it planted become current on the new device without the
+per-device prompt.
+**R36 An old address after a move.** An instance that moved leaves its old address in the public
+chain. Whoever later controls that address (a lapsed domain, a reused dynamic-DNS or tunnel name) can
+serve the genuine chain cut off before the move, and a device that never saw the move still trusts it:
+a sign-in there can be relayed, a session token sent there used, and a recovery kit made before the
+move accepted there and its proof replayed at the real instance. No client check can tell a cut-off
+chain from a current one. Controls: the operator keeps every address the chain has named (the
+self-hosting guide says so in its section on moving); apps ask for a new kit after following a move;
+store builds never follow a move of the public instance. Not done: refusing kits made before a move at
+the server would lock out everyone who had not re-made theirs, and binding the sign-in and recovery
+proofs to the address dialed (a signature over a server nonce and the origin, in place of a reusable
+key) would remove relaying altogether but replaces the login protocol: a later design.
+**R37 A stranger can delay assisted recovery.** The per-address cap on opening recovery requests
+(5 per window of 24 hours that starts at the first request it counts, spec 03 §18.1) is what keeps a
+mailbox from being flooded with codes, and it counts every request for the address, whoever opens
+it. So a stranger who opens five requests for someone's address can delay that person's assisted
+recovery by a window at a time: past the cap the owner's own
+request is a decoy that sends no code. The stranger learns nothing (every request answers alike,
+T11) and gains no guesses at the owner's code (attempts are capped per request, and the stranger's
+wrong codes no longer use up the owner's). **The price, in plain words, until the way out below
+reaches the person (the server keeps it; no app and no option of `andvari-cli` sends a value yet):** anyone who knows a person's address can keep that person from asking the operator for
+help, with five requests a window, for as long as they keep it up. The person gets those five mails
+each window and so knows that someone is doing it, and the recovery kit is not affected. The cap protects the
+mailbox of a person someone else names, which is why it stays. Not done: counting per caller network
+beside the address, because a caller with many networks spends a ceiling per address as easily as one
+spends the cap today, so it would add a rule and no protection; and a per-requester cap, which would
+need a requester identity the route does not have. **The way out through the mailbox** (decided on
+2026-11-17: built on the new line before the public launch; spec 03 §18.1): the code mail of every
+request carries a mailbox value (sixteen symbols, 80 bits), and a request that names an unused,
+unexpired value of that address is taken as a real one past the cap, with a ceiling of its own of five
+per window and a mail budget of its own of five per window. A value does nothing for an account in the
+private posture. **What it closes:** a stranger who knows the address can no longer keep its holder from asking
+the operator for help, because the holder reads the value in one of the stranger's own mails and uses
+it; a wrong value changes nothing and the answer is the same whatever value is sent, so the value
+tells a caller nothing and cannot be guessed in useful time. **What it does not close:** a person who
+cannot read their mailbox cannot use the operator's help at all, as before (the request's code goes
+there); and a person whose address is being used this way still receives up to five unwanted mails
+per window, which is what the cap is for. **The bound, in windows:** each cap counts in a window of
+24 hours that starts at its first request, and the address's window and the value's run
+independently; so within one window of each at most five plus five request mails reach an address,
+and across the windows' edges up to twenty inside 24 hours, more than ten only through requests that
+name values, which only a reader of the mailbox can send; a stranger who cannot read it still causes
+at most five per window. **Whoever reads the person's mailbox** gains at most five more requests per
+window, each still behind the mailed code, the seven-day hold, the account's bells and the veto, and
+can spend both the address's five and the value's five themselves, so closing the way out for the
+person: that is part of what reading a mailbox means. A queued code mail holds its code and its value
+in clear until it is sent or the code expires (spec 03 §14.5). **A cost:** the value's alphabet keeps
+symbols that can be confused when typed from a mail (S and 5, Z and 2, B and 8, G and 6), because a
+value is mostly copied, the mail shows it on a line of its own in four groups, and a smaller alphabet
+would need a seventeenth symbol. **Kept, and not yet (2026-11-17):** the server and the shared code
+keep the way out, and `andvari-cli` takes the value since 2026-11-17; no app shows the value's field
+yet, and spec 03 §18.1 lists what the shared code does not keep yet.
+**R38 A register link that is not bound to an address tells its holder that an address is taken.**
+Whoever holds an unbound register or enrol link can try addresses at `POST /auth/register` (spec 03
+§14.3): one that has an account is refused `409 email_taken`, and the refusal does not use up the
+link. Accepted as it is (rule of 2026-11-16): the holder of such a link was invited, the route is
+limited per caller address, and a registration cannot go on without being told. A ticket proves the
+address and a bound link checks it, so neither is affected. Since 2026-11-17 the address is looked
+up before the password hashing, so a refused try costs the server nothing.
+**R39 A neighbour on the same network can spend the limits per caller address.** The routes that need
+no session are limited per caller address (spec 03 §0.2's index), and an address here is one IPv4
+address or one IPv6 /64: a household, an office, a VPN or Tor exit, or a mobile carrier's shared
+address can hold many people. Anyone behind the same address can spend those limits for all of them.
+The two that matter most: **the sign-in's** (`login`, 5 a minute by default, which the device-link
+pickup shares), which about 7,200 requests a day keep spent, so that nobody behind that address can sign
+in or pick up a device link; and **the refresh's** (30 a minute), which, drawn per address for every
+token, kept everyone behind that address from refreshing a session (on a mobile carrier's shared
+address that could even happen by accident). Since 2026-11-17 a token that names a live session draws
+its device's own bucket instead (spec 03 §0.1), so spending the address's refresh budget keeps nobody
+with a live session from refreshing. The others only make an action from that address wait a
+minute or an hour: the first exchange of a sign-in, registration and the sign-up codes, the kit's
+verify and both commits, opening a recovery request and entering its code, its poll, a device link's
+claim and poll, a link's fetch, and the instance, policy and recovery-key reads. Accepted: the other
+road is always another network (mobile data, home), sessions already open are not touched, the kit's
+verify keeps no counter per typed address (spec 03 §8), and limits per address are what bound a caller who has no
+session at all.
+**R40 "Removed by you, from <device name>" names the device as it named itself.** When a device of
+the account removes another, the bell and the `device_removed` mail say that the account removed it
+and from which device, and the server's record names the removing device by its id (spec 03 §16.7).
+The name shown is the one that device chose for itself at its sign-in, unchecked: anyone who has the
+password can sign in as a device named like one of the person's own. So the line can be trusted, as
+far as the server is honest, for this much: a device signed in to this account with the password
+removed the other one. It cannot be trusted for which of the person's devices that was; the devices
+list (spec 03 §16.7) shows every device of the account, each with its platform, its time of creation
+and how it was added, and an unfamiliar one is removed there.
 
-**R13 (unanchored org recovery — escrow v2, security review 2026-10, root cause A).** Admin recovery
-(spec 04 §4) is anchored by the member's identity fingerprint, which must come from outside the
-server. When no anchor exists (the admin never pinned the member and the member lost their sheet),
-`recovery-cli recover --no-identity-anchor` runs after a typed acknowledgment (owner decision Q2): it
-still refuses a blob swapped in from another member, but cannot detect a wholesale server-minted
-identity (a forged UVK with a forged, self-consistent identity seed). The bundle is marked UNANCHORED,
-and every device that unlocked the account before refuses the forged identity at the next unlock
-(spec 01 §5 self-identity backstop); a member with no such device has no backstop. v1 escrow blobs
-remain recoverable indefinitely (Q3), but only through the mandatory identity check.
+**R41 A replaced refresh token inside its minute.** A refresh whose answer was lost would otherwise
+sign the person out with a reuse on record that is no theft, so the server answers a replaced refresh
+token presented again within sixty seconds of its replacement with the same pair that refresh
+answered, while that pair is untouched (spec 03 §2). That is the released line's trade, kept as it is:
+inside that minute, whoever holds the replaced token gets the device's own live pair and can use it
+beside the device, until one of the two uses or refreshes it, and a holder who never refreshes keeps
+the access token's lifetime (up to an hour). What bounds it: each such answer draws the caller
+address's allowance for refreshes (30 a minute), so the grace is no free door; each is recorded as
+`refresh_grace` (the account, the device and the caller's address), which is what shows it to the
+operator and the person; the server keeps the pair in memory for the minute only and drops it when
+the minute ends; and after the minute, once the pair was used or refreshed, or after a restart of the
+server, a repeated refresh is a reuse and every session of the device ends, with its record. Only
+whoever could read the device's tokens holds a replaced one. **The device's own second try**
+(rules of 2026-11-18, spec 03 §2): a device sends a refresh that got no answer once more, within
+fifty seconds of the first try's sending, so that it arrives inside the server's minute, and never
+after: a token sent again later would be taken for a reuse, end every session of the device and
+record a theft that did not happen, which would teach the person and the operator to disregard
+the one record that shows a real theft. So the record that a refresh is out is written before the
+request goes and is cleared only by an answer in the server's own envelope, and where no try is
+left the device ends the session itself, sends nothing, and keeps the token only for the next
+sign-in to name. The window is judged by the wall clock, so that a restart earns no try; **a clock
+set back** inside the window by less than the time that passed can let a late second try go,
+which the server then takes for a reuse: the person signs in again and a reuse is on record
+(accepted, 2026-11-18). The shared code and `andvari-cli` keep this since 2026-11-19 (a second try
+answered "slow down" or with a server error leaves the record, so no third try is sent). **"Never
+left" at a renewal** (2026-11-19): it is the transport's word (R11: only a failure of the connect
+itself, with no earlier attempt attached), taken as it is. A wrong "never left" would cost this: the
+device would present a token the server had already replaced once more, the server would read it
+as a reused token and end every session of the device, and the person would sign in again; nothing
+is disclosed. To keep that from happening, a secure connection that fails while it is being set up,
+a proxy's refusal and a network the platform reports as a plain socket failure count as "a request
+went and no answer came" although nothing left, so such a failure costs one of the two tries;
+a network the platform reports as a failed connect ("no route to host" everywhere; an unreachable
+network on Android) is "never left". On an iPhone the transport never reports that a request did
+not leave. Since 2026-11-19 the shared code puts the record back where the transport says that
+nothing left the device, and keeps it after every other failure without an answer.
+**In the browser and the extension** (the rules of 2026-11-19, spec 03 §2, kept in both since
+2026-11-19; before that, a refresh whose answer was lost was sent again at the next request and the
+server recorded a theft): the server answers any number of repeats of a replaced refresh token for sixty seconds from
+the replacement (inclusive) while the new pair has authenticated nothing; the browser sends at most
+two within fifty seconds of the first, the second by the tab itself twenty-five seconds after the
+first where the tab is alive. Without locks between tabs, or while storage is not yet the same in two
+tab processes, a third send can go, all inside the fifty seconds, which is harmless inside the grace
+unless the pair was used in between (accepted). A refresh whose answer never came and had no try left
+ends the session in this browser, and nothing is sent again: if the token was in fact never received
+by the server, or was taken by someone else, no theft is recorded, and the other holder's session
+lives until the person's next sign-in in this browser names the kept token (it then ends, recorded
+`sign_in_named_replaced`, not as a theft); so the line for that end says to sign in again on this
+browser, and why. **The kept token:** a token kept from a renewal that got no answer stays in the
+browser's storage until the person's own sign-out of that account there, that account's next sign-in
+there, a forgetting, or four newer accounts' keeps (the fifth pushes out the oldest, unnamed); where
+the person does not sign out and the server never received it, it is a live token for up to thirty
+days, readable by whoever can read that profile's storage. **After the person's own sign-out** of an
+account nothing of that account's unconfirmed session stays in the browser: in the shared storage at
+once, and on a browser where each tab holds its own session once every tab has handled the sign-out.
+The server's chain then lives until it expires (thirty days), until this browser signs in and then
+signs out, or until this browser is removed from the account's devices; nobody holds a token of it,
+and the sign-out says so with those two ways (a sign-in again alone does not end it on a browser's
+row; in the extension it does). **With the offline copy on,** a tab that has not yet handled another
+tab's sign-out still holds the old pair in memory; it sends a refresh token only if the shared record
+holds that same pair at that moment, since that token sent later would be taken for a theft and end
+every session of the browser. A tab whose record is gone, or holds another account, sends nothing
+and ends (as signed out elsewhere, or saying that another account is signed in on this browser
+now); its server session, where another tab had not ended it, lives unheld until it expires. So a
+browser with the offline copy on holds one account's session at a time: a second account's tab on a
+browser shared between accounts ends at its next renewal, and its chain lapses unheld (accepted). A
+tab whose own sign-in could not write the record sends no refresh token at all and says that the
+session could not be saved. A person's sign-out tells the other tabs to drop that account's kept
+token, best effort: a tab not open, frozen, or in a browser without a channel between tabs keeps its
+own until its next sign-in, a forgetting, or its closing. Between tab processes whose storage is not
+yet the same, the record can vanish between the read and the mark (accepted, as above); an answer
+with a new pair that lands after another tab's sign-out is taken up by a tab that had not handled
+that sign-out, and that chain is then held by nobody until it lapses. **What reads as the
+server's:** a proxy that replaces the server's
+refusal of a renewal with a page of its own makes a real revocation, or a real theft's refusal, read
+as "not confirmed", in the browser and in the extension; an answer of a gateway shaped like the
+server's, with both the code and the message, reads as the server's. **The extension** holds a marked
+token in its worker's memory only: a restart loses it and earns no try, and the next sign-in on the
+extension's row ends that row's earlier sessions anyway; a worker restarted while a renewal was out
+ends the session as not confirmed at the first need of a renewal, sending nothing and keeping no
+token. The refresh route is not version-checked, so a stale client's renewal never answers
+"upgrade required". An honest person can be signed out by this
+rule where an answer was lost (accepted). A clock set back by less than the time that passed lets a
+late second try go and meet the reuse rule (as for the tool).
 
-**R14 (personal vault, contact pins and account state — security review 2026-10, root cause A §4, §7.2;
-branch A5).** "Personal" is the UVK-authenticated `personalWrap` (spec 01 §6), so a server can no longer
-make a shared vault personal by relabelling it (or by stripping a seal and relabelling `role=owner`, the
-A1 residue); it can only withhold the wrap, which fails closed (no default destination, no usage
-ledger). Residuals accepted: (a) **designation is a human choice** (spec 02 §4, A5 review H-1): an account that
-predates the wrap, or a fresh device the server withholds the wrap from, is ASKED which vault is personal;
-the server's label never picks or orders the choices and nothing is minted without the answer. A human who
-picks a vault co-members can read gets exactly that; re-designation (fresh password reauth, Q9) repairs it.
-A device that cached a wrap reports a withheld one as an anomaly and keeps its cache; that cache outlives the
-offline cache on every client (A5b). Every choice shows its co-holders and whether it was created here or
-received by transfer, and a designation mints only after a confirmation naming the vault and its co-holders.
-A served wrap naming another vault than the device's (a change elsewhere, or an older wrap replayed) is a
-notice the human confirms, never a silent switch; a junk wrap never displaces a valid cached one. The
-co-holder list is server-reported: a server that hides a member shortens the list, which is why the
-confirmation, not the list, is the control. (b) **account-state availability**: the account-state
-blob (contact pins, the verified org fingerprint, consumed nonces) is UVK-sealed, so the server cannot
-add to it, but it can withhold it or roll it back; each device keeps a high-water seq and its own sealed
-copy and refuses the rollback, but a device that never held a newer copy cannot tell, and loses pins
-(fail safe: re-verify). (c) **pins are pairwise** (owner decision Q4): a household of N people needs a
-verification per pair; no admin-signed introductions. (d) The enrolment pin rests on two human acts
-(spec 04 §6.5): typing the in-person code from the admin's screen, and affirming, under the stop warning,
-that the admin's screen is in front of them (A5c). The code is an unkeyed hash of the link, and nothing
-the invitee's client could verify instead is beyond the reach of the server that composed the link, so no
-keyed code would change this; the control is the human assertion, re-checked by the client from the raw
-inputs, and a navigated link plus a code on its own leaves the admin a pending verification, never a pin.
-A member who ticks the affirmation and types a code read to them by someone other than the admin, in
-person or, despite the warning, from an email, gives that person the admin's slot. (e) **The designation rides
-the account state (branch A9, the second API-review pass, MEDIUM):** the server keeps every wrap the account ever
-minted and chooses which to serve, and a device with no cached wrap (new, reinstalled, wiped) had nothing to
-contradict a superseded wrap for a co-held vault, so every default save there landed where co-holders read it.
-Now the account's own designation (`personal`, spec 03 §3: UVK-sealed, newest wins, written on register, on the
-migration choice, on a re-designation and on an accepted change) vouches for a served wrap on any device; a
-served wrap it does not name, or one served to a device with no cache and no designation (a fresh account, or
-account state withheld), is a PROPOSAL: nothing is in force (no default destination), the human sees the vault's
-server-reported co-holders and origin and confirms it, or re-designates with the password. An established device
-whose cached wrap the server keeps serving is unchanged. The "never switch silently" rule also holds inside the
-account type itself: a second apply while a wrap is in force is a notice, never a switch. **A9 review (LOW-4,
-MEDIUM-1): the fresh-device replay is CLOSED by a one-time confirmation.** On a device that never confirmed a
-personal vault (no cached wrap) a served wrap is a proposal even when the account's designation names it: on such a
-device the account state is as replayable as the wrap (no high-water mark can tell an older authentic blob from the
-current one), so a matching designation proves nothing, and the human confirms once (co-holders shown). A device that
-merged account state before and holds a cached wrap no longer follows a designation away from that wrap (branch A11,
-c01): the A9 text said "a rollback there is detectable", which is false for a genuine but superseded designation at an
-intermediate seq ABOVE the device's high-water mark (designated S at N+1, repaired to P at N+2, N+1 served to a device
-at N), so such a move is a CHANGED notice the human confirms, never a silent switch (fail closed; owner-review item).
-Likewise (A11, c00) a cached wrap the designation does not name is a proposal even when the server withholds the wrap or
-serves junk, so withholding cannot keep a device on a vault the account re-designated away from. The
-extension holds the same line without reading account state: a served wrap on a browser with no cached wrap is a
-proposal, it has no capture destination until the popup's describe/accept confirms it (captures and TOTP adds answer
-"Open andvari to confirm your personal vault."), and the cached-wrap path is unchanged. Cost: every fresh device of
-an account asks exactly once; the registering device never does. What remains: a default save while a proposal is
-pending is refused ("Choose a vault for this item."), never redirected. (f) **Whom a lookup names (branch A11, the
-third API review, q00, HIGH; spec 01 §6 "Add-member identity"):** the add-member confirm said "You've verified
-<displayName>", the server's string, while the pin gate and the grant used the server-returned userId, so a server and
-one pinned colluder could turn "add B" into "add C". A pin now records the email its human typed, an add whose typed
-email the pins contradict is refused, and the confirm names the email the PIN records and its fingerprint. A pin made
-without a typed email (every pin before A11, and the enrolment-link, members-list and invitation paths) cannot be
-checked against the email, and its label was the server's display name at verification time, so it is NOT enough to
-add (A11 review LOW-1, fail closed): the owner verifies the person again for the typed email, once. Residual accepted:
-that one extra ceremony per pre-A11 pin, the first time it is used to add. Native hosts have no add-member screen; the
-engine API carries the same check for any host that adds one. (g) **Migration residuals of branch A11 (review LOW-2,
-LOW-3):** a device that jumps straight from pre-A10 to A11 holding a single-entry legacy PLAIN id set
-(`grant.member.granted`, `grant.declined`) whose one planted id is literally `["<uuid>"]` reads it as the JSON form, so
-that one entry decodes as the id inside the brackets instead of being dropped; a nuisance only (a server-planted id
-that is a well-formed UUID either way, and every trust rule still decides what it unlocks). A legacy userId-keyed
-self-identity pin (spec 01 §2.4) whose saved session was gone before the upgrade gets its email binding
-trust-on-first-use from the next passing unlock: a server that changes the userId exactly at that unlock is not caught
-by the binding (the old userId-keyed pin is still checked for its own userId), and every later unlock is.
+**R42 A signed change that reached the server, while its place is free.** A change of a vault's log
+is signed by the device, and once its frame has reached the server, the server can append it at its
+position at any later time for as long as nothing else took that position: a change the device gave
+up, withdrew or called "not made" from a read where no answer had named a head is therefore not
+gone for certain (spec 03 §10.3). What bounds it: the device remembers such a change by its hash and
+its position for as long as that position is free, and if the log later holds it, the person is told,
+with the way to undo it; the person's own next change of that vault takes the place and ends it; and
+"not made" is said after a sent change only where a read reached the head the server's own answer
+named. A server that appends it late gains nothing the person had not signed. **The cost of the bound
+on what is remembered** (accepted, 2026-11-19): the web client remembers at most eight such changes
+for one vault, letting go first of those already told "not made"; a person who withdraws more than
+eight changes to one vault while nothing reaches it is not told if the server makes the oldest of
+them after all. The shared code is to bound its records at sixteen and thirty-two, in the order spec
+03 §10.3 gives, with a cost of the same kind (rule of 2026-11-19, not built yet). **A tab that still runs the code from before a deploy** rewrites the records at rest in
+the old form until it reloads (from then on a reader carries what it does not know and never
+consumes a record of a newer form, but an old tab predates that rule): what it drops of a newer
+record is not remembered (accepted, 2026-11-19). The web client keeps this since 2026-11-19 (it
+remembers what it gave up, withdrew or called not made, bounded at eight, and says a later append).
+**Not kept yet (2026-11-19):** the shared code does not yet remember such a change.
 
-**R16 addendum (A10 review LOW-1).** An in-window v1 `remove` proof is verified only when its nonce is in the
-token grammar the consumed record stores (`[A-Za-z0-9_-]{1,128}`, which covers the UUIDs pre-A7 clients
-minted and the vectors' base64url); any other nonce is the `fields` anomaly before the MAC. Before this, a
-nonce the record could not represent was verified, never consumed, and so replayed on that device. The
-record encoders now throw on a malformed row rather than drop it, so no caller can repeat that shape.
+**R43 A member's save between the read of a vault and its deletion.** Before a half-made vault of a
+stopped move is deleted, the device reads it and deletes it only if it holds nothing but the move's
+copies (design §3.13). A deletion names only the log's head, never the items, so a member's save that
+lands between that read and the deletion (a second or less) goes with the vault, into its grace,
+where the vault's owner can still restore it. The deletion is to carry the point up to which its
+items were read, and the server to refuse it when any item is newer (spec 03 §11.1); the server keeps
+that refusal since 2026-11-18. **Counted by its id** (accepted, 2026-11-19): a copy the move put into
+the trash counts as the move's by its id, so a member who restored it, changed it and deleted it
+again loses that version with the vault; rows set aside because their first home was another vault
+are not counted as a member's items. **The entry by which a move's new vault says what it is**
+(`moveOf`, design §3.13; known limits, 2026-11-19): (a) any member who may rename a vault can write
+the entry into its description; the only effect is that a vault with nothing at all in it is deleted
+at its owner's next move out of the named vault (said in that move's result, restorable while its
+grace lasts), and a vault with anything in it is kept and named. (b) A device that holds a record of
+its own stopped run does not look for another device's stopped run by the entry, so that second
+target stays unsaid on that device. (c) As for every half-made vault, the decision rests on a read
+from the server: the server's refusal of a deletion whose read is older than the vault's items
+narrows the window against an honest server, and nothing narrows it against a server that hides
+items (R20). **A member who keeps saving** (accepted, 2026-11-19): a refusal for items that moved
+on gives back its draw on the deletion limit, but the account's own ceiling counts it, so a member
+who keeps saving can make an owner's deletions fail for as long as they save, and after forty such
+refusals in an hour the account's own limit answers; the way out is to remove that member first
+(spec 03 §11.1). **Kept since 2026-11-19:** the web client reads a half-made vault before its
+deletion and sends the point it read, and the move's deletion of the old vault names its point too;
+the shared code reads a half-made vault before its deletion and deletes it only where it holds
+nothing but the move's copies. **Not kept yet (2026-11-18):** the shared code sends no point, so for
+the apps the window of a second or less stays (since 2026-11-19 the engine carries the point in the
+request; the move that names it is built and held, 2026-11-19).
 
-**R16 addendum (A13, c10).** A v1 `remove` proof whose nonce is only in the ACCOUNT-STATE set is no longer
-calm unconditionally: the time that account-state record was consumed (the consuming device's clock) stands in
-for the `issuedAt` a v1 proof lacks and must be inside this device's window, else the anomaly, exactly as a v2
-replay after a re-add is. Residual accepted: that time is another of the user's devices' wall clock, so a device
-whose clock was far ahead when it consumed the nonce can make a later replay look in-window here (wording only;
-the data handling is the same either way), and an N−1 device's v1 record is as good as its clock.
+**R44 What a device's plain records name.** The records a device keeps outside what is sealed hold
+public ids, numbers and sealed blobs, and besides those **the addresses and the servers of the
+accounts it knows** (in the keys of its records, in the device's row, in the keeper's record of
+which account an address is, and in a kit notice's mark): an address is not content, and a reader of
+a locked device's files learns which addresses were used at which servers, and that a kit was
+wiped for one (accepted, 2026-11-19). After a forgetting of an earlier account, one plain record
+names the address at its server (the notice's mark: the address as typed, no id) until the notice is
+dismissed, the server is forgotten or the account under that address is deleted on this device, also
+where no account was taken after the forgetting (rule of 2026-11-19; kept in the shared code since
+that day). They hold no vault name, no name of a contact and nothing of
+an item: a move's note at rest holds ids, the names of its lines' keys and numbers, the member as
+the account's id and public key, and the names are filled in when the note is read with the account
+open (the shared code keeps this since 2026-11-19); the records of changes to shared vaults name who
+was added to, removed from or offered which vault, and when, by id, for every change held, withdrawn,
+given up or found. **Someone who can write the device's plain records** can change what they say;
+a move's note read from them shows only the move's own lines, each in its own shape, and a member
+only as the device itself knows that person, so such a writer cannot make the place of the notes
+show any other sentence of the app (kept since 2026-11-19). **What a server can make a line say:**
+a server can make the operator's console say that a sound policy was refused for a reason it names;
+the console is to say that the SERVER refused it for that reason, never state it as a fact about the
+policy, and a server's "wait this long" is to be clamped (a day at most; beyond that the line says
+"later"), so that no line with a wait shows an absurd number (rules of 2026-11-19). Kept in the shared
+code since 2026-11-19: a refused policy carries the server's own message for the refusal, handed to
+be shown as the server's words, and a server's wait is taken only as whole seconds from none to a
+day, any other value or none being said as "later", without a number.
 
-**R16 addendum (A13 review RF3).** A repeated consumed nonce keeps the EARLIEST time any device recorded for it, in
-the account-state merge and in each device's fold of its own records, on both engines (vector
-`a13-nonce-repeat-keeps-the-earliest-consumption`; the cap vector is now `nonce-union-earliest-and-cap-256`). Before,
-the larger time won, so a device that consumed the same v1 nonce later (its own `valid_legacy`, or an N−1 build's
-`already_recorded` at its own `now`) moved the record forward, and a proof replayed after a re-add could fall inside
-that later window as a calm `already_recorded` instead of the anomaly. For v2 every device records the proof's own
-`issuedAt`, so the rule changes nothing there. Residual accepted (N−1): while a device on an earlier build still
-writes the account state, its merge keeps the larger time and its `already_recorded` writes `now`, so the served copy
-can still carry a later time; a device that already merged the earlier record keeps it (the merge takes the minimum
-of its copy and the served one), and a device that never saw it adopts the later one. That closes once every device
-runs this build. In the other direction, a device whose clock was far BEHIND when it consumed a nonce now pulls the
-record earlier, which can only turn a later genuine `already_recorded` into the anomaly (wording only), and the
-per-vault cap of 256 now ranks a nonce by its first consumption.
+**R45 A frozen vault.** Where a server's own answer named a change at or beyond its position and
+the server later serves another entry there, the server's answer and its log cannot both be true:
+the vault is frozen on this device for good (in a browser, while its storage has room and no server
+that lies times its answers to two of its open tabs: the paragraph after R47), its held change is
+dropped and never sent, nothing is said of the change, and the vault is read-only here. The freeze comes at the device's next complete
+verified read of that log, with nothing else called (kept in the shared code and in the web client
+since 2026-11-19; before it, both froze only when something next touched the held change, so a
+server that contradicted its own answer could have items go on being written into a vault whose
+history it forked for as long as nothing touched that change). A read from which the server withholds entries can verify the other entry's
+hash without the check; the vault is read-only while withheld, and the freeze comes at the next
+complete read. Only removing the device's records of a frozen vault ends the freeze (forgetting
+the server, the account, or the earlier account), except in a browser, where a server that lies and
+times its answers to two open tabs can also make it forget the freeze (the paragraph after R47); no
+lying server is needed to undo it, and nobody but the server can bring it about. No honest sequence of answers and requests is known to freeze a
+vault (accepted, 2026-11-19), with one exception that is not a lie: **a server whose database is
+restored from a backup has lost entries it had acknowledged;** where another member then writes at
+such a position, every device that holds the acknowledged entry (as a change the server called
+stored, or in its verified log) freezes that shared vault, and it stays read-only there until that
+device's records of it are forgotten (in a browser, while its storage has room for what the rule
+keeps: the paragraph after R47). A device cannot tell a restore from a lie; this is the rule
+working as designed, and it is what an operator must know before restoring a backup (R47). A server can also keep a held change "stored by the server's word" for
+as long as it wishes by answering its sends as stored without storing it; meanwhile the vault takes
+no new log change from this device, which is the denial of service a server can always cause by not
+storing, and the person is told that the server says it is made. A change refused for good while
+the server's own earlier answer called it stored is said as refused, never as not made; a change
+recorded as "cannot tell" before a send that then never left stays "cannot tell" (the cost is
+wording, never an untrue line). A change the server answered as stored waits, and blocks the vault's
+next log change from this device, until the log shows it or the server contradicts itself; if the
+server then never serves it, it waits for good, as it would if the server never answered at all
+(accepted). A server that refuses every send because the session has ended cannot keep a change
+unsaid past the day: the general re-send gives it up after a read. Keeping the highest head an
+answer named freezes a vault only where the server contradicts its own answer; the one road found
+beyond that is a server's replay of another vault's answer with a head at or beyond the change,
+followed by an honest loss of that position, which is the same class as any fork a hostile server
+can cause (2026-11-19). **The web client** (spec 03 §10.3): the server's word is any success answer
+at or beyond the change's position, whatever hash it names there (rule of 2026-11-19; an honest
+server answers success only for a frame it then holds at its position). Kept in the web client
+since 2026-11-19: the word survives a refused re-send, an acknowledgement that arrives while the
+person withdraws, and one of a half-made vault's deletion that is then dropped, so a server that
+answers success while storing nothing cannot avoid the freeze by those roads; at the freeze the
+held change is dropped and nothing of it is sent, shown, asked, given up or counted. Before it, the
+browser froze only at a later touch of the held change and never after an answer beyond the
+change, and where it froze it kept the change and sent it again at every unlock. **A member may
+leave a frozen vault** (rule of 2026-11-19): the leave names the history that member's own device
+verified, so it fits no other history and is no road around the freeze; it is the only entry the web
+client posts to a frozen vault. A removal of a frozen vault learned at a sync is never quiet, also
+after the person's own leave (rule of 2026-11-21; spec 03 §10.3): the browser keeps a copy of what it
+held of the vault when it learned the removal, for 30 days, with the notice; the same rule, that no
+departure from a frozen vault is quiet, is decided for the phone and the desktop before the first public
+release (2026-11-21), and is not built. **What that keeps, said plainly (2026-11-21):** after a person's
+own leave of a frozen vault, the browser keeps that vault's content, with this account's own wrap of the
+vault's key so that it can be opened and items copied out, for 30 days, and where the server went on serving the vault
+after the leave, that includes items written after the person left; this adds nothing to what a
+person who was a member can read with a server's help (R7). Kept in the web client for a delta sync
+and for a full resync alike: before a resync replaces what the browser holds, the browser takes what it
+held of each shared vault, and a vault the fresh list no longer grants goes the same way from that, with
+the same notice and held copy (spec 03 §4). Where the browser held nothing of the vault (the first full
+list after a sign-in, or a reload with no offline copy), nothing is kept; it says in one line, without
+the vault's name, that a vault frozen here is gone. **What the web client
+hands out after a removal was carried out (2026-11-23):** once a removal from a shared vault has been carried
+out in a browser (by its own sync, or by another tab of the same browser profile), these places hand out
+nothing of that vault, each held by a test, and no others are promised: (1) a download of an item's file
+whose answer comes after the removal opens and writes no file, whoever asked for it; (2) a backup reads
+what it may hold again after its seal and its check, seals again from the new read where that read lost a
+vault or an item (three seals at most; where the last read still differs, or nothing is left after such a
+loss, no file is written and the panel says so), writes no file where the browser locked during the seal, and its card
+names left-out files only of items still shown; (3) the vault list past 500 rows draws no row of the vault
+when it renders by its own state; (4) an item closed by the removal after Save was pressed is never said
+to be not saved where the server answered the save, and is said to be of unknown outcome while the
+answer is awaited; (5) the account's deletion, which carries a signed leave of each shared vault's log, is
+counted among the senders that change a vault, as a leave; (6) the sender of the one attempt before a
+policy's wipe sends, of each batch any caller hands it, only the changes the question allows; (7) the
+person's own items stay on show where the server serves no row for the own vault, a shared vault the
+server serves no row for shows nothing, and no served label makes a shared vault the own one; (8) a copy
+out of the vault (one item, or each item of a copy of all) puts no item into the target when the removal
+is carried out while one of the item's files uploads, or after its files were uploaded and before this
+browser sends the item to the target; (9) the breach check of an open item's password sends no prefix when the removal is carried
+out during its digest; (10) a finished import's report into the vault is closed. The table of these places
+was made by reading the web client's code once (2026-11-22); a place that reading did not find is not
+covered. What stays as it is: the record of when an item was last used goes on holding the ids of the
+vault's items and the times they were used, with no content. A copy refused at (8) leaves in the target
+the files it had already uploaded, named by no item and sealed under keys that never left this browser;
+the server removes such files at its hourly sweep (where it runs its background work) once they are more
+than 24 hours old. After an answer beyond the change the web client says "cannot tell"
+where the shared code says the server has the change (ruled on 2026-11-19; both freeze on a
+contradiction, and the difference opens nothing). The shared code's engine keeps these rules since 2026-11-19, among them the freeze at the
+read, an answer below
+the change's position that marks nothing, and the highest head named that no later answer takes
+away (spec 03 §10.3); the device's plain store names who was added to, removed from or offered which
+vault, and when, for every change held, withdrawn, given up or found, and holds no vault name and no
+content (R44). **What the rules for a change that waits take from a person, or leave open** (limits
+found on 2026-11-21; spec 03 §10.3): (a) one false "stored" from a server blocks every later change
+of that person to that vault from that device for good, with no withdrawal and no giving up; a way
+out by the person's own word after the day, which says the truth (the server said it stored the
+change and has not shown it; this device stops sending it; it may still be made), is to be designed,
+on its own, before the first public release (decided on 2026-11-21), and is not built. (b) A departure's
+quiet mark (the one that keeps the person's own leave or deletion from raising a notice) outlives its
+act within one opening of the account, in every act; it is to be bound to the entry it was made for,
+in every act, before the first public release. (c) "Not made and will not be" rests on the server's
+"slow down" answers: a server that answers so and stores the change all the same is caught only by
+the vault's member list. (d) As the two apps' "made after all" notice is drawn up, it offers "undo it"
+also for a kind of change that has no undo; it is to get a form without it. Neither (c) nor (d) has a
+date set.
+
+**R46 What `andvari-cli` does not guard yet.** Since 2026-11-19 the tool keeps a record of each
+account's identity key, looked up at its own server, the first time it takes or reopens that account
+(trust on first use), compares every flow with it, both recoveries' commits included (the session a
+commit's answer opens is held to the record, so a party that holds the account key, such as the
+operator who delivered it, can no longer have a commit's run taken under another key), and refuses
+the same account under another key with no offer. Before that date the same account served under
+another key was taken without a word on every road. The rules (2026-11-19, spec 01 §7): the tool
+keeps a record of each account's identity key per server, checked on every flow, a recovery's commit
+included, and refuses the same account under another key with no offer; it keeps a record of which account an address is at a server that
+outlives a sign-out and the server's end of a session, as the apps' record does, and goes with the
+forgetting (the key's record stays), with `forget-server` and with the tool's own confirmed deletion
+of the account; a lock on its home is taken by every command that changes a session or a tie, so
+that a second shell cannot write back a tie another shell forgot. The record of the address is kept
+since 2026-11-19: written at the first session the tool takes at a server, compared on every road,
+another account under the address refused with both possibilities and the offer. The lock on the home is kept since 2026-11-19: every command holds it
+from before it reads the home until it ends, a second command waits a bounded time and then stops
+having sent and changed nothing, and a lock left by a killed process blocks nobody; so a shell that
+still holds the earlier account's session no longer writes the tie back after another shell forgot
+it, and a commit whose check passed no longer saves its session over a tie that another shell made
+meanwhile (both closed that day). The forgetting removes the tie (the saved
+session) and the account's local records, and keeps the key's record. **What it did not guard
+before the record of the address (until 2026-11-19):** the tool's only tie between an address and an
+account was its saved session, which goes at a sign-out and whenever the server ends the session,
+so a sign-in, and every other road after the first command that followed such an end, could take
+ANOTHER account under a known address without a word. A home from before the record has no such
+record until its first session at each server, and takes the account served then as the
+address's (trust on first use). After the tool's
+confirmed deletion nothing stays, the key neither, as for every client (R19(c)): a deletion is
+confirmed by the server's answer alone, so a server that confirmed a deletion it did not make makes
+the tool forget the account's key and the address's record and can later serve that account under
+another key to this home. The rule (2026-11-19, spec 01 §7) is that a confirmed deletion removes
+only records of its own server, and that a request for the operator's help kept for another
+address there counts as something of another account kept, which keeps the server; kept since
+2026-11-19, for the deletion and for the forgetting (before that, a deletion removed at every server
+each record that named the deleted account's address, account id or device id). A deletion
+confirmed by a server that lied makes the tool forget the account's key and the address's record
+and, where nothing of another account is kept there, the server itself with its pin. **What it
+cannot keep apart:** the shared code keeps some records of an account by its id alone (the stored
+account state with its checkpoint and high-water marks, the vault logs' live mark, the recovery
+mirror); two servers that name the same account id share them on this home. `forget-server` goes
+through the shared code and keeps them where another server ties the account (since 2026-11-21, T1);
+**not kept yet (2026-11-21):** the tool's own confirmed deletion and its forgetting of an earlier
+account remove them without reading that tie, so the other server's next read is a first sight, and
+it can serve an older state once without being caught. Ids are random and made by the registering client, so only
+a server that names an id it learned elsewhere reaches this. The lock on the home orders the tool's own
+commands only (it is advisory: another program can still change the home). A home from before
+the record trusts the first key it sees at its next run (accepted: nothing of the tool was released).
+
+**R47 A server restored from a backup** (design §9.6; the operator's steps in `docs/self-hosting.md`,
+"Before you restore a backup"). A restore is the operator's own act, and it undoes what the server did
+after the snapshot. **What it brings
+back:** the database as the snapshot held it. Saves made after the snapshot are gone from the server
+and left only on the devices that hold them; a master password changed after it is undone and the
+former one signs in; devices revoked after it are known again, and their revocation is no longer in
+the audit log; accounts disabled or deleted after it are back, a member removed from a shared vault
+after it is a member again and can read it, and a recovery kit or two-step setup replaced after it is
+undone (a kit or a second factor replaced because of a leak is in force again); mail waiting at the
+snapshot is sent again; invites, links, device links and requests for the operator's help ended after
+it are in progress again. A device that synced after the snapshot refuses the older state, applies
+nothing and keeps what it holds (shown by tests since 2026-11-20); a shared vault whose members changed
+after it can freeze for good on such a device (R45; how far that holds in a browser is said in the paragraph
+after this entry). **What `andvari admin restored` ends** (kept since
+2026-11-21; run once on the put-back database before the server starts): every session of every
+account, the operator's included, so no token a device holds is accepted any more; every device not
+revoked is marked signed out; the invites, links and device links in progress; and every request for
+the operator's help in progress, an answered one included, so nobody can finish a request the
+snapshot brought back as ready. It removes no data, changes no password, key or setting, leaves the
+change counter, tells devices nothing and writes nothing a device must believe; its one record is in
+the server's own settings, served by no route. It refuses before it opens anything beside a leftover
+write-ahead file, its companion or a rollback journal, and while any process on the host has the
+database open; through a symbolic link it looks beside the link, while SQLite uses the files beside
+the file the link leads to, so a leftover write-ahead file there gets past it and damages the put-back
+file as below (not kept yet, 2026-11-21). **The server's other commands and its start have
+no guard yet** (decided on 2026-11-21, not merged): a write-ahead file beside a database whose header
+does not say write-ahead mode is to be refused before anything opens it, through a link too, and
+`andvari setup` beside leftover files is to create nothing; until then a write-ahead file of the
+replaced database beside the put-back file is applied to it at the first opening by the server's start
+or any of those commands: the put-back file is damaged for good (the command then ends with an error),
+and the leftover files are deleted, so only the backup's file brings it back; a rollback journal of
+another database is rolled into the put-back file without a word. **Limits that stay with the guard:**
+a link whose target does not exist yet (no database is harmed; a leftover write-ahead file there is
+deleted by SQLite; to be mended before the first public release); a hard link (its leftovers lie beside
+the other name); a link swapped between the guard's look and the opening; a put-back file that is itself in write-ahead mode, which
+only `andvari admin restored` refuses; and a journal of another database, which nothing can tell from
+the database's own, since a rollback journal carries nothing that ties it to one database file.
+**What it cannot end, accepted on 2026-11-20:** a device revoked after the snapshot
+holds a device secret the server knows again, so with the account's master password it signs in as a
+known device, with no link where the account requires one for new devices and no new-device mail; the
+server keeps what makes a device known so as to lock nobody out, and neither the server nor the
+operator can tell which devices those were. The operator revokes them again at once, before members
+are told to sign in; until then whoever holds such a device and the master password is back in. After
+the command a requester's device says that its request is over and offers to ask again. Since
+2026-11-21 the shared code's three lines for that end (ended from the account's side; cancelled
+because the master password or recovery setting changed or the account was recovered; ran out of
+time or was used, the last a result of its own after the operator's help) each add "or it was ended
+by whoever runs the server", naming no restore, and await the owner's words (design §9.6). **Not kept
+yet (2026-11-21):** neither app draws the first of them yet: the phone shows its own narrower line
+there, and the desktop a general line for the request's stage. **The two harms the counter leaves, with their rule
+decided and not built (2026-11-21):** the server numbers every change with one counter, which the
+restore takes back, so (a) **the silent skip:** a device that synced after the snapshot, once new
+changes carry the counter past the number it had reached, syncs normally again and never receives the
+changes made under the numbers it had already seen, and nothing says so; and (b) **what only a device
+holds:** items and newer versions saved between the snapshot and the failure exist only on devices,
+and nothing says so. The rule (design §9.6): the command raises the counter past every number it can
+have handed out, and each device that sees such a jump compares what it holds with the server's full
+list, keeps and marks what the server lost, and offers to send it back, copy it into another vault or
+remove it, doing nothing without its person; the two parts merge together, never the jump alone
+(the jump alone would make (b) worse: the older state's warning goes, and a full pull the server
+demands replaces the device's rows). Devices are never sent a signal to accept an older state
+(decided on 2026-11-19), and a server that lies gains nothing from the step: it can make a device
+mark items and ask for their history, and it loses the power it has today to make a device drop items
+without a word by demanding a full pull. Until then (a) and (b) stand as the guide says them, and a
+device that keeps no copy (a policy that forbids one, a browser without the offline copy, the
+extension) loses after the forced sign-in whatever it showed that the server no longer has.
+
+**How far the browser's rule for a shared vault after a restore holds.** The web client keeps what the rule
+rests on (the history of each shared vault it verified, and whether that vault is withheld or frozen)
+in the browser's storage, which every open tab of one browser profile shares. Against an honest
+server, a restored one included, the rule holds while that storage has room for what the rule keeps;
+this is known by reading the code and from a model of the browser's storage in the tests, not from a
+run in a real browser whose storage is full. Against a server that lies, it holds only while that
+server sends the genuine web app (T6) and does not time its answers to two open tabs of one browser:
+a tab that runs in a process of its own writes from its own copy of the storage, which can lag
+another tab's write, so a server that times its answers so that the two tabs' writes cross can make
+the browser forget what it had verified, or forget that a vault is frozen, and a change is then sent
+into that vault (a reading of how browsers keep storage for such tabs; the lost verification and the
+change sent were shown in a model of that storage, the lost freeze by reading alone, and none in a
+real browser). With two tabs open, honest use can also make a vault read-only
+for a while: a tab's read that was answered before a new entry and is stored after another tab
+stored that entry leaves the vault withheld in both tabs, and a save there is refused, with nothing
+sent, until a later read.
+
+**R48 What stays on a device of an account that ended** (spec 01 §7, design §3.11). Since 2026-11-21
+the shared code's app engine (the phone and the desktop app; not `andvari-cli`, whose deletion and
+forgetting do not read the tie either, R46, and which has no such removal: not kept yet, 2026-11-21)
+removes every record it keeps by the id of an account the device no longer knows anywhere, whatever
+the tie between servers said: at every start, and at the end of a confirmed deletion, of both forms of
+"Forget this server" and of a completed forgetting of an earlier account. It does not run at a
+sign-out, nor at "forget the account on this device" after a deletion whose outcome is not known (a
+signed-out account stays known by its address record). No way was found on 2026-11-21 for a server's answers, or for a stop with a whole start
+between any two writes of a registration, a sign-in, a recovery with the kit, a device link, a
+password change, a sync, a forgetting or another account's deletion, to make it remove a record of an
+account the device still keeps or is taking. **Its limits, as merged (2026-11-21):** (a) **it removes
+nothing while it cannot read what it decides by:** where the store cannot list its keys, or where the
+session record, the list of held copies, an address record at any server, the record of the person's
+own ends, the forgetting marks or a mark of a deletion of unknown outcome cannot be read or does not
+parse as its form. No server answer and no build writes such a record, so this needs a damaged store;
+on such a device the records of ended accounts stay for good, as they did before the sweep, since no
+reader of the engine clears such a record yet. The engine then writes one line to its diagnostic log,
+and no app passes that log on yet, so nothing says so. (b) **A
+take writes the address's record first,** then the identity record: a stop between the two leaves the
+address tied to that account at that server, under the same key; a later sign-in of that account there
+is taken and writes the identity record, and another account served later under that address there is
+refused as a fault, with the forgetting of the earlier account offered (the strict side). (c) **A
+registration the session keeper refused** leaves the device's records of the person's recovery choice
+(the recovery mirror and the escrow mark) with nothing that names the account; they go at the next
+start, and the person is asked the choice again (the safe side: the sealed record of the choice was
+never written). (d) **One engine per device state:** no shipping app runs two engines over one store
+(the phone builds one engine per process and runs no second process; the desktop app holds a lock that
+refuses a second start; the iPhone app is not yet on the engine, and the engine's seam built for it
+keeps the device state in the app's own container and gives its extensions only the fill snapshot and
+the save queue in the shared app group), and the store's writes are safe within one process only: two
+processes over one store would lose each other's writes, whatever the sweep does. (e) **An account that lives at a server's new address** while its address
+record lies under the old one, forgotten at the old address, keeps everything only where a session or a
+held copy is kept for it at the new address; where neither is, its records go, and its next sign-in
+there is a first sight of that account at a server whose own identity stays pinned. (f) **A deletion
+stopped part-way** is finished at the next start (since 2026-11-21): the deletion writes a mark of a
+deletion begun before its first removal, and the start finishes what it names by the deletion's own
+steps, the server's pin and records included, so the server is a first sight when it is met again. A
+take at that server of the deleted account, or of any account under the address it was known by
+there, removes the mark before the take writes anything of its own, and nothing is removed for a mark
+that ended, so the finish never takes what such a take uses, also after a sign-out or a lost session
+record; a take there of another account under another address leaves the mark and keeps that
+account's records and the server's pin. A stop exactly at the mark's own write leaves the device as
+before the deletion, while the server has deleted the account: the device keeps a session its server
+no longer knows, and the server refuses its next use. A record of deletions begun with an entry that
+does not read is written again at the start from the entries that read (one that does not read at all,
+as empty), with a diagnostic line, and nothing is removed for a dropped entry; until that start such a
+record holds the sweep back. **Not kept yet (2026-11-21; decided that day, before the first
+public release):** while the secure
+store cannot read its session record at a start (the phone, and the iPhone's seam, then hand the shared
+code no session), the
+offer to forget an earlier account is not to be made and the forgetting is to refuse, as where that
+record names the account; until then a server that serves another account under the address in that
+state can lead the person, by their own two confirmations, into removing the kept account's address
+record, identity record and copy. A damaged line of the held list, damaged forgetting marks and a mark
+of a deletion of unknown outcome that names no account are to be dropped by the engine's own readers,
+so that their next rewrite clears them and one such record does not hold every later sweep back for
+good; an address record or a session record that cannot be read still holds it back, since either
+could name an account the device must keep. Where something ends, the tie is also to count an account
+that the sweep's rule calls known, read before anything is removed (today, in a state that no known
+sequence of events reaches, a deletion at one server removes the records of an account whose copy is
+still held at another). Decided on 2026-11-21 as well, with no date set: each app is to pass the
+engine's diagnostic log on to its own.
 
 **A13 (security review 2026-10, third API review: release scripts and the remaining LOWs).** (a) **The signing
 workstation pins the release commit and checks it against its own record** (c03; A13 review RF1, RF7): `signandvari
@@ -432,146 +1057,20 @@ the human), so it is not a small, contained server change; no reachable exposure
 
 **R18 (server-supplied ids and the device-local trust records — security review 2026-10, plugin scan F1/F2;
 branch A10).** Every id a server supplies (vaultId, userId, itemId, deviceId, the user ids riding a transfer)
-is checked against the lowercase UUID grammar at the wire boundary on all three engines, in the API client,
+is checked against the lowercase UUID grammar at the wire boundary on all three engines, in the API client
+(the user ids riding a log entry are checked by the strict statement parse, spec 01 §5.1),
 before it can reach account state, a cache row or a device-local record; a row with a malformed id is
 dropped and surfaced as a `bad-id` anomaly, and a session or identity row with one is refused outright.
-The device-local trust records themselves (the §8.2 vouches, the held-key memory, member-received
-provenance, declined invitations, issued tombstones, confirmed pins, consumed removal nonces) are JSON
-records with a strict decode on core and web, and the extension's records are re-checked on read; a
-pre-A10 line record is migrated once, keeping only lines whose ids are UUIDs. Since A15 the extension's
+The device-local trust records themselves (pinned cards, per-vault verified log state, confirmed
+pins, the recovery mirror, link records) are JSON records with a strict decode on core and web, and the
+extension's records are re-checked on read. Pre-cut-over records are never read: the first launch of a
+new-format build deletes them (spec 07 §3). Since A15 the extension's
 records live in the extension origin's IndexedDB, not storage.local: a strict decode checks shape, and
 storage.local, which content scripts can write, could not give the integrity the re-check assumed. Before this a
 server-chosen vault id carrying a line break could, through one human Accept on a decoy, write forged
 vouch and held-key lines for OTHER vaults (trust laundering through the record delimiter). Residual: the
 grammar is a shape check, not authentication — a well-formed id the server made up is still just a row,
-and every rule above (R14–R17) is what decides whether its key is ever adopted.
-
-**R15 (signed grants and the compatibility window — security review 2026-10, root cause A §1.4–§1.7, §8.2;
-branch A6).** Residuals accepted: (a) **legacy keys** (spec 01 §6): while the window is open a client still
-READS a vault whose key only a v1 seal vouches for (anyone holding the member's public key, the server
-included, can mint one), but writes nothing under it, and self-wraps it only with pre-upgrade evidence on
-that device (the trust on first use the household already had) or after the human accepts it on the review
-card. "Accept" is trust on first use and the copy says so; a member who accepts a server-forged vault reads
-what the server put there, and anything they then save into it is readable by the server. (b) **pin currency is per device**:
-a pin skips verification only on a device where a human made or re-confirmed it; a synced pin does not, so a
-replayed older blob (in any order) cannot bring back a removed pin as trusted. The cost is one re-verification
-per contact per device. A tombstone in the merged state removes the pin everywhere; a device that never saw the
-tombstone (offline across the removal, and served only older blobs since) still trusts the pin IT confirmed:
-the stale-but-genuine residual. On a host whose client state is in memory only (no durable device state),
-confirmations are lost at every restart and pins are never current there until re-confirmed in that session:
-this fails closed (grants go pending, the add-member check runs) and is accepted. A tombstone written on
-ANOTHER device does not clear this device's own confirmation record, so if the SAME key is later re-pinned (on
-any device) it is current here again without a new ceremony here: accepted, because a human on this device
-verified exactly that key. (c) **pending invitations** name a sender the server reports (display name
-and key); the human compares codes before anything is adopted, and the vault's name stays hidden until then.
-(d) **the extension** (owner decision Q8) never opens a grant: a member's new shared vault appears in the
-extension only after a full client verified the grant and posted the self-wrap. (e) **the owner's re-issue**
-— as built in A6 it trusted the server for more than "whom to list": see (h), which corrects it. (f) **grant authority is not bound to the vault**: a verified grant proves which PINNED contact signed
-it, not that the signer owns or may share the vault; any pinned household member who holds a vault's key can
-grant it. A verified grant naming a different key than a held one is refused as `vk_mismatch` (never a silent
-switch); binding grants to the vault's owner is an open design follow-up. (g) **per-vault key memory —
-CLOSED on any device that held the vault (branch A7)**: every device now records SHA-256 of the first key it
-adopted for each vault, by any rule, beside the §8.2 vouches (spec 01 §6, "Held-key memory"), and a later
-different key for that vault meets the vouch gate (never adopted, promoted, self-wrapped, owner-wrapped or
-signed onward; the caller's own UVK wrap is still used but flagged). No step of root cause A re-keys a vault,
-so no legitimate path changes a held key. The memory (and the §8.2 vouch) survives EVERY server-driven drop
-— any removal verdict, the resync drop, holding expiry — so a server cannot reset it and re-add the vault
-under a key it chose (A7 review MEDIUM-1); only the user's own leave or delete on that device clears it,
-which is the recovery path for a `vk_mismatch` ("leave it and ask its owner to add you again"). Only
-trusted sources record a tag (own UVK wrap, verified v2 grant, a vouched legacy key, a vault the device
-created; never an unvouched read-only v1 seal, A7 review LOW-1), so a server-forged seal served first does
-not block the genuine key. Residuals: a **fresh device** (or one whose client state was wiped) has no
-memory and adopts whatever verified key it is served first, which is the R15(f) authority question again;
-the first TRUSTED key a device adopted is trusted on first use; and a future VK rotation (P6) must move the
-tag in the same step that installs the new key. (h) **re-issue authority — CLOSED (branch A6b; the HIGH from
-the security review 2026-10 API pass)**: A6 re-issued legacy grants automatically on every sync, to every
-member the SERVER listed as legacy on every vault the SERVER labelled `owner`, gated only by "the member is
-pinned here". A pin proves who a member is, not that this owner ever gave them this vault, so a server
-colluding with one verified member could list that member on any vault the owner's device held and get the
-key signed and sealed to them with no human action. Now (spec 01 §6 "Grant authority"): nothing is re-issued
-by sync; a key is signed or sealed to a user only after a human on the device confirmed that (vault, user)
-pair, or for a pair in the UVK-authenticated issued-grants record for the same identity key; and add member,
-re-issue and transfer offer require the account's own owned-vaults record, never the role label. Residuals
-accepted: a vault created before A6b needs one "You own <vault>?" confirmation (password reauth) on first
-owner action, and a human who confirms ownership of, or a re-share to, something they never shared is not
-stopped (the copy says the list comes from the server); a pre-A6b member must be confirmed once per vault;
-and a forged transfer completion (a co-member holding the key can mint the MAC, R16(a)) can only REMOVE the
-ownership record, which costs a re-confirmation, never a grant. Review residuals (A6b review): (i) **a member
-claiming a vault** it holds through its self-wrap is no longer one confirm away: a vault this device first
-adopted as a member needs the explicit "This vault's owner transferred it to me" on top of the password, and
-the dialog shows the server-reported owner, transfer and co-holders; a member on a FRESH device whose served
-row the server has stripped to an owner shape has no such provenance and gets only the single confirm (still
-a password reauth, an assertion worded "Only confirm if you created this vault, or its owner transferred it to
-you", and the server-reported co-holders on screen). **Narrowed in branch A1b (A6b review LOW-R):** the
-"received as a member" provenance now also rides the account state (`memberReceived`, spec 03 §3: UVK-sealed,
-union-merged, add-only), and `receivedAsMember` is the device record OR the account-state record, so a fresh
-device of a member still needs the transfer acknowledgement when ANY device of the account ever recorded member
-provenance. What remains: a member none of whose devices ever saw a member-shaped row (every row it was ever
-served was already stripped to an owner shape), and a fresh device the server withholds or rolls back the
-account state from (R14(b): it can remove the record from what that device sees, never add one). (ii) **a fresh device adopting an older authentic
-account-state blob** (no local copy, no high-water mark yet) can bring back an issued-grant or ownership entry
-that a later tombstone removed, until it merges with a newer copy; the entry is genuine (this account wrote
-it) and a resurrected issued-grant entry only renews a grant this owner once signed to that same key. The
-optional "prompt-only on a device that never wrote account state" hardening was not built: a device that has
-written once may still hold the resurrected entry from its first merge, so it would not close the window.
-(iii) **transfer accept records ownership** for an offer a colluding vault-key holder could have minted (the
-offer is a MAC, R16(a)); it still needs the target's explicit "Become the owner", and the vault key it then
-owns is one the target already held, so it adds a sharing authority, not a key. (iv) the reauth is refused
-on a session whose unlock salt is unknown or stale (after an in-session password change or a KDF upgrade)
-until the next unlock: fail closed. Since branch A1b the refusal says how to recover, "Lock and unlock andvari,
-then try again", byte-identical on every client, instead of "That master password isn't right". (v) **Rule (b)
-removed (branch A9, the second API-review pass, MEDIUM; owner-review item recorded in the private plan):** the
-prompt-free renewal of a pair in the issued-grants record trusted the record's presence on the signing device,
-but the record is relayed by the server, which can withhold the removal tombstone from a device that never saw
-it (its high-water mark sits below the tombstone, so no rollback is detectable) and then list the removed
-member as legacy; `recordIssued` after the renewal would then outrank the owner's tombstone on every device.
-Every signing of a VK to a member is now the owner's per-row tap; the record only annotates the row ("you
-shared this vault with them on …"), and the removing device keeps its own durable tombstone so it never shows
-the removed pair as previously shared whatever account state it is later served. The cost is one tap per
-member per key-format migration. What remains: a device that never saw the tombstone still SHOWS the hint for
-a removed member (display only; no authority follows from it), and a human who re-shares with someone they
-removed is not stopped (the copy says the list comes from the server). (vi) **The member-granted bit is
-provenance, not shape (A9, LOW):** it is set only when the key was ADOPTED through a v1 seal or a verified v2
-grant, when a VERIFIED v2 grant from a pinned sender sits beside the account's own self-wrap, or when the row
-is not an owner row and no UVK wrap of the account's own opened — never from a seal or grant field the server
-attached beside the account's own UVK wrap (ignored, as A1 requires) or from a relabelled role, which would
-otherwise become add-only durable evidence that makes the genuine creator answer a false "its owner
-transferred it to me" forever. What remains: a member whose devices never verified the owner (an unpinned
-sender beside a self-wrap) records no provenance on that device and relies on the account state's
-`memberReceived`, written by the device that adopted the key through the grant. (vii) **A pinned co-member who holds
-the VK can mark the creator's own vault "received as a member" (A9 review LOW-4, documented only):** any pinned
-household member holding a vault's key can sign a v2 grant for it (R15(f)), and a VERIFIED grant from a pinned sender
-beside the account's own self-wrap is authenticated member provenance (vi), so a colluding co-member can have the
-genuine creator asked for the "This vault's owner transferred it to me" acknowledgement once on the next "You own
-<vault>?". A nuisance, not an authority: the acknowledgement is the creator's own statement, nothing is signed or
-sealed by it, and it is asked once per device. Closing it is the R15(f) owner-binding follow-up.
-
-**R16 (removal proofs v2 — security review 2026-10, root cause A §6, §10; branch A7).** Residuals accepted:
-(a) **lifecycle MACs are forgeable by any VK holder colluding with the server** (owner decision Q11 keeps
-delete, restore, transfer, remove and leave proofs as MACs, not signatures): a co-member who holds the
-vault key can mint a valid removal or leave proof for anyone, and the server can deliver it. Server-side
-owner authorisation stays the real gate; signing them is revisited with VK rotation. (b) **a device
-offline across the whole remove → re-add → replay cycle**, when no other device of that user consumed
-the nonce, never saw the vault go not-live, so its `liveSince` predates the proof and the replayed
-proof verifies: the existing stale-but-genuine residual. It changes only the banner's wording, never the
-data handling (holding area, 30 days, either way). (c) **another of the user's devices consumed it first**
-(A7 review MEDIUM-2, a refinement of design §6.3 step 5): a nonce found only in the account-state set, with
-an `issuedAt` inside THIS device's window, is shown calmly as "already recorded on another of your devices"
-rather than as a replay (only this device's own consumed set raises `replay-denied`). The window is checked
-first, so a proof replayed after a re-add this device saw still fails as an anomaly; a replay this device
-did not see the re-add for is the (b) residual, now worded calmly when another device recorded the nonce.
-(d) **older clients in the window — OWNER REVIEW ITEM for the A8 checkpoint**: removals and leaves are sent
-v2-ONLY, with no v1 dual-send (a deviation from design §8.3, decided because a replayable v1 proof with no
-time window would be a downgrade). An N−1 member's client cannot read a v2 proof and shows the anomaly
-warning for every genuine removal or leave during the window; an N client shows "Didn't do this? Tell your
-admin" for a leave an N−1 device made (it carried no proof). Both resolve as the household upgrades. An N
-client that accepts a v1 proof in-window shows it qualified, "(sent by an older app version)" (A7 review
-LOW-3): MAC-verified and single-use, but with no time window. (e) The server's `removal_nonces` refusal is hygiene for an
-honest server only; a hostile server ignores it, which is why the clients' consumed sets decide. (f) **a
-device's first `liveSince` is set at upgrade** (A7 review LOW-4): a device that held a vault before running
-a release with removal proofs v2 stamps `liveSince` at its first run of that release, so a genuine v2 removal
-issued while that device was offline before its upgrade (more than 10 minutes before the upgrade) shows the
-anomaly warning instead of the attributed notice. Wording only, fail-closed.
+and the signed log and the adoption rules (spec 02 §10.4) decide whether its key is ever adopted.
 
 **R17 (item home — security review 2026-10, root cause A §5; branch A1b; spec 02 §7.2).** Closes review A-4.
 Residuals accepted: (a) **the home is device-local**, so the server chooses the FIRST home of an itemId on a
@@ -601,13 +1100,15 @@ which is the item's recorded home from that point on.
 
 **R19 (account deletion — spec 03 §13, design 2026-11-10-account-deletion).** What a deletion guarantees: ONE
 transaction removes the account, every session and device, every vault only it held (ciphertext, history, attachments
-and — after the commit — their blob files, every key wrap on them), its memberships elsewhere (as a leave), its escrow,
-retained escrow and recovery piece, its usage ledger, account state and personal wrap, and the invites that name its
-address or that it minted unused; its audit trail is cut down to its security events under a fresh random pseudonym that
+and — after the commit — their blob files, every key wrap on them), its memberships elsewhere (each with a `leave` the
+account signed itself, appended to that vault's log), its escrow and recovery kit row, its usage ledger, account state,
+personal wrap and genesis, its connections, links, device links and recovery requests; its audit trail is cut down to its security events under a fresh random pseudonym that
 nothing on the server maps back, and those go 90 days after the deletion; the address can then register again only as a
-NEW account. It is refused while the account owns a vault other accounts still use or is the last admin with other
-accounts on the instance, so no member is left with an ownerless vault and no instance with stranded accounts. It is
-refused on the break-glass twin origin. Residuals accepted:
+NEW account. It is refused while the account owns a vault other accounts still use, or is the instance's operator (a
+signed card handover comes first), so no member is left with an ownerless vault and no instance without an operator. The
+operator may delete an account disabled for at least 30 days (W2, confirmed by the owner 2026-11-15, spec 03 §7.1): the same transaction
+with **no leaves** (the person is not there to sign), so the account stays in its vaults' logs with no grant until an
+owner signs "Remove from the list" (spec 02 §10.7); it is emailed to the captured address. Residuals accepted:
 (a) **Not cryptographic erasure** (R7, extended to accounts): anyone who held a vault key while granted keeps what they
 synced; the operator's backups keep every row until they rotate out (T7), and a backup taken before the deletion links the
 pseudonymised rows back to the account by audit id; a hostile server can simply not delete (T1 — it never held more than
@@ -616,40 +1117,80 @@ ciphertext and the §5 metadata).
 device id (never an email); those copies follow the operator's retention. The retained rows keep each event's IP for the
 90 days — part of the security record the owner chose to keep; in the database, no row kept past those 90 days records the
 IP of one of the account's requests or names one of its device ids (the deletion replaces each device id with a fresh one,
-and the transfer-cancel row and any row a racing request writes afterwards carry neither).
+and any row a racing request writes afterwards carries neither). The leaves it signed stay in other vaults' logs under
+its old userId and key, as the membership history the server already held (R25). Its address stays in the mail outbox
+until the deletion email is sent, at most 24 hours (R31).
 (c) **Other devices**: an offline device of the deleted account keeps its offline copy until it next reaches the server
-(T3: the server then answers 401 and the client wipes). Every device other than the deleting one keeps its spec 01 §5
+(T3: the server then answers 401, which ends the session there; the copy stays until the person removes it, except on
+the iPhone app, which deletes it). Every device other than the deleting one keeps its spec 01 §5
 self-identity record and refuses a re-registered account at the same address on that origin until the record is removed
-by hand — the backstop cannot tell a new account from a swapped one, so this stays. On the deleting device a native app
-forgets the account's whole origin (spec 03 §13, the fresh-install rule), so another account that had unlocked there on
-that device loses its record on it and is pinned afresh at its next unlock there: for that account, on that one device,
-the backstop restarts from trust-on-first-use, exactly as after the app is reinstalled. Co-members keep whatever members list
+— the backstop cannot tell a new account from a swapped one, so this stays. The record is removed only by the person, on
+that device (decided on 2026-11-17, spec 01 §7, design §4.4): the refusal says both possibilities (the account was
+deleted and made again; or the server is not giving this device the account it knows) and offers "Forget the earlier
+account on this device" behind a second confirmation, which says that if the account was not made again, forgetting means
+trusting whatever account the server serves under that address from then on. What remains: a person who is deceived
+into forgetting, while the server swapped the account, trusts the swapped account on that device; the server's pin and
+every other account stay, and nothing a server or an operator sends can set the forgetting off. A flow under way
+for the address blocks it, it removes nothing of an account the device still keeps or holds as its server's operator,
+and afterwards nothing of the forgotten account is left on the device (rules of 2026-11-17, design §4.4); what a
+server gains from a forgetting it talked a person into is in T1. The offer is for another account
+only, and the forgetting keeps the record of the earlier account's identity key (rules of
+2026-11-19, T1). The shared code has the forgetting with these guards since 2026-11-18, the app
+interface hands it to the screens since 2026-11-19, both apps draw it since 2026-11-19, and the web
+client has its own since 2026-11-19; the narrowed offer and the kept key record are not built in the
+shared code yet (2026-11-19). **After a deletion that this device ran and its server confirmed,
+nothing stays** (the owner's answer of 2026-11-18), the record of the key neither: a server that
+confirmed a deletion it did not make can later serve that account under another key to the device
+that deleted it. A deletion that a stop cut part-way is finished at the next start from a mark the
+device writes only after the server's confirmation of a deletion the person asked for with their
+password, before its first removal (since 2026-11-21). A take at that server of the deleted account,
+or of any account under the address it was known by there, removes the mark before the take writes
+anything of its own, so the finish never removes what that take uses (its address record, its
+identity record, what is kept by its id, the server's pin), also after it was signed out; a take
+there of another account under another address leaves the mark and keeps its own records and the
+server's pin, and a take of the same account at another server keeps what that server holds and the
+identity record. **Forgetting the account after a deletion whose outcome is not known**
+(rules of 2026-11-19, spec 03 §13): the device asks its server once to end that session; where the
+request fails, the session stays listed at the server until it expires, held by no device, and the
+person ends it from another device; the account may still exist, so what the device knows of the
+server and of the account's vaults stays, and so do its records of which account the address is
+and of that account's identity key (a server can produce the unknown outcome by ending the session
+during the request). The shared code keeps the request once and the vaults' records since
+2026-11-19, and the web client keeps the address's and the key's records; the shared code's keeping
+of those two records is not shown by a test yet (2026-11-19). Co-members keep whatever members list
 their clients hold in memory, and their contact pins of the old identity key, sealed in their own account state where the
 server cannot edit them: inert — the old userId can never be granted again (404), nor name a new account (its SHA-256 and
 the pseudonym's are kept in `retired_ids`, and register refuses both as `user_id_taken`, so neither a pin of the old id nor
-the 90-day audit purge can ever land on a new account), and spec 01 §6's add-member rule refuses to add a new account at a
-pinned address until the owner verifies the person again. The digests are a residual of their own, accepted: anyone who
+the 90-day audit purge can ever land on a new account), and a new account at the same address has a new key, so a
+co-member's pin of the old key never matches it until the two connect again (R34). The digests are a residual of their own, accepted: anyone who
 already holds one of those ids (an old backup, a co-member's device) can ask the server whether it was retired.
 (d) **A stolen session** deletes the account only with the master password AND, where enrolled, the current TOTP code. The
-code is checked before the password, so without the factor the route confirms nothing about a guessed password; with TOTP
+password proof is checked before the code (rule of 2026-11-16, spec 03 §13), so a wrong or missing proof never tells
+whether a guessed code was right, and the proof draws on its device's own back-off; with TOTP
 off, a session plus the password can delete — as it can already change the password and lock the member out — bounded by
 the hourly `account_delete` bucket (every reauth route a session holder can reach is more guesses per window, which is why
 this one is per hour, not per minute).
 (e) **Irreversible, no grace window**: a grace period would have to keep the credentials and both recovery paths alive,
 the opposite of the deletion. The client requires the typed address, the password and the code, and offers a backup first.
-(f) **The last-admin rule is resolved only by a new admin account** (admin is set at invite time; there is no promote
-route, and a member's address cannot be invited again): an availability cost for a departing last admin, accepted until a
-promote route is designed.
+(f) **An operator who wants to delete their operator account** hands the role over first with a signed card (spec 03
+§17.2); an instance whose operator is lost recovers with `reset-instance-identity` (R30).
+(g) **An account deleted and made again never comes back under its old id** on an honest server that
+keeps its record of retired ids: the address may register again at once, the deleted account's id
+and its audit pseudonym are refused for good under any address, and its tokens and ids are answered
+as ones that never existed (spec 03 §13). The clients' forgetting of an earlier account stands on
+this. Two limits: a server restored from before the deletion brings the account itself back, and a
+server that is not honest can serve anything under any id, which the device's record of the
+account's identity key is there to catch (T1).
 
 **A14 (security review 2026-10, whole-repository scan of 0.28.1).** (a) **The escrow ceremony keeps the seed out of
-docker's logs** (F1): `bringup.sh` and every documented `docker run … recovery-cli` pass `--log-driver none` before the
+docker's logs** (F1): `bringup.sh` (since replaced by `andvari setup`, design 2026-11-15 §9.5) and every documented `docker run … recovery-cli` pass `--log-driver none` before the
 image, because docker copies an attached container's stdout to its log driver (json-file on disk, which `--rm` only
 unlinks; the journal; a log shipper). What stays: the sheet in the terminal's scrollback (the script says to clear it)
 and the air-gapped keygen as the by-the-book ceremony. A dated design record that sketched the ceremony as `docker
 compose run` is left as written; nothing ships that form. The deploy test scans `deploy/`, `docs/`, the `Dockerfile`,
 `.github/` and every other repo-root file for the command (the Dockerfile's own header example had missed the flag until
 the A14 review, W6). (b) **`/data` is owner-only** (F10): the entrypoint makes it 0700 after its chown, tightens
-existing database files to 0600 and starts the server under umask 077; `bringup.sh` creates `./data` 0700. A chmod that
+existing database files to 0600 and starts the server under umask 077; `bringup.sh`, while it shipped, created `./data` 0700. A chmod that
 fails (a read-only or root-squashed mount) warns and the server still starts, as root or not (A14 review Wd). The server
 is the only reader of the database; a host-side backup runs as root, and under rootless docker as real root or the
 subordinate uid the container's user maps to. Residual accepted: `users.totpSecret` is stored in plaintext in the
@@ -754,7 +1295,8 @@ privileged shell, `adb install -i`) can pass as Play while the real system Play 
 is not consulted; on a device where Play is a user app (sandboxed Play on GrapheneOS) every Play install takes the
 confirm; an app with no launcher activity stays invisible to andvari, so its fills always confirm and are never
 remembered (owner device check); the host app holds each confirm row's IntentSender and can fire it again, which only
-reopens the confirm; card datasets are not app-gated (wallet posture, unchanged).
+reopens the confirm; card datasets are not app-gated (wallet posture, unchanged). **Superseded 2026-11** for every app
+that is not a verified browser: see "Autofill (client-side, Android)", the 2026-11 review, (a) and (b).
 
 **A15 (security review 2026-10, the extension's storage, from the A14 review's Wa note).** Platform facts, which set
 the shape of the fix. Content scripts can read and write `chrome.storage.local` and receive its `onChanged` events. On
@@ -1005,6 +1547,41 @@ the report drops it), or an armed quick-unlock record (the PIN and the co-key ar
 store that refuses the replacement at a report leaves the old key in place (the worker deletes it where it can) until
 the next report, or a start where nothing opens under it.
 
+**A17 (2026-11: keys after a lock; spec 01 §8 "Keys in memory and the lock").** **The fault.** In the
+app engine a lock erases the account's keys in place, and work that outlived the lock went on using the arrays it
+had erased: an import whose batch was on its way, a save waiting behind a sync or an upload, a password change, a
+device-link approval and an account-state update could seal, wrap or sign under a key of zeros after the lock and send
+the result. What was sent read as sealed to the server and to every other device, and was under no key at all; one
+path read the lock as an unreadable account state and would have sealed an empty one under the zero UVK over the real
+one. No released version had it: the engine that had it is in no release, and the released clients erase no key at a
+lock. **What enforces the rule now:** (a) **the guard** (spec 01 §8 rules 1 to 3): every key of an opened account is
+lent to one block that cannot wait, and no copy of a key leaves the guard; an answer that is the key, a copy of it
+or its text is refused where the test machinery is on (the suites the tripwire watches, (c) below), a development check and not a rule of
+the running product: a shipped build hands back what the block answered and never compares it with the key, zeroes it
+or refuses it, because data can equal a key (any member of a shared vault knows its key, so its owner
+can name the vault with the key's text, and refusing that name would stop every other member's device); a lock erases
+under the guard, so a running use finishes on whole keys and none starts after; and work
+checks the guard after every wait before it seals, signs, derives or sends. (b) **The refusal of all-zero keys**
+(rule 4): the shared crypto path refuses a seal, open, wrap, signature, derivation, grant or MAC under an all-zero
+key before the provider is called, as a lock and never as a wrong key. (c) **The tripwire over the test suites:** in
+test runs only, a watcher on the crypto provider records every seal, open, signature, key pair, derivation and MAC
+under an all-zero key that reaches the provider, and every refusal of rule 4, including one a handler swallows; a test
+task fails at its end on any record not made by a reviewed list of tests that feed zeros on purpose. It watches core's
+JVM tests, the hostile-server harness, `andvari-cli`'s, the recovery tool's and the backup tool's tests, the server's
+tests, and the desktop's and the Android app's unit tests. A release carries only the seam it is found through, and no
+watcher. (d) **The source check** (`AccountKeyFenceTest`): the account's key fields are guarded types, a guarded array
+is read only inside its guard, every lend's body (wherever its first line starts) is read for an answer that is the
+key, a copy or its text and for an assignment, `add` or `put` of one, and no shipped source copies a key out of the
+guard (quick unlock's enrolment included: spec 01 §8 rule 7). Probes run each overtaken case against a server that
+holds the route until the lock lands (`EngineKeysAfterLockTest`), each wait bounded so that a hang fails. **What these
+do not stop:** a key handed to a helper that keeps the array, or wrapped in an object of the block's own making, passes
+both the refusal in tests and the source check (and a shipped build inspects no answer at all); it is caught only when
+it is used after an erase, where rule 4 refuses it (and a test run records it). A helper that keeps a *copy* is not
+caught at all: a copy is not zeroed by the erase, so neither rule 4 nor the tripwire sees its use after the lock. The
+tripwire sees only what the watched suites run; core's Android and iPhone tests are not watched. **The TypeScript clients** (the web client and the extension) erase no key at a lock,
+so they cannot seal under an erased one; the cost is that their keys stay in memory until the garbage collector frees
+them.
+
 ## Quick-unlock at-rest secret (A7, Android — spec 01 §8.1)
 
 Enabling quick unlock changes the at-rest story of exactly one asset: a
@@ -1055,6 +1632,130 @@ browser running is already adjacent to T4/T5. The A5 risk of forgetting the mast
 password behind a working PIN is bounded by the **min(browser session, 24 h)**
 periodic-full-password rule (spec 01 §8.4).
 
+## Desktop kept sign-in (T3 — the key store)
+
+With "keep me signed in" on, the desktop keeps the engine's session record in `secure-state.json`: the access and
+refresh tokens, the ids, and the account's served keys (ciphertext and public values; no key, UVK or password). The
+file is sealed with AES-256-GCM under a random 32-byte key of its own; the operating system's key store keeps that key,
+and the file carries only the store's handle for it. The seal binds the store, the handle, the account and the server,
+and this computer records which account and server it last sealed for, so a file made for another account or server
+does not open here. What the wrap protects is a copy of the file that leaves the computer without the key store's
+secret: a backup of the file, a disk image read elsewhere, another account on the same computer as far as the platform
+separates accounts. A copy taken together with the key store's own data (a whole-profile backup) is only as strong as
+that store's own protection. The wrap gives confidentiality at rest, not integrity: a program running as the same user
+can write a wrapped file of its own, and whoever can write the app's folder can also write its settings. The key is
+one per file, reused across writes, and the seal carries no counter, so on every platform an older copy of the file for
+the same account and server opens in place of the newer one: the wrap does not stop a roll-back.
+
+**Windows.** The store is Windows data protection (DPAPI) for the signed-in Windows user (`CryptProtectData` without
+the machine flag, no prompt). The key's DPAPI blob is the handle, inside the file itself. Any program running as the
+same Windows user can unprotect it. On a computer joined to a domain, whoever holds the domain's DPAPI backup key can
+unprotect it as well, so a domain administrator can. The entropy the app passes is a fixed public label, not a secret.
+There is no item to forget, so a sign-out removes the file but not the means to open a copy of it: an older copy (a
+backup, a shadow copy) still opens.
+
+**Linux.** The store is the desktop's secret service (GNOME Keyring, KWallet's service) through libsecret: the key is
+an item in the default collection, under the app's own schema, named by the handle. Any program on the user's session
+bus can read the item, and looking it up can raise the keyring's unlock prompt. A sign-out, "Forget this server", the
+account's deletion and unticking the switch remove the item with the file, so copies made before that no longer open;
+until then they do.
+
+**macOS, and any computer where the store is missing or refuses.** There is no key store on macOS. Nothing falls
+back silently: the session is held in memory for the run and the person is asked. Only when the person chooses "a
+file only your account can read" on that computer is the session written unwrapped: owner-only (`rw-------`) where the
+file system has POSIX permissions, and with the permissions of the user's folder elsewhere. Anyone who can read that
+file has the session. An unwrapped file is read only when the person chose it on this computer, or once as an earlier
+build's file (recorded, and wrapped at the first read that can); any other unwrapped file is neither read as a session
+nor deleted.
+
+## What a browser keeps when an account ends (web client and extension)
+
+Three kinds of record outlive the session in a browser, each for its own reason:
+- **Trust records** outlive a sign-out by design (design 2026-11-15 §4.4, "a pinned card record that outlives
+  sign-out and cache wipes"; spec 01 §5): the server's pin, the account's self-identity records, its account-state
+  high-water marks, in the extension its item homes and personal-wrap record, and this browser's device record. (The
+  web client writes no personal-wrap record, and keeps its item homes inside the offline copy, so they go with the
+  copy; with the copy off it keeps them in memory only.) They are what lets the
+  next sign-in tell the same server and the same account from a substituted one, so removing them at a sign-out
+  would hand the next sign-in to whatever the server then serves. **A server's word that an account is gone never
+  removes a pin**, nor any other trust record unless the person deleted the account from this browser: a refused refresh, a revocation and a `401` for a deleted account all
+  look alike to the client, and a server able to clear a pin by saying so could then re-pin the device to a chain of
+  its choosing.
+- **The copy and its queue** (the web client's offline copy; the extension's sealed session snapshot) belong to the
+  person: only the person's own acts delete them (T3).
+- **Conveniences**: settings and a remembered address.
+
+**Web client.**
+- **Lock:** with the offline copy on, everything stays, the session's token pair included. Without it, the lock ends
+  the tab's session at the server and drops the pair; the session record stays, without a pair, for the unlock card.
+- **Sign-out:** the session record, its pair and the offline copy go, and nothing else does. What stays is the trust
+  records (among them the pin, the self-identity records, the account-state high-water marks and sealed copy, the
+  escrow fingerprint, the recovery mirror and the device record), the account's other records under its user id, its
+  settings among them, and the browser's own settings.
+- **A kept token** (rules of 2026-11-19, spec 03 §2 and R41 above; kept since 2026-11-19): the token of a session
+  that ended with no try left is kept (`andvari.unconfirmedRefresh`, where the pair was: the tab's sessionStorage, or
+  localStorage with the offline copy on), per account, four accounts at most, for the next sign-in's name. It goes at
+  that account's own sign-out (in the other tabs of a per-tab browser best effort, once each has heard of it), at its
+  next sign-in here and at a forgetting; another account's sign-in or sign-out leaves it. Until then it may be a live
+  credential (R41).
+- **"Forget this server"** (offered where the pin is forked or damaged, or where a held session has no pin): the held
+  session's pair goes first, unsent,
+  then the offline copy, the session record and the pin. The other trust records stay.
+- **Deletion from this browser**, once the server confirmed it: nothing of the account stays. The session, every key
+  scoped to the account, the self-identity records and the offline copy go, and the device record forgets the
+  account's device id and address hash while keeping its secret. The pin stays (it belongs to the server, not the
+  account), and so do the browser's own settings and any other account's records.
+- **Refusal by the server:** with the offline copy on, the session ends and its pair goes; the copy, its queue, the
+  session record, the pin and the self-identity records stay. Without it, it is the sign-out above, with no request to
+  the server.
+- **What names the account in plain text:** the session record (`andvari.session`) holds the address and the user id
+  for as long as it exists: signed in, locked, and after a refusal with the offline copy on. The self-identity
+  record's key carries the normalised address. It stays through a sign-out and "Forget this server", and goes only
+  with a deletion from this browser. The device record keeps a hash of the address, not the address.
+- Tests: `web/src/journeys/j6-leftbehind.journey.test.ts` pins the whole set of stored keys (localStorage,
+  sessionStorage and IndexedDB) after each end above, against the real server, with the screens' own calls in their
+  order; its accounts hold no shared vault and no contact, so the vault logs and the contact book are not in its sets
+  (their removal at a deletion is pinned by `web/src/ui/session.account-wipe.test.ts`). Beside it:
+  `web/src/ui/session-end.test.ts` (refusal by the server, and that only the person's acts delete the copy),
+  `web/src/ui/session.account-wipe.test.ts` (deletion), `web/src/ui/fork-stops-traffic.test.ts` ("Forget this
+  server"), `web/src/ui/signout-revoke.test.ts` and `web/src/ui/tabsession.test.ts` (sign-out and lock).
+
+**Extension.** `extension/src/leftbehind.harness.test.ts` pins the whole set of stored keys after each end, through
+the real worker, so a record added later fails it until it is decided.
+- **The trust set**, kept by every end but "Forget this server": the server choice and its pin, the format marker,
+  this browser's device record for the account, the account's item homes and personal-wrap record, the remembered
+  address, the session-seal key, each tab's page-known facts (its own top origin and form kinds), and since
+  2026-11-19 the records of which account each address is (`selfIdentityByEmail:<address>`) and of each account's
+  identity key (`selfIdentityPub:<userId>`) (spec 01 §7). A mark that the extension now remembers a new account
+  (`accountRemembered:<address>`, after "Forget the earlier account on this device") stays until the next sign-in
+  under that address says it; "Remove data for this server" removes it.
+- **Lock:** the trust set; with quick unlock on, also the quick-unlock record, its co-key and the known-logins digest;
+  with it off, also the digest. The sealed snapshot goes.
+- **Sign-out:** the trust set only.
+- **A kept token** (rules of 2026-11-19, spec 03 §2; kept since 2026-11-19): the token of a session that ended as not
+  confirmed lives in the worker's memory only, so it is never in storage and goes at a restart of the worker.
+- **"Forget this server":** the remembered address, the format marker, the session-seal key and the tab facts.
+- **Deletion from this browser:** none; the extension cannot delete an account.
+- **Refusal by the server:** before the next lock, the trust set and the sealed snapshot, readable until that lock
+  (design 2026-11-15 §4.4); the quick-unlock record and the digest go at the refusal. After the lock, the trust set only.
+- **What names the account in plain text:** the device record's key carries the address, until "Forget this server";
+  the remembered address (A15 (c)) carries it in its value and stays even then.
+
+**The extension's test build** (rules of 2026-11-19; kept since 2026-11-19, for Chrome, Edge and
+Firefox, minified and with no source maps, and refused beside the builds for Safari, for debugging,
+for the interface tests and for card filling). One setting of the build makes it, and no other setting
+goes beside it; such a build says "andvari dev" and the commit it was built from in its manifest,
+popup and options page; the test server takes the live server's place as the server it starts at
+and as its only granted host, with no card of that server built in, so that server is taken
+through the Trust Gate like any other server of the person's own; it has no update address and no
+update channel, and a Firefox id of its own. The build removes its output and fails where a test
+build names the live server anywhere, or where any other build names the test server; every other
+build is byte for byte what it was without the setting; and the script that packages the extension
+for the stores refuses to run with that setting. In such a build the first screen's button for the
+public server is refused, and the test server is reached as "Your own server". So a test build
+cannot be mistaken for the released extension, cannot reach the live server, and cannot be sent
+to a store.
+
 ## Autofill (client-side, Android)
 
 The autofill service honors a fill request's web domain only from a browser it verifies by
@@ -1074,6 +1775,58 @@ rule. Digital Asset Links verification is the P6 loosening. The service never re
 values and never logs field content, item names, or full URIs; local fill diagnostics
 persist host-only frame domains + the calling package in app-private storage (last-event
 summary always; a ring buffer only while the 24 h debug toggle is armed, purged on disarm).
+
+**2026-11 review of the Android app.** One platform fact decides the rules below: whatever an authentication activity
+returns travels through the requesting app's own process. That app can read every value in the result without the
+person picking a row, and it can keep the row's IntentSender and send it again. A dataset the service answers
+directly stays with the system until the person picks it. "Verified browser" means a browser whose signing
+certificate is pinned, or one approved on this device under (d).
+
+(a) **No value rides an authentication result unless the requesting app is entitled to all of it, and nothing that
+names an item rides a result that passes through an app that is not a verified browser.** Such a result carries no
+value, no card's name, not how many there are, no login's name and never a user name: at most one generic row for
+logins and one for cards, in the same words whatever the vault holds. Its tap opens andvari's own chooser, where the
+items are listed and the choosing happens: a vetted app's own login (the app-fill gate's silent verdict, A14 (i))
+fills on the pick; any other login, and every card, shows its confirm in that window, which returns that one item.
+With one generic row there is one way in: the app holds no sender that raises a confirm for an item of its choosing. A
+verified browser's result keeps one row per item; a known browser that is not verified gets no row in a result. The
+service's direct response, which stays with the system until the person picks a row, still lists one row per item.
+The confirmation, trust, chooser and unlock windows are opaque and cover the screen: nothing of the requesting app
+shows around them. On Android 10 and 11, where other apps' overlays cannot be hidden, a touch that arrives while the
+window is obscured, wholly or partly, is dropped. Once the unlock's IntentSender has delivered a result, a later use of
+the same sender shows nothing and returns nothing; a prompt the person cancelled may be tried again.
+
+(b) **A payment card goes to an app only through a confirm that names the app, every time.** This replaces "card
+datasets are not app-gated" in A14 (i). In a verified browser the wallet posture stands: a card is not bound to an
+address, and one pick in the list fills it. In every other app a card row carries no values: its tap opens a confirm
+that names the app (label, package, installer and signer, as the app-fill confirm shows them) and the card (its name,
+brand and last four digits), with the app-fill confirm's defences (other apps' overlays hidden, touches through
+another window dropped, the button armed after a delay), and returns that one card. An app is never remembered for
+cards. Everywhere, card rows are offered only when the field in focus is itself a card field. Residual: the tap is the
+person's. A phishing checkout in a verified browser, or an app the person confirms, still receives the card.
+
+(c) **An app's login does not fill another site's page inside that app, and a page inside an app saves nothing.** In
+an app that is not a verified browser, an `androidapp://` login fills a field that reports a web domain directly only
+when that domain also matches one of the same login's own web addresses. The app's claim can only narrow what the
+package match gives, never widen it. On any other page the login is offered only through the app-fill confirm, which
+names the page, is shown every time and is never remembered. An HTML field that reports no web domain is a page of
+unknown address: it is never filled directly and never matched to the app's own login, through a confirm or
+otherwise. When the captured fields belong to a web page (a field carries a web domain, or is an HTML field), andvari
+offers no save: nothing is queued and nothing is replaced. Residual: the page confirm's tap is the person's, and a page
+the person confirms receives the login; a login that holds only the app's address meets that confirm every time on a
+sign-in screen the app draws as a web page, and a login typed there is not saved.
+
+(d) **Trusting a browser on the device** shows the package, the installer and the signer, with the same three
+defences as the app-fill confirm. It is refused for an id whose certificate is pinned: a mismatch there is a warning
+and no fill. A browser is trusted by its current signer (the last certificate of its signing history, or every signer
+of an app signed by several at once), for a pin and an approval alike. The approval is stored with the signer it was
+given to, and it does not cover another signer that only appears in the signing history: after a browser's key
+rotation the person is asked again, with the changed-signer warning, and an APK signed with the retired key alone is
+not trusted. Settings lists trusted browsers and remembered apps, each with a revoke.
+
+(e) **A plain-http frame** matches only an address saved as `http`, as the page rule in core does. Residual: a frame
+for which the browser reports no scheme is matched as before. Browsers that run in the platform's compatibility mode
+report one domain for the whole page, so a third-party frame on a sign-in page is filled with the page's login.
 
 ## Non-goals
 Nation-state adversaries; side-channel resistance beyond libsodium's own; protection

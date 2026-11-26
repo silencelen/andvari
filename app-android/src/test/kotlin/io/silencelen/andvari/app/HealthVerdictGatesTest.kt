@@ -31,12 +31,15 @@ class HealthVerdictGatesTest {
         assertTrue(recoverSecretIdleExpired(onRecoverScreen = true, recoverVerified = true, idleSeconds = RECOVER_IDLE_TIMEOUT_S))
     }
 
-    /** Web is the reference: the same 300 s and the same sentence, byte for byte. */
+    /**
+     * Web's old recovery screen (`web/src/ui/Recover.tsx`), once the reference for this cap, was deleted with the old
+     * recovery flow, so nothing outside Android is pinned here any more. What remains to pin is Android's own: the
+     * new path drops a verified recovery after the same 300 s the old wizard used.
+     */
     @Test
-    fun theCapAndTheNoticeMatchWebsRecoverScreen() {
-        val web = repoFile("web/src/ui/Recover.tsx").readText()
-        assertTrue(web.contains("const REVEAL_TIMEOUT_S = ${RECOVER_IDLE_TIMEOUT_S};"), "web's REVEAL_TIMEOUT_S moved — keep the natives in step")
-        assertTrue(web.contains("\"$RECOVER_TIMEOUT_NOTICE\""), "web's REVEAL_TIMEOUT_NOTICE differs from the Android notice")
+    fun theNewPathKeepsTheOldWizardsCap() {
+        assertEquals(300L, RECOVER_IDLE_TIMEOUT_S)
+        assertEquals(RECOVER_IDLE_TIMEOUT_S * 1000, io.silencelen.andvari.app.trust.TrustModel.RECOVERY_IDLE_MS)
     }
 
     // ---- H26 ----

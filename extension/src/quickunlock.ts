@@ -204,6 +204,9 @@ export interface QuStore {
   read(): Promise<QuRecord | null>;
   write(rec: QuRecord): Promise<void>;
   remove(): Promise<void>;
+  /** How many times the record's slot has been removed so far (any remove, by anyone). An enrolment
+   *  compares it across its slow part, so a switch-off that lands in between is seen. Absent: not tracked. */
+  removals?(): number;
 }
 
 /** The non-extractable AES-GCM co-key in IndexedDB (breaker A1). `generate` mints a FRESH key
@@ -251,19 +254,21 @@ export interface EnrollArgs {
   /** COPIED from the live session's surviving full-password stamp — never `now()` (breaker A4). */
   lastFullUnlockAt: number;
   autoLockSeconds: number;
-  /** Whether the session this enrolment was asked under is still the one in front (background: the same session
-   *  object). Asked before anything is wiped and again just before the record is written: an enrolment takes seconds
-   *  (the bench and the PIN derivation, or the biometric prompt for as long as the person leaves it up), and a lock, a
-   *  sign-out, a server switch or a new browser session in that time must not be followed by a record sealing the
-   *  dropped session's UVK under its account. */
+  /** Whether the session this enrolment was asked under is still the one in front (background: the same session object,
+   *  not ended by the server). Asked before anything is wiped and again just before the record is written: an enrolment
+   *  takes seconds (the bench and the PIN derivation, or the biometric prompt for as long as the person leaves it up),
+   *  and a lock, a sign-out, a server switch or a new browser session in that time must not be followed by a record
+   *  sealing the dropped session's UVK under its account. */
   stillCurrent: () => boolean;
 }
-/** `ended`: the session it was asked under ended meanwhile (stillCurrent); nothing was written. */
-export type EnrollResult = { ok: true } | { ok: false; code: "weak_pin"; reason: PinWeakReason } | { ok: false; code: "ended" };
+/** `ended`: the session it was asked under ended meanwhile (stillCurrent); nothing was written. `switched_off`: quick
+ *  unlock was switched off (or its record otherwise removed) after this enrolment made its co-key; nothing was written,
+ *  and the co-key is deleted. */
+export type EnrollResult = { ok: true } | { ok: false; code: "weak_pin"; reason: PinWeakReason } | { ok: false; code: "ended" | "switched_off" };
 /** enrollBio outcome. `bio_unsupported` = no platform authenticator / no PRF (prfEnabled false or a
  *  non-32-byte secret); `bio_cancelled` = the ceremony threw (user cancel / timeout / no gesture). In
  *  BOTH failure cases NOTHING is wiped (amendment 3 — the ceremony runs before any wipe). `ended`: as for enroll. */
-export type EnrollBioResult = { ok: true } | { ok: false; code: "bio_unsupported" | "bio_cancelled" | "ended" };
+export type EnrollBioResult = { ok: true } | { ok: false; code: "bio_unsupported" | "bio_cancelled" | "ended" | "switched_off" };
 
 /** doLock armed-branch verdict. `not-enrolled` → the caller stays byte-identical to today's full
  *  erase; `declined` (ineligible record OR a read that threw — fail-closed) → full erase + wipe. */
@@ -272,13 +277,13 @@ export type ArmResult = "armed" | "not-enrolled" | "declined";
 export type BeginRedeemOk = { ok: true; uvk: Uint8Array; userId: string; email: string; tokens: { access: string; refresh: string | null }; blob: QuBlob; autoLockSeconds: number };
 export type BeginRedeem =
   | BeginRedeemOk
-  | { ok: false; code: "not_armed" | "expired" | "exhausted" | "corrupt" }
+  | { ok: false; code: "not_armed" | "expired" | "exhausted" | "corrupt" | "aborted" }
   | { ok: false; code: "wrong_pin"; attemptsRemaining: number };
 /** Biometric redeem outcome — no `wrong_pin`/`exhausted` (no attempt budget); adds `bio_cancelled`
  *  (the ceremony threw, record kept). Distinct from BeginRedeem so the PIN mapper never sees bio codes. */
 export type BeginRedeemBio =
   | BeginRedeemOk
-  | { ok: false; code: "not_armed" | "expired" | "corrupt" | "bio_cancelled" };
+  | { ok: false; code: "not_armed" | "expired" | "corrupt" | "bio_cancelled" | "aborted" };
 
 export interface QuStatus {
   enrolled: boolean;
@@ -322,10 +327,12 @@ export class QuickUnlock {
 
   /** Account switch (breaker A6): a full unlock as a DIFFERENT user strands the prior opener — wipe
    *  it. The AAD already blocks cross-account crypto use; this is the explicit erase story. */
-  async reconcileUser(userId: string): Promise<void> {
+  async reconcileUser(userId: string, stillCurrent: () => boolean = () => true): Promise<void> {
     try {
       const rec = await this.deps.store.read();
-      if (rec && rec.userId !== userId) await this.wipe();
+      // [stillCurrent] — the sign-in that asks is still the one in front, at the same server. The read is a
+      // wait, and a server switch in it would point the wipe at the new server's record.
+      if (rec && rec.userId !== userId && stillCurrent()) await this.wipe();
     } catch {
       /* a read that throws — a fresh full unlock re-enrolls from scratch anyway */
     }
@@ -339,18 +346,22 @@ export class QuickUnlock {
    *  session, and the stash still held the previous one's live pair. Kept, that pair sat in storage for
    *  the whole unlocked session, beside the one in the snapshot, against this record's own rule ("null
    *  while unlocked-armed"); the next lock stashes the pair in use then. */
-  async onFullUnlock(userId: string, at: number): Promise<void> {
-    await this.reconcileUser(userId);
+  async onFullUnlock(userId: string, at: number, stillCurrent: () => boolean = () => true): Promise<boolean> {
+    // Resolves false when the record could not be read or written (the blob keeps its prior stamp and
+    // counter, fail-safe), so the sign-in can say quick unlock was not updated; true otherwise. [stillCurrent]: as for
+    // reconcileUser; a sign-in left behind meanwhile (a lock armed the record, a switch) writes nothing.
+    await this.reconcileUser(userId, stillCurrent);
     try {
       const rec = await this.deps.store.read();
-      if (rec && rec.userId === userId) {
+      if (rec && rec.userId === userId && stillCurrent()) {
         rec.blob.lastFullUnlockAt = at;
         rec.attemptsRemaining = MAX_PIN_ATTEMPTS;
         rec.lockedTokens = null;
         await this.deps.store.write(rec);
       }
+      return true;
     } catch {
-      /* a read/write that throws — the blob simply keeps its prior stamp/counter (fail-safe) */
+      return false;
     }
   }
 
@@ -367,13 +378,13 @@ export class QuickUnlock {
   }
 
   /** Enroll (breaker A1/A2/A4/A8). Caller has already gated: session unlocked, uvk in memory
-   *  (breaker B1), mustChangePassword===false (§8.1-A5). The slow part (the bench and the PIN derivation) runs first;
-   *  then, only while the session is still the one in front, any prior blob + co-key is wiped and a FRESH co-key minted
-   *  so the new blob is bound to fresh key material; the record is written only if the session is still current after
-   *  that. */
+   *  (breaker B1). The slow part (the bench and the PIN derivation) runs first; then, only while the session is still
+   *  the one in front, any prior blob + co-key is wiped and a FRESH co-key minted so the new blob is bound to fresh key
+   *  material; the record is written only if the session is still current after that. */
   async enroll(args: EnrollArgs): Promise<EnrollResult> {
     const pv = validatePin(args.pin);
     if (!pv.ok) return { ok: false, code: "weak_pin", reason: pv.reason };
+    const removalsAtStart = this.deps.store.removals?.(); // see commitFresh
     const kdfParams = await this.deps.benchPinParams();
     assertPinKdfParams(kdfParams); // never persist sub-floor/above-ceiling params (breaker A8)
     const salt = this.deps.randomBytes(16);
@@ -383,6 +394,7 @@ export class QuickUnlock {
       return { ok: false, code: "ended" };
     }
     await this.wipe(); // #11: wipe prior blob + co-key before re-enroll
+    const removals = removalsAtStart === undefined ? undefined : removalsAtStart + 1; // this enrolment's own wipe, and no other
     const kNonExp = await this.deps.coKey.generate();
     const ct = await sealDoubleWrap(kPin, kNonExp, args.uvk, args.userId);
     kPin.fill(0);
@@ -391,16 +403,43 @@ export class QuickUnlock {
       return { ok: false, code: "ended" };
     }
     const blob: QuBlobPin = { v: 1, kind: "pin", salt: toB64(salt), kdfParams, ct, createdAt: this.deps.now(), lastFullUnlockAt: args.lastFullUnlockAt };
-    await this.deps.store.write({
-      v: 1,
-      userId: args.userId,
-      email: args.email,
-      blob,
-      attemptsRemaining: MAX_PIN_ATTEMPTS,
-      autoLockSeconds: args.autoLockSeconds,
-      lockedTokens: null,
-    });
-    return { ok: true };
+    const done = await this.commitFresh(
+      {
+        v: 1,
+        userId: args.userId,
+        email: args.email,
+        blob,
+        attemptsRemaining: MAX_PIN_ATTEMPTS,
+        autoLockSeconds: args.autoLockSeconds,
+        lockedTokens: null,
+      },
+      removals,
+    );
+    return done === "written" ? { ok: true } : { ok: false, code: "switched_off" };
+  }
+
+  /** An enrolment's fresh record is written only if its slot was not removed since
+   *  [removals] was taken. [removals] is the count at the enrolment's start plus its own wipe's one removal,
+   *  so a switch-off anywhere in the enrolment counts: during its slow step (the derivation, the biometric prompt), or
+   *  inside its own wipe, between the record's removal and the co-key's delete (taken after the wipe, as it was, the
+   *  count missed both, and quick unlock came back on after it was switched off). A switch-off that landed after the co-key was made
+   *  wiped a record that did not exist yet and a co-key that may not have been stored yet; before, the record was then
+   *  written, with no co-key or with one the switch-off was meant to delete, and the next lock armed it. Whenever the
+   *  record is not written (that, or a write that throws) the co-key minted for it is deleted: it wraps nothing. */
+  private async commitFresh(rec: QuRecord, removals: number | undefined): Promise<"written" | "switched_off"> {
+    const removedSince = () => removals !== undefined && this.deps.store.removals?.() !== removals;
+    if (removedSince()) {
+      await this.deps.coKey.delete();
+      return "switched_off";
+    }
+    try {
+      await this.deps.store.write(rec);
+    } catch (e) {
+      await this.deps.coKey.delete();
+      if (removedSince()) return "switched_off";
+      throw e;
+    }
+    return "written";
   }
 
   /** Enroll the BIOMETRIC method (0.17.0). Same caller gates as enroll() (unlocked, uvk in memory,
@@ -410,6 +449,7 @@ export class QuickUnlock {
   async enrollBio(args: Omit<EnrollArgs, "pin">): Promise<EnrollBioResult> {
     const bio = this.deps.biometric;
     if (!bio) return { ok: false, code: "bio_unsupported" };
+    const removalsAtStart = this.deps.store.removals?.(); // see commitFresh
     let prfSalt = this.deps.randomBytes(32);
     let credentialId: string;
     let secret: Uint8Array;
@@ -436,6 +476,7 @@ export class QuickUnlock {
       return { ok: false, code: "ended" };
     }
     await this.wipe(); // commit point — from here it's all-or-nothing on a fresh co-key
+    const removals = removalsAtStart === undefined ? undefined : removalsAtStart + 1; // this enrolment's own wipe, and no other
     const kNonExp = await this.deps.coKey.generate();
     const ct = await sealDoubleWrap(kBio, kNonExp, args.uvk, args.userId, adQuickUnlockBio(args.userId));
     kBio.fill(0);
@@ -444,16 +485,19 @@ export class QuickUnlock {
       return { ok: false, code: "ended" };
     }
     const blob: QuBlobBio = { v: 1, kind: "biometric", credentialId, prfSalt: toB64(prfSalt), ct, createdAt: this.deps.now(), lastFullUnlockAt: args.lastFullUnlockAt };
-    await this.deps.store.write({
-      v: 1,
-      userId: args.userId,
-      email: args.email,
-      blob,
-      attemptsRemaining: MAX_PIN_ATTEMPTS, // inert for bio (never decremented) — see beginRedeemBio
-      autoLockSeconds: args.autoLockSeconds,
-      lockedTokens: null,
-    });
-    return { ok: true };
+    const done = await this.commitFresh(
+      {
+        v: 1,
+        userId: args.userId,
+        email: args.email,
+        blob,
+        attemptsRemaining: MAX_PIN_ATTEMPTS, // inert for bio (never decremented) — see beginRedeemBio
+        autoLockSeconds: args.autoLockSeconds,
+        lockedTokens: null,
+      },
+      removals,
+    );
+    return done === "written" ? { ok: true } : { ok: false, code: "switched_off" };
   }
 
   /** Biometric redeem — the counterpart of beginRedeem for a `kind:'biometric'` armed record. NO
@@ -462,7 +506,7 @@ export class QuickUnlock {
    *  counter is never decremented. A ceremony throw = `bio_cancelled` (record UNTOUCHED, retry allowed).
    *  A post-PRF AEAD-open failure is deterministic corruption → wipe (a wrong K_bio can only mean a
    *  tampered blob, since the PRF re-derives identically). */
-  async beginRedeemBio(): Promise<BeginRedeemBio> {
+  async beginRedeemBio(stillCurrent: () => boolean = () => true): Promise<BeginRedeemBio> {
     const bio = this.deps.biometric;
     if (!bio) return { ok: false, code: "not_armed" };
     let rec: QuRecord | null;
@@ -486,7 +530,16 @@ export class QuickUnlock {
     }
     const kBio = deriveKBio(secret, rec.userId);
     secret.fill(0);
+    // After each wait, the redeem's own server and lock state are checked first (beginRedeem has the why).
+    if (!stillCurrent()) {
+      kBio.fill(0);
+      return { ok: false, code: "aborted" };
+    }
     const kNonExp = await this.deps.coKey.get();
+    if (!stillCurrent()) {
+      kBio.fill(0);
+      return { ok: false, code: "aborted" };
+    }
     if (!kNonExp) {
       kBio.fill(0);
       await this.wipe(); // co-key gone but blob survived → orphaned → wipe
@@ -497,18 +550,24 @@ export class QuickUnlock {
       uvk = await openDoubleWrap(kBio, kNonExp, bioBlob.ct, rec.userId, adQuickUnlockBio(rec.userId));
     } catch {
       kBio.fill(0);
+      if (!stillCurrent()) return { ok: false, code: "aborted" };
       await this.wipe(); // PRF verified but the AEAD failed → tampered blob → wipe (deterministic corruption)
       return { ok: false, code: "corrupt" };
     }
     kBio.fill(0);
+    if (!stillCurrent()) return { ok: false, code: "aborted" };
     return { ok: true, uvk, userId: rec.userId, email: rec.email, tokens: rec.lockedTokens, blob: bioBlob, autoLockSeconds: rec.autoLockSeconds };
   }
 
   /** doLock armed branch (breaker B3): stash the live token pair so a locked-but-authenticated PIN
    *  redeem is possible, and report whether the caller should KEEP the slim snapshot or full-erase.
    *  Fails CLOSED to `declined` on any throw. Refuses to arm an ineligible (exhausted / stale) blob
-   *  so tokens are never retained past the min(session, 24 h) window. */
-  async arm(tokens: { access: string; refresh: string | null }): Promise<ArmResult> {
+   *  so tokens are never retained past the min(session, 24 h) window.
+   *  [forUser] is the account of the session being locked, where the lock knows it. A record of another
+   *  account is declined (the caller wipes it): one account's tokens are never stashed beside another's wrap. A full
+   *  unlock already wipes such a record (reconcileUser); this is the belt. null: the lock knows no session (a lock during
+   *  a quick unlock, whose pair is the record's own), and the record is armed as before. */
+  async arm(tokens: { access: string; refresh: string | null }, forUser: string | null = null): Promise<ArmResult> {
     let rec: QuRecord | null;
     try {
       rec = await this.deps.store.read();
@@ -519,6 +578,7 @@ export class QuickUnlock {
     // !rec.blob: a malformed record → decline (the caller full-erases + wipes). Guard the deref so a
     // blob-less record can never THROW out of arm() past doLock's [SKEY,TKEY] erase (review F1).
     if (validBlobKind(rec.blob) === null || rec.attemptsRemaining <= 0 || !this.isStampFresh(rec.blob.lastFullUnlockAt)) return "declined";
+    if (forUser !== null && rec.userId !== forUser) return "declined";
     rec.lockedTokens = { access: tokens.access, refresh: tokens.refresh };
     try {
       await this.deps.store.write(rec);
@@ -534,7 +594,12 @@ export class QuickUnlock {
    * guess. On a verified crypto success returns the UVK + stashed tokens for the caller's forced-refresh
    * server dance; the counter is reset only by `completeRedeem` (after a verified full server success).
    */
-  async beginRedeem(pin: string): Promise<BeginRedeem> {
+  /** [stillCurrent]: false once the redeem was left (a lock, or a server switch, which locks). It is checked
+   *  after every wait, before anything more is read or written: the store and the co-key follow the CURRENT server, so
+   *  a redeem that went on after a switch read the new server's co-key (none: "corrupt") and wiped the new server's
+   *  quick unlock, or failed the reset write the store refuses across servers and answered an error. It answers
+   *  `aborted`; the record it reserved an attempt on is otherwise as it stood. */
+  async beginRedeem(pin: string, stillCurrent: () => boolean = () => true): Promise<BeginRedeem> {
     let rec: QuRecord | null;
     try {
       rec = await this.deps.store.read();
@@ -573,7 +638,9 @@ export class QuickUnlock {
       }
       throw e;
     }
+    if (!stillCurrent()) return { ok: false, code: "aborted" };
     const kNonExp = await this.deps.coKey.get();
+    if (!stillCurrent()) return { ok: false, code: "aborted" };
     if (!kNonExp) {
       await this.wipe(); // co-key gone but blob somehow survived → orphaned → wipe
       return { ok: false, code: "corrupt" };
@@ -582,6 +649,7 @@ export class QuickUnlock {
     try {
       uvk = await openDoubleWrap(kPin, kNonExp, pinBlob.ct, rec.userId);
     } catch {
+      if (!stillCurrent()) return { ok: false, code: "aborted" };
       // Wrong PIN / tampered / unknown version / wrong co-key — indistinguishable, no oracle.
       if (remaining <= 0) {
         await this.wipe();
@@ -592,6 +660,7 @@ export class QuickUnlock {
     // A verified open PROVES PIN knowledge, so the brute-force budget resets to full HERE — the
     // correct PIN never burns attempts even if the subsequent server dance (forced refresh / sync)
     // fails transiently. A concurrent wipe/lock is handled by the caller's owns() guard.
+    if (!stillCurrent()) return { ok: false, code: "aborted" };
     rec.attemptsRemaining = MAX_PIN_ATTEMPTS;
     await this.deps.store.write(rec);
     return { ok: true, uvk, userId: rec.userId, email: rec.email, tokens: rec.lockedTokens, blob: rec.blob, autoLockSeconds: rec.autoLockSeconds };
@@ -599,8 +668,13 @@ export class QuickUnlock {
 
   /** During the redeem's forced-refresh, the caller routes onTokensChanged here so the consumed /
    *  rotated token pair is persisted to the locked-token stash BEFORE the POST (breaker A5, AM1
-   *  parity) — a mid-refresh SW death then never resurrects a spent refresh token. */
-  async setLockedTokens(tokens: { access: string | null; refresh: string | null }): Promise<void> {
+   *  parity) — a mid-refresh SW death then never resurrects a spent refresh token. `onlyIfStashed`: change a stash that
+   *  is there, never put one into a record that holds none (a client the server was switched away from writes to its own
+   *  server's record this way: it may keep that record's pair current, but it never arms a record). */
+  async setLockedTokens(
+    tokens: { access: string | null; refresh: string | null },
+    opts: { onlyIfStashed?: boolean; forUser?: string; stillCurrent?: () => boolean; replacingConsumed?: string } = {},
+  ): Promise<void> {
     let rec: QuRecord | null;
     try {
       rec = await this.deps.store.read();
@@ -608,6 +682,12 @@ export class QuickUnlock {
       return;
     }
     if (!rec) return;
+    if (opts.onlyIfStashed === true && rec.lockedTokens === null) return;
+    // A refresh answered after the lock that armed on its consumed pair replaces exactly that stash (the
+    // access token it consumed, no refresh token), never one a later lock or unlock wrote.
+    if (opts.replacingConsumed !== undefined && (rec.lockedTokens?.access !== opts.replacingConsumed || rec.lockedTokens.refresh !== null)) return;
+    if (opts.forUser !== undefined && rec.userId !== opts.forUser) return; // never another account's pair
+    if (opts.stillCurrent !== undefined && !opts.stillCurrent()) return; // the asker was left during the read
     rec.lockedTokens = tokens.access ? { access: tokens.access, refresh: tokens.refresh } : null;
     await this.deps.store.write(rec);
   }
@@ -615,9 +695,13 @@ export class QuickUnlock {
   /** After a verified full server success: clear the locked-token stash (the rotated pair now lives
    *  in the full SessionSnapshot) and refresh autoLockSeconds; keep the blob so the next lock re-arms.
    *  The counter was already reset to full by beginRedeem's verified open. */
-  async completeRedeem(autoLockSeconds: number): Promise<void> {
+  async completeRedeem(autoLockSeconds: number, stillCurrent: () => boolean = () => true): Promise<void> {
     const rec = await this.deps.store.read();
     if (!rec) return; // wiped by a concurrent event — caller's owns() guard already discarded the redeem
+    // The read is a wait. A lock in it has armed the record with the live pair (cleared here, the record
+    // would come back disarmed), and a server switch would make this another server's record: written only while the
+    // redeem's session is still the one in front.
+    if (!stillCurrent()) return;
     rec.attemptsRemaining = MAX_PIN_ATTEMPTS;
     rec.lockedTokens = null;
     rec.autoLockSeconds = autoLockSeconds;

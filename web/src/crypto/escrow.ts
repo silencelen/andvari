@@ -1,8 +1,9 @@
 import { adIdkey } from "./ad";
 import { ctEquals, fromB64, fromUtf8, toB64, toHexLower, utf8 } from "./bytes";
 import { requireJsonSafe } from "./canonicaljson";
-import { open as openEnvelope } from "./envelope";
+import { openKey } from "./envelope";
 import { matchesShort } from "./fingerprint";
+import { requireKey } from "./keyfloor";
 import { boxKeypairFromSeed, ed25519PkToCurve25519, type KeyPairBytes, sealOpen, sealTo, sha256 } from "./provider";
 import { buildSignedStatement, claimEscrowVerifier, type EscrowUvkStatement, formatOf, SignedStatementError } from "./signedstatement";
 
@@ -10,6 +11,7 @@ import { buildSignedStatement, claimEscrowVerifier, type EscrowUvkStatement, for
 // once, here, so nothing else can (security review 2026-10, root cause A; core twin: `internal`).
 const verifyEscrowStatement = claimEscrowVerifier();
 import { CryptoError } from "./sodium";
+import { emailNorm } from "./trust/grammar";
 
 /** spec 04 §3 — sealed escrow payloads; mirrors core Escrow.kt. */
 export const KEY_TYPE_UVK = "uvk";
@@ -48,6 +50,8 @@ export async function canonicalPayload(userId: string, keyType: string, keyBytes
  * recoverable indefinitely (owner decision Q3) through {@link openEscrow}'s mandatory identity check.
  */
 export async function sealUvkV1(recoveryPub: Uint8Array, userId: string, uvk: Uint8Array): Promise<Uint8Array> {
+  // Spec 01 rule 4: no wiped key is wrapped (KeysGoneError).
+  requireKey(uvk);
   return sealTo(recoveryPub, await canonicalPayload(userId, KEY_TYPE_UVK, uvk));
 }
 
@@ -79,12 +83,48 @@ export async function sealUvkV2(params: {
   uvk: Uint8Array;
   issuedAt: number;
 }): Promise<Uint8Array> {
+  // The OLD form (spec 04 §3): no client seals it any more. It stays only so the vector tests can rebuild
+  // escrow-v2.json's frames byte for byte; a source-scan test pins that no product file calls it (core keeps its twin).
+  return sealEscrow(params, null);
+}
+
+/**
+ * The recovery copy every client seals (spec 04 §3). Twin of core `Escrow.sealUvkV3`:
+ * {@link sealUvkV2}'s statement in its version-3 form, which also names [emailNorm], the account's address, inside what
+ * the account's own key signs, so the offline tool can tell whose copy it opened and compare it with the address the
+ * operator typed (§4 step 8).
+ *
+ * [emailNorm] is the address the account was registered with, ALREADY normal: the `emailNorm` sent at registration, or
+ * the signed-in session's. Never one a server answer named on its own. An address that is not its own `emailNorm`
+ * seals nothing (CryptoError), and so does everything {@link sealUvkV2} refuses.
+ */
+export async function sealUvkV3(params: {
+  recoveryPub: Uint8Array;
+  verifiedRecoveryFp: string;
+  userId: string;
+  emailNorm: string;
+  identityPub: Uint8Array;
+  signer: KeyPairBytes;
+  uvk: Uint8Array;
+  issuedAt: number;
+}): Promise<Uint8Array> {
+  if (typeof params.emailNorm !== "string" || emailNorm(params.emailNorm) !== params.emailNorm) {
+    throw new CryptoError("the account's address is not an emailNorm — refusing to seal a recovery copy that names it");
+  }
+  return sealEscrow(params, params.emailNorm);
+}
+
+async function sealEscrow(
+  params: { recoveryPub: Uint8Array; verifiedRecoveryFp: string; userId: string; identityPub: Uint8Array; signer: KeyPairBytes; uvk: Uint8Array; issuedAt: number },
+  email: string | null,
+): Promise<Uint8Array> {
   const { recoveryPub, verifiedRecoveryFp, userId, identityPub, signer, uvk, issuedAt } = params;
   if (recoveryPub.length !== 32) throw new CryptoError("recovery public key must be 32 bytes");
   if (!FULL_FP_RE.test(verifiedRecoveryFp) || (await fingerprint(recoveryPub)) !== verifiedRecoveryFp) {
     throw new CryptoError("recovery public key does not match the verified fingerprint (full compare) — refusing to seal escrow");
   }
   if (uvk.length !== 32) throw new CryptoError("escrow uvk must be 32 bytes");
+  requireKey(uvk); // rule 4: no wiped key is wrapped
   let mapped: Uint8Array;
   try {
     mapped = ed25519PkToCurve25519(signer.publicKey);
@@ -92,7 +132,7 @@ export async function sealUvkV2(params: {
     throw new CryptoError("escrow signer is not a usable Ed25519 key", { cause: e });
   }
   if (!ctEquals(mapped, identityPub)) throw new CryptoError("escrow signer does not map to the identity key it would name");
-  const st: EscrowUvkStatement = { purpose: "escrow-uvk", userId, identityKey: identityPub, recoveryFp: verifiedRecoveryFp, issuedAt, key: uvk };
+  const st: EscrowUvkStatement = { purpose: "escrow-uvk", userId, identityKey: identityPub, recoveryFp: verifiedRecoveryFp, issuedAt, key: uvk, email };
   const frame = buildSignedStatement(signer, st);
   try {
     return sealTo(recoveryPub, frame);
@@ -139,11 +179,14 @@ export interface IdentityCheck {
 
 /** A successfully opened escrow blob (twin of core `EscrowOpened`). `userId` is the caller's `expectedUserId`. */
 export interface EscrowOpened {
-  readonly format: "v2" | "v1_legacy";
+  /** `v3` names the account's address ({@link email}); `v2` and `v1_legacy` are the old forms, which name none. */
+  readonly format: "v3" | "v2" | "v1_legacy";
   readonly userId: string;
   readonly uvk: Uint8Array;
   readonly identityKey: Uint8Array;
   readonly anchored: boolean;
+  /** The account's `emailNorm` as the copy's own signed statement names it (v3), read only after the signature verified; null for the old forms. */
+  readonly email: string | null;
 }
 
 const refuse = (verdict: EscrowVerdict, detail: string): never => {
@@ -170,12 +213,12 @@ export async function openEscrow(params: {
   const { recoveryKeypair, sealed, expectedUserId, expectedIdentityFpPrefix, identityCheck } = params;
   if (!UUID_RE.test(expectedUserId)) refuse("bad_user_id", "expectedUserId is not a lowercase uuid");
   const anchored = expectedIdentityFpPrefix != null;
-  if (expectedIdentityFpPrefix != null) {
-    if (!ANCHOR_RE.test(expectedIdentityFpPrefix)) refuse("bad_anchor", "identity anchor must be 32..64 lowercase hex");
-  } else if (params.unanchoredAcknowledgment !== UNANCHORED_ACK) {
+  if (expectedIdentityFpPrefix != null && !ANCHOR_RE.test(expectedIdentityFpPrefix)) refuse("bad_anchor", "identity anchor must be 32..64 lowercase hex");
+  // Spec 04 §4: the identity file is step 0's third input; the acknowledgment of unanchored mode is step 2's, after it.
+  if (identityCheck == null) return refuse("identity_check_required", "recovery needs the identity file");
+  if (expectedIdentityFpPrefix == null && params.unanchoredAcknowledgment !== UNANCHORED_ACK) {
     refuse("unanchored_not_acknowledged", "an unanchored recovery needs the typed acknowledgment");
   }
-  if (identityCheck == null) return refuse("identity_check_required", "recovery needs the identity file");
   let identityPub: Uint8Array | null = null;
   try {
     identityPub = fromB64(identityCheck.identityPubB64);
@@ -196,8 +239,9 @@ export async function openEscrow(params: {
   }
   const orgFp = await fingerprint(recoveryKeypair.publicKey);
   try {
-    let format: "v2" | "v1_legacy";
+    let format: "v3" | "v2" | "v1_legacy";
     let uvk: Uint8Array;
+    let email: string | null = null;
     const kind = formatOf(plaintext);
     if (kind === "v2-signed") {
       let st: EscrowUvkStatement;
@@ -207,7 +251,9 @@ export async function openEscrow(params: {
         if (e instanceof SignedStatementError) return refuse(e.verdict, e.message);
         throw e;
       }
-      format = "v2";
+      // The signed address, when the statement is the version-3 form (spec 04 §3).
+      email = st.email ?? null;
+      format = email !== null ? "v3" : "v2";
       uvk = st.key;
     } else if (kind === "v1-json") {
       const payload = await parseV1(plaintext);
@@ -221,7 +267,7 @@ export async function openEscrow(params: {
     try {
       let derived: Uint8Array;
       try {
-        const seed = openEnvelope(uvk, fromB64(identityCheck.encryptedIdentitySeedB64), adIdkey(expectedUserId));
+        const seed = openKey(uvk, fromB64(identityCheck.encryptedIdentitySeedB64), adIdkey(expectedUserId), "the identity seed");
         try {
           const kp = boxKeypairFromSeed(seed);
           kp.privateKey.fill(0);
@@ -233,7 +279,7 @@ export async function openEscrow(params: {
         return refuse("identity_check_failed", "the escrowed key does not open this account's identity");
       }
       if (!ctEquals(derived, identityPub)) refuse("identity_check_failed", "the escrowed key does not open this account's identity");
-      return Object.freeze({ format, userId: expectedUserId, uvk: uvk.slice(), identityKey: identityPub.slice(), anchored });
+      return Object.freeze({ format, userId: expectedUserId, uvk: uvk.slice(), identityKey: identityPub.slice(), anchored, email });
     } finally {
       uvk.fill(0);
     }

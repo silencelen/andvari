@@ -46,33 +46,7 @@ class AuthWidthCapTest {
         assertTrue(shell.contains("verticalScroll(rememberScrollState())"), "Cut F: the IME must never strand the button off-screen")
     }
 
-    /**
-     * Every screen the user can reach BEFORE the vault opens goes through the shell. The vault
-     * list, health and settings are deliberately absent: they are list surfaces that genuinely
-     * use a tablet's width, and capping them would be a different (unmade) decision.
-     */
-    @Test
-    fun everyPreUnlockScreenUsesTheSharedShell() {
-        val family = listOf(
-            "WelcomeScreen", // sign-in + enroll
-            "PendingReconcileScreen", // "Finish setting up?" — same family, same Sigil
-            "RecoverySetupScreen", // the shown-once phrase + its type-back
-            "RecoveryCaptureScreen",
-            "UnlockScreen",
-            "RecoverScreen",
-        )
-        for (fn in family) {
-            val b = body(fn)
-            // Both call shapes: `AuthColumn {` (no arguments) and `AuthColumn(alignment…) {`.
-            assertTrue(
-                Regex("""AuthColumn\s*[({]""").containsMatchIn(b),
-                "$fn must render inside AuthColumn — H129's whole point",
-            )
-            assertFalse(
-                b.contains("Column(Modifier.fillMaxSize().padding(24.dp)") ||
-                    b.contains("Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp)"),
-                "$fn still has its own uncapped full-bleed column",
-            )
-        }
-    }
+    // everyPreUnlockScreenUsesTheSharedShell went with the old pre-unlock family (WelcomeScreen, PendingReconcileScreen,
+    // RecoverySetupScreen, RecoveryCaptureScreen, UnlockScreen, RecoverScreen). The new path's
+    // screens are pinned to the same shell by trust/TrustAuthWidthTest.
 }

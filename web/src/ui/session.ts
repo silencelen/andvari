@@ -1,6 +1,11 @@
-import { ApiClient, LOGOUT_TIMEOUT_MS, type Tokens } from "../api/client";
-import { idbSupported, openVaultCache, vaultDbName } from "../vault/idbcache";
-import { forgetSelfIdentity } from "../vault/selfidentity";
+import { ApiClient, LOGOUT_TIMEOUT_MS, SECOND_TRY_AFTER_MS, type Tokens } from "../api/client";
+import { DeviceIdentity, type KeyValue } from "../api/devicesecret";
+import { isUuid } from "../api/wireids";
+import { idbSupported, openVaultCache, readWaiting, type VaultCache, vaultDbName } from "../vault/idbcache";
+import { clearCopyBeingRemoved, detachPolicyWipeNotice, dropHeldPolicyWipes, exclusiveForCopy, markCopyBeingRemoved, type MayWrite, ORG_CACHE_OFF_KEY, releaseCopiesAfterLift, type PolicyWipeLimits, type PolicyWipeNotice, removeCopyForPolicy, type SendOnce } from "../vault/policywipe";
+import { boundAccountAt, forgetEarlierRecords, forgetSelfIdentity, forgettingMarks, markForgetting, rememberNextAt, selfIdentityPinKey, unmarkForgetting } from "../vault/selfidentity";
+import { emailNorm } from "../crypto/trust/grammar";
+import type { CopyKeeper, CopyWrite, SessionKeys } from "../vault/settingsflow";
 
 /**
  * The session: non-secret metadata persisted across reloads, plus the token pair. The vault KEY is
@@ -25,8 +30,13 @@ export interface Session {
   userId: string;
   personalVaultId: string;
   email: string;
-  isAdmin: boolean;
   tokens: Tokens | null;
+  /**
+   * A held session (no pair) that ended in this browser because a refresh whose answer never came had no try left: no
+   * server ended it. Written in the same write that drops the pair (sessionend.ts endSessionByServer), so the card and the
+   * copy's notice say that end even where the kept token could not be written. Gone with the next session taken.
+   */
+  endedUnconfirmed?: true;
 }
 
 /** Exported for App's cross-tab `storage` listener (F27): a removal of THIS key by
@@ -78,7 +88,9 @@ function readSlot(): TabSlot | null {
     const s = JSON.parse(raw) as Partial<TabSlot>;
     const t = s.tokens as Partial<Tokens> | undefined;
     if (typeof s.tabId !== "string" || typeof s.userId !== "string" || typeof t?.accessToken !== "string" || typeof t.refreshToken !== "string") return null;
-    return { tabId: s.tabId, userId: s.userId, tokens: { accessToken: t.accessToken, refreshToken: t.refreshToken } };
+    // The mark that a refresh of the pair is out rides with it (api/client.ts Tokens.refreshOutAt).
+    const mark = typeof t.refreshOutAt === "number" ? { refreshOutAt: t.refreshOutAt, ...(t.refreshTriedAgain === true ? { refreshTriedAgain: true } : {}) } : {};
+    return { tabId: s.tabId, userId: s.userId, tokens: { accessToken: t.accessToken, refreshToken: t.refreshToken, ...mark } };
   } catch {
     return null;
   }
@@ -99,7 +111,7 @@ export function tokensKeptAcrossLock(userId: string): boolean {
 let claimedTabId: string | null = null;
 
 type LockManagerLike = {
-  request(name: string, options: { signal?: AbortSignal; ifAvailable?: boolean }, callback: (lock: unknown) => unknown): Promise<unknown>;
+  request(name: string, options: { signal?: AbortSignal; ifAvailable?: boolean; mode?: "shared" | "exclusive" }, callback: (lock: unknown) => unknown): Promise<unknown>;
 };
 function lockManager(): LockManagerLike | null {
   const l = typeof navigator !== "undefined" ? (navigator as { locks?: LockManagerLike }).locks : undefined;
@@ -151,6 +163,41 @@ export async function claimTabTokens(opts: { waitMs?: number } = {}): Promise<vo
   }
 }
 
+/** The Web Lock a tab holds, shared, for as long as it has [userId]'s account open; a forgetting takes it exclusively. */
+export const accountOpenLockName = (userId: string): string => `andvari-account-open-${userId}`;
+
+/**
+ * This tab has [userId]'s account open from now until the returned function is called (the vault's store closes) or the
+ * document ends (closed, reloaded or crashed: the browser lets its locks go). Held in shared mode, so every tab with the
+ * account open holds it at once; no record is written, so a full storage cannot hide an open account from a forgetting.
+ * Without Web Locks nothing is held, and a forgetting refuses ({@link forgetEarlierAccount}).
+ */
+export function holdAccountOpen(userId: string): () => void {
+  const locks = lockManager();
+  if (!locks) return () => {};
+  let release: () => void = () => {};
+  const held = new Promise<void>((r) => (release = r));
+  void locks.request(accountOpenLockName(userId), { mode: "shared" }, () => held).catch(() => {});
+  return release;
+}
+
+/**
+ * [fn] while no tab of this browser holds [userId]'s account lock: under that lock, taken exclusively and only if it is
+ * free. `open` where a tab holds it; `cannot_tell` where the browser has no Web Locks. A failure of [fn] is thrown. A tab
+ * that opens the account while [fn] runs is not held back: its own request for the lock waits, but the account is open
+ * there meanwhile (a window of the forgetting's few milliseconds; no key is lost in it).
+ */
+async function whileNotOpen<T>(userId: string, fn: () => Promise<T>): Promise<{ ran: true; value: T } | { ran: false; why: "open" | "cannot_tell" }> {
+  const locks = lockManager();
+  if (!locks) return { ran: false, why: "cannot_tell" };
+  let out: { ran: true; value: T } | null = null;
+  await locks.request(accountOpenLockName(userId), { mode: "exclusive", ifAvailable: true }, async (lock) => {
+    if (lock === null) return;
+    out = { ran: true, value: await fn() };
+  });
+  return out ?? { ran: false, why: "open" };
+}
+
 /** Test seam: forget this document's claim (a fresh document, as far as the module is concerned). */
 export function resetTabClaim(): void {
   claimedTabId = null;
@@ -170,8 +217,11 @@ function readPersisted(): Session | null {
   const raw = localStorage.getItem(KEY);
   if (!raw) return null;
   try {
-    const s = JSON.parse(raw) as Session;
-    return { ...s, isAdmin: !!s.isAdmin, tokens: s.tokens ?? null }; // sessions saved before P4 lack isAdmin
+    const s = JSON.parse(raw) as Session & { isAdmin?: unknown };
+    if (typeof s.userId !== "string" || typeof s.email !== "string") return null;
+    // A record written by a pre-cut-over build (it carries `isAdmin`) names an account on the old server: not ours.
+    if ("isAdmin" in s) return null;
+    return { baseUrl: s.baseUrl ?? "", userId: s.userId, personalVaultId: s.personalVaultId ?? "", email: s.email, tokens: s.tokens ?? null, ...(s.endedUnconfirmed === true && !s.tokens ? { endedUnconfirmed: true as const } : {}) };
   } catch {
     return null;
   }
@@ -192,8 +242,24 @@ export function loadSession(): Session | null {
  *  `setTokens(null)` and skip the rest of the lock, leaving the vault open. A failed write leaves the
  *  pair unpersisted (a reload then asks to sign in), never the lock half-done. */
 export function saveSession(s: Session): void {
+  // A new session of this account taken here: the token kept from one of its sessions that ended unconfirmed has had its
+  // use (the sign-in named it); another account's kept token stays for that account's next sign-in. The record's own
+  // mark of that end goes with it.
+  if (s.tokens) {
+    dropUnconfirmedRefresh(s.userId);
+    endedUnconfirmedHere.delete(s.userId);
+    if (s.endedUnconfirmed !== undefined) {
+      const { endedUnconfirmed: _gone, ...rest } = s;
+      s = rest;
+    }
+  }
   if (tokensKeptAcrossLock(s.userId)) {
-    lsSet(KEY, JSON.stringify(s));
+    const v = JSON.stringify(s);
+    lsSet(KEY, v);
+    // A record that could not be written (a full storage) is remembered in this document, so that the tab's renewal says
+    // that the session could not be saved rather than that another tab signed out.
+    if (lsGet(KEY) === v) unsavedShared = null;
+    else if (s.tokens) unsavedShared = { userId: s.userId, refreshToken: s.tokens.refreshToken };
     clearTabTokens();
     return;
   }
@@ -202,10 +268,153 @@ export function saveSession(s: Session): void {
   else clearTabTokens();
 }
 
+/** This document's own session, with the offline copy on, whose record could not be written: its account and token. */
+let unsavedShared: { userId: string; refreshToken: string } | null = null;
+
+/** Whether this browser holds a session record at all (of any account). */
+function hasSessionRecord(): boolean {
+  return lsGet(KEY) !== null;
+}
+
 export function clearSession(): void {
   lsRemove(KEY);
   clearTabTokens();
   clearLockRevoke();
+}
+
+/**
+ * The refresh token of a session that ended here because a refresh whose answer never came had no try left
+ * (api/client.ts noTryLeft), with its account: `{ userId, refreshToken }`. Kept for ONE use: the next sign-in names it as
+ * the session it replaces (ui/tabsession.ts replacedSession), so that the server ends that chain as replaced, which on a
+ * browser's row nothing else does. It is never sent as a refresh or to end a session. Kept where the pair was: the tab's
+ * sessionStorage, or localStorage where the pair every tab shares lived (the offline copy on). It goes with a new session
+ * taken here ({@link saveSession}), the person's own sign-out, and a forgetting of the account.
+ */
+export const UNCONFIRMED_REFRESH_KEY = "andvari.unconfirmedRefresh";
+
+/** A kept token is held per account, for this many accounts at most in each place; the oldest goes first. */
+export const UNCONFIRMED_REFRESH_MAX = 4;
+
+export interface KeptRefresh {
+  readonly userId: string;
+  readonly refreshToken: string;
+}
+
+/** The accounts whose session ended unconfirmed in this document (also where nothing of it could be written). */
+const endedUnconfirmedHere = new Set<string>();
+
+function keptIn(raw: string | null): KeptRefresh[] {
+  try {
+    const r = JSON.parse(raw ?? "null") as unknown;
+    if (!Array.isArray(r)) return [];
+    return r.filter((k): k is KeptRefresh => typeof k?.userId === "string" && typeof k.refreshToken === "string").map((k) => ({ userId: k.userId, refreshToken: k.refreshToken }));
+  } catch {
+    return []; // a record that does not read keeps nothing
+  }
+}
+
+/**
+ * Keeps [refreshToken] as [userId]'s ({@link UNCONFIRMED_REFRESH_KEY}): where the pair was (the tab's sessionStorage, or
+ * localStorage with the offline copy on), one per account, the newest last, at most {@link UNCONFIRMED_REFRESH_MAX}.
+ * True when it was written (read back).
+ */
+export function keepUnconfirmedRefresh(userId: string, refreshToken: string): boolean {
+  const shared = tokensKeptAcrossLock(userId);
+  const list = [...keptIn(shared ? lsGet(UNCONFIRMED_REFRESH_KEY) : ssGet(UNCONFIRMED_REFRESH_KEY)).filter((k) => k.userId !== userId), { userId, refreshToken }].slice(-UNCONFIRMED_REFRESH_MAX);
+  const v = JSON.stringify(list);
+  if (shared) lsSet(UNCONFIRMED_REFRESH_KEY, v);
+  else ssSet(UNCONFIRMED_REFRESH_KEY, v);
+  return (shared ? lsGet(UNCONFIRMED_REFRESH_KEY) : ssGet(UNCONFIRMED_REFRESH_KEY)) === v;
+}
+
+/** Every kept token ({@link keepUnconfirmedRefresh}): this tab's, then those every tab shares. */
+export function unconfirmedRefreshes(): KeptRefresh[] {
+  return [...keptIn(ssGet(UNCONFIRMED_REFRESH_KEY)), ...keptIn(lsGet(UNCONFIRMED_REFRESH_KEY))];
+}
+
+/** The kept token of [userId] (this tab's first), or null. */
+export function unconfirmedRefresh(userId: string): KeptRefresh | null {
+  return unconfirmedRefreshes().find((k) => k.userId === userId) ?? null;
+}
+
+/** Whether [refreshToken] is a kept token, of any account. */
+export function isUnconfirmedRefresh(refreshToken: string): boolean {
+  return unconfirmedRefreshes().some((k) => k.refreshToken === refreshToken);
+}
+
+/**
+ * A person's own sign-out of [userId]: nothing that may still be a live credential of that account stays in this browser
+ * after it, so its kept token goes (another account's stays). True when one was kept: the sign-out then says that the end
+ * of that session could not be confirmed with the server, and how to end it. Called after the sign-out's own revocation,
+ * which keeps a token it meets marked.
+ */
+export function dropKeptAtSignOut(userId: string | null): boolean {
+  if (userId === null || unconfirmedRefresh(userId) === null) return false;
+  dropUnconfirmedRefresh(userId);
+  // A removal that could not be written is tried once more; where the token still stays, the sign-out says so
+  // ({@link unconfirmedRefresh} is then still that account's, and App's line names the one way that then works).
+  if (unconfirmedRefresh(userId) !== null) dropUnconfirmedRefresh(userId);
+  return true;
+}
+
+/** The channel by which a person's own sign-out tells this browser's other tabs (each tab's own kept token included). */
+const SIGN_OUT_CHANNEL = "andvari-signout";
+
+/**
+ * A person's own sign-out of [userId] in this tab: every other tab of this browser drops that account's kept token
+ * ({@link followSignOuts}). On a browser where each tab holds its own session, the token a tab kept lives in that tab's
+ * sessionStorage, which no other tab can reach. Best effort: a browser without the channel tells nothing.
+ */
+export function tellSignedOut(userId: string): void {
+  try {
+    const ch = new BroadcastChannel(SIGN_OUT_CHANNEL);
+    ch.postMessage({ signedOut: userId });
+    ch.close();
+  } catch {
+    /* no channel in this browser */
+  }
+}
+
+/** This tab follows other tabs' sign-outs ({@link tellSignedOut}) until the returned function is called. */
+export function followSignOuts(): () => void {
+  let ch: BroadcastChannel;
+  try {
+    ch = new BroadcastChannel(SIGN_OUT_CHANNEL);
+  } catch {
+    return () => {};
+  }
+  ch.onmessage = (e: MessageEvent) => {
+    const who = (e.data as { signedOut?: unknown } | null)?.signedOut;
+    if (typeof who === "string" && isUuid(who)) dropKeptAtSignOut(who);
+  };
+  (ch as { unref?: () => void }).unref?.();
+  return () => ch.close();
+}
+
+/** Drops the kept tokens: every one, or only [userId]'s (a new session of that account, a forgetting of it). */
+export function dropUnconfirmedRefresh(userId?: string): void {
+  if (userId === undefined) endedUnconfirmedHere.clear();
+  else endedUnconfirmedHere.delete(userId);
+  for (const [get, set, remove] of [
+    [ssGet, ssSet, ssRemove],
+    [lsGet, lsSet, lsRemove],
+  ] as const) {
+    const raw = get(UNCONFIRMED_REFRESH_KEY);
+    if (raw === null) continue;
+    const rest = userId === undefined ? [] : keptIn(raw).filter((k) => k.userId !== userId);
+    if (rest.length === 0) remove(UNCONFIRMED_REFRESH_KEY);
+    else set(UNCONFIRMED_REFRESH_KEY, JSON.stringify(rest));
+  }
+}
+
+/** A session of [userId] ended unconfirmed in this document: remembered here, whatever storage could keep of it. */
+export function noteEndedUnconfirmed(userId: string): void {
+  endedUnconfirmedHere.add(userId);
+}
+
+/** Whether a session of [userId] ended unconfirmed in this document (see sessionend.ts endedUnconfirmed). */
+export function endedUnconfirmedInThisDocument(userId: string): boolean {
+  return endedUnconfirmedHere.has(userId);
 }
 
 /**
@@ -273,18 +482,81 @@ function rehomeSessionTokens(before: Session | null, userId: string | null): voi
  * deleteDatabase versionchange (idbcache §D.5.3), so the wipe completes promptly.
  */
 export async function wipeVaultCache(userId: string): Promise<void> {
-  const cache = await openVaultCache(userId);
-  await cache.wipe();
+  // A third review: a wipe that waits for the lock (a policy's run holds it) was lost when the tab closed meanwhile, and
+  // the copy of an account that signed out stayed on disk. The wipe is owed from this moment until it is made: a mark
+  // that holds nothing but which copy, finished by the next start of the app in this browser (finishOwedWipes).
+  markWipeOwed(userId);
+  // A second review: a wipe that lands while a server's policy counts what waits in the copy made that count "nothing was
+  // lost". Every wipe of a copy takes the lock the policy's run takes, so it waits for that run, and the run for it.
+  await exclusiveForCopy(userId, async () => {
+    const cache = await openVaultCache(userId);
+    await cache.wipe();
+  });
+  clearWipeOwed(userId);
+}
+
+/** One device-wide key per copy whose wipe was asked for in this browser and not yet made; its value is only a time. */
+export const WIPE_OWED_PREFIX = "andvari.wipeOwed.";
+
+function markWipeOwed(userId: string): void {
+  try {
+    localStorage.setItem(WIPE_OWED_PREFIX + userId, String(Date.now()));
+  } catch {
+    /* storage unreachable: the wipe still goes on in this tab */
+  }
+}
+
+function clearWipeOwed(userId: string): void {
+  try {
+    localStorage.removeItem(WIPE_OWED_PREFIX + userId);
+  } catch {
+    /* storage unreachable */
+  }
+}
+
+/** Whether a wipe of [userId]'s copy was asked for in this browser and not made yet (in any tab). */
+export function wipeIsOwed(userId: string): boolean {
+  try {
+    return localStorage.getItem(WIPE_OWED_PREFIX + userId) !== null;
+  } catch {
+    return false;
+  }
+}
+
+/** The copies whose wipe is owed. */
+export function owedWipes(): string[] {
+  const out: string[] = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k !== null && k.startsWith(WIPE_OWED_PREFIX)) out.push(k.slice(WIPE_OWED_PREFIX.length));
+    }
+  } catch {
+    /* storage unreachable */
+  }
+  return out;
+}
+
+/**
+ * At each start of the app, with or without a session: every wipe owed from an earlier tab (a sign-out, Settings turning
+ * the copy off, an account deletion, whose tab was closed while the wipe waited) is made now, so a person who signed out
+ * does not find the copy still on disk. Each waits for the copy's lock as any wipe does. Never rejects.
+ */
+export async function finishOwedWipes(): Promise<void> {
+  await Promise.all(owedWipes().map((u) => wipeVaultCache(u).catch(() => {})));
 }
 
 /**
  * True for a localStorage key that belongs to [userId]: every per-account key this client writes is `andvari.<what>.<userId>`
  * or `andvari.<what>.<userId>.<sub>` (`andvari.cs.<userId>.*` client state — the account-state copy and high-water seq, the
  * personal-wrap cache, the trust records —, the cache opt-in and consent markers, the auto-lock and last-export stamps, the
- * self-identity pin). A userId is a UUID, which carries no dot, so a segment match is exact.
+ * self-identity pin, and the post-cut-over stores `andvari.log2.<userId>.<vaultId>.*`, `andvari.as2.<userId>.*`,
+ * `andvari.recmirror.<userId>`, `andvari.current.<userId>`, `andvari.onetap.<userId>`, `andvari.how.<userId>`). A userId is
+ * a UUID, which carries no dot. Only the third segment names the account: a vault id elsewhere in another account's key
+ * (a server chooses which vault ids a browser sees) never makes that key this account's.
  */
 export function isAccountScopedKey(key: string, userId: string): boolean {
-  return key.startsWith("andvari.") && (key.endsWith(`.${userId}`) || key.includes(`.${userId}.`));
+  return key.startsWith("andvari.") && key.split(".")[2] === userId;
 }
 
 /**
@@ -299,19 +571,33 @@ export function isAccountScopedKey(key: string, userId: string): boolean {
  * rejects, and neither does this). Not for sign-out: a sign-out keeps the self-identity records on purpose (an admin
  * recovery revokes every session first, spec 01 §5).
  */
-export async function wipeLocalAccountState(userId: string, email?: string): Promise<void> {
+export async function wipeLocalAccountState(userId: string, email?: string, deletion: "confirmed" | "unconfirmed" = "confirmed"): Promise<void> {
+  // A deletion whose outcome is not known (the person's "Forget" after the session ended during the request) keeps the
+  // records of which account the address is and of its identity key, as a sign-out does: the account may still exist.
+  const keepIdentity = deletion === "unconfirmed";
   clearSession();
+  dropUnconfirmedRefresh(userId);
   const doomed: string[] = [];
   try {
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
-      if (k !== null && isAccountScopedKey(k, userId)) doomed.push(k);
+      if (k !== null && isAccountScopedKey(k, userId) && !(keepIdentity && k === selfIdentityPinKey(userId))) doomed.push(k);
     }
   } catch {
     /* storage unreachable: nothing persisted to remove */
   }
   for (const k of doomed) lsRemove(k);
-  forgetSelfIdentity(userId, email);
+  if (!keepIdentity) forgetSelfIdentity(userId, email);
+  // The 2026-11-16 walk: the device record (one key for the whole browser) still mapped the account to its deviceId, and
+  // its address hash to the account, after "this browser kept nothing of it".
+  new DeviceIdentity().forget(userId);
+  // A server's policy wipe's notice kept for the account's copy is a word owed to the person about changes that were
+  // lost: it stays, to be said once, but under a key of its own and no longer under the account's id (as at a forgetting).
+  try {
+    detachPolicyWipeNotice(userId);
+  } catch {
+    /* storage unreachable: nothing persisted to move */
+  }
   await wipeVaultCache(userId);
 }
 
@@ -326,17 +612,224 @@ export async function wipeLocalAccountState(userId: string, email?: string): Pro
  * vault is open (VaultStore.queuedMutationCount); this is the choke-point path where it is not.
  */
 export async function pendingSyncCount(userId: string): Promise<number> {
+  // Read as the copy is: counting never creates a copy, nor deletes one that cannot be opened.
+  const w = await readWaiting(userId);
+  return w.kind === "read" ? w.pending.length + w.staged.length : 0;
+}
+
+/**
+ * Design §4.4 (decided on 2026-11-17): how many changes made in this browser were not sent, for the line said before an
+ * act that deletes this browser's copy of [userId]'s account. Counted as the shared code counts them: the queue's
+ * pending and refused rows, and every change parked with a vault held back (never the number of held vaults, which
+ * would say too few). The same count a server's policy wipe says afterwards (vault/policywipe.ts). Read while locked too: the
+ * queue is in IndexedDB, so it can be counted without the keys. Null when a copy exists and cannot be read (another
+ * schema, a failed read): this browser cannot tell, which is never said as none, and the copy is left as it is. 0 on a
+ * browser that keeps no copy (nothing is queued without one); asking creates none.
+ */
+export async function unsentChangeCount(userId: string): Promise<number | null> {
+  const w = await readWaiting(userId);
+  if (w.kind === "none") return 0;
+  if (w.kind === "unreadable") return null;
+  return w.pending.length + w.staged.length + w.parked;
+}
+
+/**
+ * Whether this browser keeps a copy of an account, and how many changes in it were not sent (null: cannot tell); and how
+ * many changes to shared vaults the account signed here are held, not known to be stored ({@link heldSharedChanges}).
+ */
+export interface EarlierCopy {
+  readonly kept: boolean;
+  readonly unsent: number | null;
+  readonly held: number | null;
+}
+
+/**
+ * The changes to shared vaults that [userId] signed in this browser and that are held, not known to be stored at the
+ * server: what the shared-vault code keeps at rest outside the copy, one record per vault (`andvari.log2.<id>.<vault>.pending`),
+ * named also by its index (`andvari.log2.<id>.pending-index`), and kept across a sign-out. A forgetting removes them. The
+ * number of those the server's own answer said it did not store; 0 where none is held (or only ones it said it stored);
+ * null, "cannot tell", where any one may have reached the server (its answer was lost or never came: it is never counted
+ * as not sent) or a record cannot be read.
+ */
+export function heldSharedChanges(userId: string): number | null {
+  const vaults = new Set<string>();
   try {
-    const cache = await openVaultCache(userId);
-    try {
-      const [pending, staged] = await Promise.all([cache.pending(), cache.stagedDenied()]);
-      return pending.length + staged.length;
-    } finally {
-      cache.close();
+    for (const v of (localStorage.getItem(`andvari.log2.${userId}.pending-index`) ?? "").split(",")) if (v !== "") vaults.add(v);
+    for (let i = 0; i < localStorage.length; i++) {
+      const p = localStorage.key(i)?.split(".");
+      if (p && p.length === 5 && p[0] === "andvari" && p[1] === "log2" && p[2] === userId && p[4] === "pending") vaults.add(p[3]!);
     }
   } catch {
-    return 0;
+    return null;
   }
+  let n = 0;
+  for (const v of vaults) {
+    let raw: string | null;
+    let flag: string | null;
+    try {
+      raw = localStorage.getItem(`andvari.log2.${userId}.${v}.pending`);
+      flag = localStorage.getItem(`andvari.log2.${userId}.${v}.flag`);
+    } catch {
+      return null;
+    }
+    if (raw === null) continue; // the index names a vault with nothing held
+    // A frozen vault holds nothing: its change was dropped at the freeze (a record kept from before that rule is not one).
+    if (flag?.startsWith("frozen:") === true) continue;
+    let held: { frame?: unknown; acked?: unknown; notStored?: unknown } | null;
+    try {
+      held = JSON.parse(raw) as typeof held;
+    } catch {
+      return null;
+    }
+    if (held === null || typeof held !== "object" || typeof held.frame !== "string") return null;
+    if (held.acked === true) continue; // the server's own answer said it is stored
+    if (held.notStored !== true) return null; // it may have arrived
+    n++;
+  }
+  return n;
+}
+
+/**
+ * What the second confirmation of "Forget the earlier account on this device" says of [userId]'s copy (decided on
+ * 2026-11-17): whether this browser keeps one (any copy at all, also one it cannot read), and how many changes in it were
+ * not sent, counted as {@link unsentChangeCount} counts them for a sign-out; and the changes to shared vaults it holds for
+ * that account outside the copy ({@link heldSharedChanges}), which go with the forgetting too. Asking creates nothing.
+ */
+export async function earlierCopyOf(userId: string): Promise<EarlierCopy> {
+  const w = await readWaiting(userId);
+  const held = heldSharedChanges(userId);
+  if (w.kind === "none") return { kept: false, unsent: 0, held };
+  if (w.kind === "unreadable") return { kept: true, unsent: null, held };
+  return { kept: true, unsent: w.pending.length + w.staged.length + w.parked, held };
+}
+
+/** What a forgetting of an earlier account came to. Nothing is sent to the server in any of them. */
+export type ForgetEarlierResult =
+  /** The address is new to this browser: nothing of the earlier account is left here. */
+  | { readonly kind: "forgotten" }
+  /** No record ties the address to that account any more, and no forgetting of it was begun: nothing was removed. */
+  | { readonly kind: "nothing_to_forget" }
+  /** The earlier account is the session this browser keeps (open or locked, in any tab), or a tab has it open: nothing was removed. */
+  | { readonly kind: "account_open" }
+  /** This browser has no Web Locks, so whether a tab has the earlier account open cannot be told: nothing was removed. */
+  | { readonly kind: "open_cannot_tell" }
+  /** What the second confirmation said of the copy is no longer so: nothing was removed; [copy] is what holds now. */
+  | { readonly kind: "not_confirmed"; readonly copy: EarlierCopy }
+  /**
+   * What the offer was made for no longer holds: the address is now tied to the account the refused flow met, or the
+   * earlier account is that account (the same account under another key is never forgotten). Nothing was removed.
+   */
+  | { readonly kind: "no_longer_holds" };
+
+/**
+ * "Forget the earlier account on this device" (decided on 2026-11-17), called only from the person's own click on the
+ * second confirmation, with what that confirmation said ([shown]). It removes the record that ties [email] to the earlier
+ * account [userId], that account's copy in this browser, and everything this browser keeps under that account's id at
+ * this origin but the record of its identity key (its id-keyed pin, kept so that the account never comes back here under
+ * another key); it leaves other accounts and everything known of the server (its card, its pin). Nothing is sent.
+ *
+ * - The earlier account's session is kept here (some tab may have it open), or a tab has the account open (it holds the
+ *   account's lock, {@link holdAccountOpen}, also where its session record could not be written): `account_open`, nothing
+ *   removed. Its sign-out comes first, and no other tab is left using records or a copy that are gone. Everything below
+ *   runs under that lock taken exclusively, so a tab that already had the account open refuses it; a tab that opens the
+ *   account while it runs is not held back (see {@link whileNotOpen}). A browser without Web Locks cannot tell whether a
+ *   tab has the account open: `open_cannot_tell`, nothing removed.
+ * - A forgetting of it begun and not finished (its mark stands) is finished and answered `forgotten`, even where the
+ *   address's record is already gone; with no mark and no record, `nothing_to_forget`.
+ * - [served] is the account the refused flow met (the offer's): where it is the earlier account itself, or the address is
+ *   by now tied to it, `no_longer_holds`, nothing removed. The same account under another key is what the address's
+ *   record exists to stop, never a remade account, and an address taken by the served account has nothing earlier left.
+ * - The copy is counted again: where it differs from [shown], `not_confirmed` with what holds now.
+ * - Otherwise the mark is written first (a mark that cannot be written throws, and nothing is removed), then everything
+ *   goes, then the mark is taken away. A store that throws part-way leaves the mark: the next click, or the next start
+ *   ({@link settleForgettings}), finishes it.
+ */
+export async function forgetEarlierAccount(email: string, userId: string, shown: EarlierCopy, served: string): Promise<ForgetEarlierResult> {
+  const n = emailNorm(email);
+  if (n === null) return { kind: "nothing_to_forget" };
+  if (readPersisted()?.userId === userId) return { kind: "account_open" };
+  if (served === userId) return { kind: "no_longer_holds" };
+  const r = await whileNotOpen(userId, async (): Promise<ForgetEarlierResult> => {
+    if (readPersisted()?.userId === userId) return { kind: "account_open" };
+    const begun = forgettingMarks().some((m) => m.email === n && m.userId === userId);
+    const bound = boundAccountAt(n);
+    if (bound !== userId) {
+      if (!begun) return bound !== null && bound === served ? { kind: "no_longer_holds" } : { kind: "nothing_to_forget" };
+      await dropEarlierAccount(n, userId);
+      return { kind: "forgotten" };
+    }
+    const now = await earlierCopyOf(userId);
+    if (now.kept !== shown.kept || now.unsent !== shown.unsent || now.held !== shown.held) return { kind: "not_confirmed", copy: now };
+    markForgetting(n, userId);
+    await dropEarlierAccount(n, userId);
+    return { kind: "forgotten" };
+  });
+  if (r.ran) return r.value;
+  return r.why === "open" ? { kind: "account_open" } : { kind: "open_cannot_tell" };
+}
+
+/**
+ * At each start of the app: every forgetting begun and not finished is finished where its first removal was made (the
+ * address no longer names that account) and this browser keeps no session of that account; otherwise its mark is dropped
+ * with nothing removed (it never got that far, or that account was signed in to here since). Only a mark the person's
+ * click wrote is settled: nothing else starts a forgetting. A mark whose account a tab has open (or where that cannot be
+ * told) is left for a later start.
+ */
+export async function settleForgettings(): Promise<void> {
+  for (const m of forgettingMarks()) {
+    if (boundAccountAt(m.email) !== m.userId && readPersisted()?.userId !== m.userId) await whileNotOpen(m.userId, () => dropEarlierAccount(m.email, m.userId));
+    else unmarkForgetting(m.email, m.userId);
+  }
+}
+
+/** localStorage for a write that must not fail silently: every failure throws (browserStorage swallows them). */
+const throwingLocalStore: KeyValue = {
+  get: (k) => localStorage.getItem(k),
+  set: (k, v) => localStorage.setItem(k, v),
+  remove: (k) => localStorage.removeItem(k),
+};
+
+/** Everything of the earlier account [userId] under the address [email], in the order the mark relies on; then the mark goes. */
+async function dropEarlierAccount(email: string, userId: string): Promise<void> {
+  // First the record that ties the address to the account: from here the address is new to this browser. The record of
+  // the account's identity key (its id-keyed pin) is kept, here and in the walk below.
+  forgetEarlierRecords(userId, email);
+  // This tab's token slot and lock record, where they name that account (another tab's go with that tab). Their removal
+  // swallows a failure, so it is read back: one still there throws, and the mark stands.
+  const revokeNames = (): boolean => {
+    try {
+      return (JSON.parse(ssGet(TAB_LOCK_REVOKE_KEY) ?? "null") as { userId?: unknown } | null)?.userId === userId;
+    } catch {
+      return false; // a record that does not read names no account
+    }
+  };
+  if (readSlot()?.userId === userId) clearTabTokens();
+  if (revokeNames()) clearLockRevoke();
+  dropUnconfirmedRefresh(userId); // a session of that account that ended unconfirmed: its token's one use is gone with it
+  if (readSlot()?.userId === userId || revokeNames()) throw new Error("this tab's record of the account could not be removed");
+  // Every key of this origin's storage scoped to the account's id, by what it is keyed with ({@link isAccountScopedKey}),
+  // so that a kind added later goes too. Keys of the server (its pin), of the device and of other accounts stay, and so does
+  // the record of this account's identity key.
+  const keptPin = selfIdentityPinKey(userId);
+  const doomed: string[] = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k !== null && k !== keptPin && isAccountScopedKey(k, userId)) doomed.push(k);
+  }
+  for (const k of doomed) localStorage.removeItem(k);
+  // The device record's row for the account and every address hash that maps to it (the secret stays: it is the browser's),
+  // written through a store that throws where the write fails, so that the mark stands and nothing is answered forgotten.
+  new DeviceIdentity(throwingLocalStore).forget(userId);
+  // The copy: its database, as a sign-out wipes it (owed until made, so a tab closed meanwhile finishes it at the next start).
+  // A copy still there afterwards throws: the mark stands, and the next click or start finishes it.
+  await wipeVaultCache(userId);
+  if ((await readWaiting(userId)).kind !== "none") throw new Error("the copy of the account could not be removed");
+  // A server's policy wipe's notice for that copy stays (a word owed to the person), under a key that is not the account's
+  // id, to be said; a wipe the policy still owed for the copy is not run again for an account this browser forgot.
+  detachPolicyWipeNotice(userId);
+  // The next account taken under the address is said once ("this browser now remembers the new account"), until dismissed.
+  rememberNextAt(email);
+  unmarkForgetting(email, userId);
 }
 
 /** design 2026-07-13-web-offline-cache §E.3.2: the per-device opt-out marker (device-wide — "this
@@ -358,8 +851,8 @@ const CACHE_CONSENT_MIGRATED_KEY = "andvari.cacheConsentMigrated";
 /** §E.4 policy row: the LAST-KNOWN `offlineCacheAllowed === false` pin, written on every successful
  *  ClientPolicy fetch ({@link applyOrgOfflineCachePolicy}) and honored on OFFLINE boot — a device that
  *  saw the org forbid caching keeps refusing to create one until a later fetch says otherwise
- *  (Android persisted-policy parity, spec 02 §8). Presence = disallowed; absence = allowed. */
-const ORG_CACHE_OFF_KEY = "andvari.orgCacheOff";
+ *  (Android persisted-policy parity, spec 02 §8). Presence = disallowed; absence = allowed. The key
+ *  (ORG_CACHE_OFF_KEY) lives in vault/policywipe.ts, where an open store reads it too. */
 /** §B.5: navigator.storage.persist() has been REQUESTED once on this device (advisory, never
  *  re-nagged — Firefox surfaces a doorhanger). The settings toggle's explicit ON re-requests. */
 const PERSIST_REQUEST_KEY = "andvari.persistRequested";
@@ -548,17 +1041,74 @@ export function declineCacheNudge(): void {
  * unlike a user sign-out this cannot be blocked). true ⇒ clear the pin; nothing is created here —
  * creation stays with the gated unlock/sign-in paths. Called from App.loadPolicy on every successful
  * ClientPolicy fetch.
+ *
+ * Decided on 2026-11-17: before the wipe, the changes that wait in the copy are sent ONCE ([sent.send], null when no live
+ * session of the account is held: then nothing is sent and the wipe follows at once), and how many could not be sent is
+ * kept apart from the copy with [sent.server]'s name, to be said once the copy is gone (vault/policywipe.ts
+ * removeCopyForPolicy: one run per copy across tabs, the session checked at every request, one limit for the whole
+ * attempt, the number read at the wipe). The pin above is set first: from that moment an open store queues nothing new
+ * into the copy. Only a copy that exists is tried and counted: with none, nothing waits and nothing is said. Resolves to
+ * what is to be said now that the copy is gone, or null (no copy; another run wiped it; or the wipe is not made yet, and
+ * is said when it is). Without [sent] (no server to name) the copy is wiped and nothing is said. [sent.mayWrite] is
+ * asked for every change at the moment its request is handed to the transport ({@link policyWipeQuestion}); a change it
+ * holds back is counted as not sent.
  */
-export async function applyOrgOfflineCachePolicy(allowed: boolean, userId: string | null): Promise<void> {
+export async function applyOrgOfflineCachePolicy(
+  allowed: boolean,
+  userId: string | null,
+  sent: { send: SendOnce | null; server: string; mayWrite: MayWrite } | null = null,
+  limits: PolicyWipeLimits = {},
+): Promise<PolicyWipeNotice | null> {
   const before = loadSession(); // A14 F5: the pair follows the gate, like the device toggle
   if (allowed) {
     lsRemove(ORG_CACHE_OFF_KEY);
     rehomeSessionTokens(before, userId);
-    return;
+    // A policy that was lifted ends every wipe it asked for that was not made, with its notice: the copy is used again.
+    dropHeldPolicyWipes();
+    releaseCopiesAfterLift();
+    return null;
   }
   lsSet(ORG_CACHE_OFF_KEY, String(Date.now()));
   rehomeSessionTokens(before, userId);
-  if (userId) await wipeVaultCache(userId);
+  if (!userId) return null;
+  // From this moment only THIS account's copy is closed for new changes (a tab of another account goes on as before).
+  markCopyBeingRemoved(userId);
+  if (sent === null) {
+    await wipeVaultCache(userId);
+    clearCopyBeingRemoved(userId);
+    return null;
+  }
+  return (await removeCopyForPolicy(userId, sent.server, sent.send, sent.mayWrite, limits)).notice;
+}
+
+/**
+ * The question the one attempt before a policy's wipe asks of each change of [userId]'s copy (decided on 22 November
+ * 2026). Where this tab has that account open ([open]) and a pull of this session has run the removal's rule, its
+ * store's `mayWrite`, asked at each change: the verified log says there whether the vault's key still works. Before that
+ * first pull (an unlock: the policy is read beside it), what the store knows of a log is what was verified at rest, which
+ * a removal made while this browser was away has not reached: only the open account's personal vault may be written.
+ * Where no account is open (a start, a locked tab, or another account open here), no verified state of any log is in
+ * memory, so only the personal vault may be written: the one this browser's own session record of that account names.
+ * That record is written only where an unlock opened the account (ui/opensession.ts, from `Account.personalVaultId`: the
+ * vault of the genesis this account signed, and only when its own wrap opened), never from a label a server serves. No
+ * record of that account, or one that names no personal vault: nothing may be written.
+ */
+export function policyWipeQuestion(open: OpenAccountQuestion | null, userId: string): MayWrite {
+  if (open !== null && open.userId === userId) {
+    return (vaultId) => (open.pulled() ? open.mayWrite(vaultId) : open.personalVaultId !== "" && vaultId === open.personalVaultId);
+  }
+  const record = loadSession();
+  const personal = record !== null && record.userId === userId ? record.personalVaultId : "";
+  return (vaultId) => personal !== "" && vaultId === personal;
+}
+
+/** What {@link policyWipeQuestion} asks of an account open in this tab (its store and its own personal vault). */
+export interface OpenAccountQuestion {
+  readonly userId: string;
+  readonly personalVaultId: string;
+  /** Whether a pull of this session has run the removal's rule (`VaultStore.pulledInThisSession`). */
+  pulled(): boolean;
+  mayWrite(vaultId: string): boolean;
 }
 
 /**
@@ -646,28 +1196,87 @@ function openIfExists(name: string): Promise<IDBDatabase | null> {
 }
 
 /**
- * §D.2c/§E.4 (S3-2): refresh the durable offline cache's accountKeys after a master-password change.
- * Without this the cache keeps the OLD kdfSalt/kdfParams/wrappedUvk, so an offline unlock rejects the
- * NEW password while the OLD (possibly compromised) password still opens the cached vault until the
- * next online unlock — exactly the spec 05 T3 stale-wrap window (§D.2c lists "after changePassword"
- * as a re-cache write point). floorGood passes on the fresh payload, so setAccountKeys overwrites
- * unconditionally. Gated on webCacheEnabled(userId) so it never CREATES a cache on a device where
- * caching is off (§5.4.1 — a non-consented device must not gain an at-rest artifact from a password
- * change). Best-effort: any cache failure is swallowed — the change already committed server-side,
- * and the next online unlock re-caches.
+ * After a password change (spec 03 §3, §D.2c/§E.4 S3-2): the offline cache's copy of the account keys takes the change's own new salt,
+ * parameters and wrapped UVK, so the old password no longer opens the cached vault offline (spec 05 T3), and the
+ * pending wraps kept beside it become [pending] (none once the change is made). Nothing is fetched: the values are the
+ * ones this browser just sent, or the server's keys at a settle. Only where caching is on and a copy exists. A failed
+ * write never fails the committed change, and it is never swallowed either: it answers `failed`, the screen says so,
+ * and the next online unlock writes the server's keys again.
  */
-export async function refreshCachedAccountKeys(client: Pick<ApiClient, "accountKeys">, userId: string): Promise<void> {
-  if (!webCacheEnabled(userId)) return;
+export async function rekeyCachedAccountKeys(userId: string, keys: SessionKeys, pending: readonly SessionKeys[] = [], open: CopyOpener = gatedCopy): Promise<CopyWrite> {
   try {
-    const cache = await openVaultCache(userId);
+    const cache = await open(userId);
+    if (cache === null) return "none";
     try {
-      await cache.setAccountKeys(await client.accountKeys());
+      const next = { kdfSalt: keys.kdfSalt, kdfParams: keys.kdfParams, wrappedUvk: keys.wrappedUvk };
+      let any = false;
+      const v2 = await cache.accountKeysV2();
+      if (v2 !== null) {
+        if (!(await cache.setAccountKeysV2({ ...v2, ...next }))) return "failed";
+        any = true;
+      }
+      const held = await cache.accountKeys();
+      if (held !== null) {
+        if (!(await cache.setAccountKeys({ ...held, ...next }))) return "failed";
+        any = true;
+      }
+      if (!any) return "none";
+      return (await cache.setPendingWraps(pending)) ? "written" : "failed";
     } finally {
       cache.close();
     }
   } catch {
-    /* best-effort — a cache failure must never fail a password change that already committed */
+    return "failed";
   }
+}
+
+/**
+ * Before a password change is sent: its wrap, with any earlier one still unanswered, is kept beside this browser's
+ * offline copy of the account keys, so that after a lost answer and a reload the copy opens with the new password too.
+ * `none` where caching is off or no copy is held.
+ */
+export async function keepPendingWraps(userId: string, pending: readonly SessionKeys[], open: CopyOpener = gatedCopy): Promise<CopyWrite> {
+  try {
+    const cache = await open(userId);
+    if (cache === null) return "none";
+    try {
+      if ((await cache.accountKeysV2()) === null && (await cache.accountKeys()) === null) return "none";
+      return (await cache.setPendingWraps(pending)) ? "written" : "failed";
+    } finally {
+      cache.close();
+    }
+  } catch {
+    return "failed";
+  }
+}
+
+/** The pending wraps kept beside this browser's offline copy, for an offline unlock; none where caching is off. */
+export async function cachedPendingWraps(userId: string, open: CopyOpener = gatedCopy): Promise<SessionKeys[]> {
+  try {
+    const cache = await open(userId);
+    if (cache === null) return [];
+    try {
+      // The wraps only: the day each was kept is read where it is said (onboardflow's unlock, through copyAtUnlock).
+      return (await cache.pendingWraps()).map((w) => ({ kdfSalt: w.kdfSalt, kdfParams: { ...w.kdfParams }, wrappedUvk: w.wrappedUvk }));
+    } finally {
+      cache.close();
+    }
+  } catch {
+    return [];
+  }
+}
+
+/** Opens this browser's offline copy of [userId], or null where caching is off for it. */
+export type CopyOpener = (userId: string) => Promise<VaultCache | null>;
+
+const gatedCopy: CopyOpener = async (userId) => (webCacheEnabled(userId) ? openVaultCache(userId) : null);
+
+/** The offline copy's keeper for a Settings session of [userId] (vault/settingsflow.ts CopyKeeper). */
+export function cacheCopyKeeper(userId: string, open: CopyOpener = gatedCopy): CopyKeeper {
+  return {
+    keepPending: (pending) => keepPendingWraps(userId, pending, open),
+    settle: (own, pending) => rekeyCachedAccountKeys(userId, own, pending, open),
+  };
 }
 
 export function defaultBaseUrl(): string {
@@ -719,6 +1328,29 @@ export function makeClient(session: Session | null, baseUrl: string): ApiClient 
     },
   );
   client.boundUserId = session?.userId ?? null;
+  // A refresh whose answer never came and had no try left: its token is kept for the next sign-in's name, under the
+  // account the client is bound to (api/client.ts noTryLeft), and a client still holding it sends nothing.
+  client.keepUnconfirmed = (t, owner) => {
+    // A sign-in's placeholder binding names no account. Where this browser holds no session record at all (a sign-out
+    // removed it, with the tokens it kept), a late answer keeps nothing: no record of a removed token is kept.
+    if (isUuid(owner) && hasSessionRecord()) keepUnconfirmedRefresh(owner, t);
+  };
+  // A kept token is never sent, by any tab, whatever a tab still holds in its memory.
+  client.isKeptUnconfirmed = (t) => isUnconfirmedRefresh(t);
+  // With the offline copy on every tab shares one pair, and a tab's token leaves only while this browser's record holds
+  // that same pair (or this tab's own slot does: its own pair from before the copy was turned on in another tab).
+  client.sharedRecord = (t) => {
+    const bound = client.boundUserId;
+    if (bound === null || !tokensKeptAcrossLock(bound)) return undefined;
+    const slot = readSlot();
+    if (slot && slot.userId === bound && slot.tokens.refreshToken === t) return "holds";
+    const rec = readPersisted();
+    if (!rec || rec.userId !== bound) return unsavedShared?.userId === bound && unsavedShared.refreshToken === t ? "unsaved" : "gone";
+    if (!rec.tokens) return "ended";
+    return rec.tokens.refreshToken === t ? "holds" : "other";
+  };
+  // The app's client makes the one more try of a refresh whose answer never came by itself, inside its window.
+  client.secondTryAfterMs = SECOND_TRY_AFTER_MS;
   return client;
 }
 

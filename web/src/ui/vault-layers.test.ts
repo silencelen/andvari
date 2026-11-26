@@ -65,7 +65,11 @@ describe("quality-deadcode--6 — one layer-clearing routine, not ten subsets", 
   });
 
   it("the recovery banner's Settings jump closes every layer (it used to clear only two)", () => {
-    const banner = vaultCode.slice(vaultCode.indexOf("Recovery sign-in"), vaultCode.indexOf("escrowStale &&"));
+    const start = vaultCode.indexOf("Recovery sign-in");
+    const end = vaultCode.indexOf("<NoPersonalVaultNotice account={account} />");
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const banner = vaultCode.slice(start, end);
     expect(banner).toContain('setView("settings"); closeLayers();');
     expect(banner).not.toContain("setEditing(null); setSelected(null)");
   });

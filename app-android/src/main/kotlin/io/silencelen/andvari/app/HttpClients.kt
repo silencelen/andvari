@@ -23,8 +23,14 @@ object AndroidHttpClients : HttpClients {
  * ceiling), so it never severs a transfer an op still allows, and no call outlives every op.
  */
 internal fun androidHttpClient(): HttpClient = HttpClient(OkHttp) {
+    // No redirect is followed, by ktor or by OkHttp underneath it: a redirect would carry a request,
+    // its token included, to an address the pinned origin never vouched for. The shared code's dialer refuses them
+    // too; this client refuses them for every other caller, and a 3xx reaches the caller as the answer it is.
+    followRedirects = false
     engine {
         config {
+            followRedirects(false)
+            followSslRedirects(false)
             callTimeout(BoundedOps.attachmentMs(BoundedOps.ATTACHMENT_CEILING_BYTES), TimeUnit.MILLISECONDS)
         }
     }

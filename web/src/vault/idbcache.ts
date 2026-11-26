@@ -1,4 +1,5 @@
 import type { AccountKeys, Mutation, WireGrant, WireItem, WireVault } from "../api/types";
+import type { AccountKeysV2 } from "../api/wire";
 import { assertServerKdfParams } from "../crypto/keys";
 
 /**
@@ -78,13 +79,11 @@ const STORE_QUEUE = "queue";
 const STORE_HELD = "held";
 const STORE_CONSUMED = "consumedDeleteIds";
 const STORE_TRANSFER = "transferSeq";
-/** Root cause A, branch A7: kv-row prefixes (no new object store, so DB_VERSION stays 1). */
-const KV_CONSUMED_NONCE = "consumedNonce:";
-const KV_LIVE_SINCE = "liveSince:";
 /** Root cause A §5.1 INV-HOME (branch A1b): kv-row prefixes, again no new object store. Both survive the §D.1 clear
  *  (a server-triggered 410 wipes the row stores, never the homes) and die with wipe(). */
 const KV_ITEM_HOME = "itemHome:";
 const KV_QUARANTINE = "quarantine:";
+const KV_LOG_RECORD = "logRecord:";
 
 /** Every §B.2 store — all created in version 1, all spanned by the pull tx. */
 const ALL_STORES = [
@@ -120,6 +119,35 @@ export interface HeldVaultRecord {
   deleteId?: string;
   parked: Mutation[];
   expungeAt: number;
+  /**
+   * Design §3.8, §3.12: this account's own wrap of the vault's key under its UVK (the self-wrap's form, bound to the
+   * log's genesis), so items can still be copied out of the held copy. Absent on records made before it was kept.
+   */
+  ownWrap?: string;
+  /** This account deleted the vault itself (its copy is held all the same, design §3.8). Absent on older records. */
+  byMe?: true;
+  /**
+   * Not a removed vault's copy: the items of a vault this browser still has (the personal vault, or a shared vault still
+   * listed) that a full list neither carried nor marked as deleted, set aside here. Kept under its own key
+   * ({@link heldRowKey}), beside any held copy of the same vault. Absent on every other record.
+   */
+  setAside?: true;
+  /**
+   * Items set aside only: the ids of those the server has sent again since, in their own vault, with other content than
+   * the copy kept here; the person was told of each once. Absent where there is none.
+   */
+  otherContentTold?: string[];
+  /**
+   * A removed vault's copy only: the ids of items it holds whose deletion a pull applied while it was held, each taken
+   * out again when a live row of the item is applied. The items stay in the copy; putting the vault back leaves them
+   * out. Absent where there is none, and on records made before it was kept (read as none).
+   */
+  deletedServed?: string[];
+}
+
+/** The held store's key of a record: the vault's id, or for items set aside from it, the id with a prefix of its own. */
+export function heldRowKey(vaultId: string, setAside: boolean): string {
+  return setAside ? `set-aside:${vaultId}` : vaultId;
 }
 
 /** §A row 8: the last-known policy bits honored on offline boot (kv:policy). */
@@ -164,24 +192,42 @@ export interface PullBatch {
   upsertGrant(grant: WireGrant): void;
   upsertVault(vault: WireVault): void;
   dropVault(vaultId: string): void;
-  /** The §D.1 enumerated clear — same contract as the standalone method. */
-  clear(): void;
+  /**
+   * The §D.1 enumerated clear — same contract as the standalone method. [keep]: vaults whose item, grant and vault rows
+   * stay as they are (a 410 resync's vault that the fresh list leaves out while its verified log still names this
+   * account: kept, as a removal the log does not show keeps it). Read when the commit runs.
+   */
+  clear(keep?: ReadonlySet<string>): void;
   enqueue(mutation: Mutation): void;
   dequeue(mutationId: string): void;
   dropPending(vaultId: string): void;
   markStagedDenied(mutationId: string): void;
   putHeld(held: HeldVaultRecord & { cachedName?: string }): void;
+  /** [vaultId]: the record's key in the held store, {@link heldRowKey} (a vault's id for its held copy). */
   removeHeld(vaultId: string): void;
   addConsumedDeleteId(deleteId: string): void;
   setLastVerifiedTransferSeq(vaultId: string, seq: number): void;
-  /** Root cause A §6.2 (branch A7): one consumed removal nonce, in the SAME tx as the holding move. */
-  addConsumedNonce(vaultId: string, nonce: string, issuedAt: number): void;
-  /** Root cause A §6.3 (branch A7): this device's liveSince for a vault (null clears it). */
-  setLiveSince(vaultId: string, at: number | null): void;
   /** Root cause A §5.1 INV-HOME (branch A1b): record an itemId's home (only ever written while absent). */
   setItemHome(itemId: string, vaultId: string): void;
   /** Root cause A §5.1 INV-HOME (branch A1b): one served row refused by INV-HOME (ciphertext, never applied). */
   addQuarantined(item: WireItem): void;
+  /** A shared vault's adoption record ({@link VaultLogRecord}), in the same commit as the rows or held copy it describes. */
+  setLogRecord(rec: VaultLogRecord): void;
+  /** The record of a vault of which this browser holds nothing any more. */
+  removeLogRecord(vaultId: string): void;
+}
+
+/**
+ * What decides, across a reload, whether a removal from a shared vault is still owed: the number of the vault log's
+ * `add` entry under which this browser adopted the vault ([carried] false), or under which it last carried a removal out
+ * (the held copy and its notice; [carried] true). Written in the same commit as what it describes, so the rows and the
+ * record never say two things. Kept in the key-value store under `logRecord:<vaultId>`, which the full list's clear does
+ * not touch.
+ */
+export interface VaultLogRecord {
+  readonly vaultId: string;
+  readonly addSeq: number;
+  readonly carried: boolean;
 }
 
 /**
@@ -201,13 +247,6 @@ export interface VaultCache {
   setCursor(rev: number): Promise<void>;
   /** kv:lastSyncAt — restored by hydrate so "vault as of last sync <t>" stays honest (§D.4). */
   lastSyncAt(): Promise<number | null>;
-  /**
-   * kv:grantFreezeDone (security review 2026-10, root cause A §8.2, A6 review LOW-1): set once the legacy-grant
-   * freeze ran (or was ruled out) over THIS cache. It lives WITH the rows it describes, so clearing localStorage
-   * cannot make post-upgrade rows count as pre-upgrade evidence. Survives the §D.1 clear; dies with wipe().
-   */
-  freezeDone(): Promise<boolean>;
-  setFreezeDone(): Promise<void>;
 
   /** WIRE row only — no decrypted twin at rest (§B.3; A2). Tombstone handling
    *  (delete vs upsert) is the caller's pull logic, as in core SyncEngine. */
@@ -262,6 +301,7 @@ export interface VaultCache {
   putHeld(held: HeldVaultRecord & { cachedName?: string }): Promise<void>;
   getHeld(vaultId: string): Promise<HeldVaultRecord | null>;
   heldVaults(): Promise<HeldVaultRecord[]>;
+  /** [vaultId]: the record's key in the held store, {@link heldRowKey} (a vault's id for its held copy). */
   removeHeld(vaultId: string): Promise<void>;
 
   addConsumedDeleteId(deleteId: string): Promise<void>;
@@ -272,14 +312,12 @@ export interface VaultCache {
   setLastVerifiedTransferSeq(vaultId: string, seq: number): Promise<void>;
   /** §D.4 hydrate enumerator (web-only). */
   transferSeqs(): Promise<{ vaultId: string; seq: number }[]>;
-  /** Root cause A §6.2/§6.3 (branch A7): the durable consumed removal nonces and liveSince stamps, kv rows that
-   *  survive a resync `clear()` (which enumerates items/grants/vaults + kv:cursor only). Never server values. */
-  consumedNonces(): Promise<{ vaultId: string; nonce: string; issuedAt: number }[]>;
-  liveSinces(): Promise<{ vaultId: string; at: number }[]>;
   /** Root cause A §5.1 INV-HOME (branch A1b; core `VaultCache.itemHome` twin): every recorded home, for hydrate. */
   itemHomes(): Promise<{ itemId: string; vaultId: string }[]>;
   /** Root cause A §5.1 INV-HOME (branch A1b): the quarantined rows, for diagnosis only (never listed or exported). */
   quarantined(): Promise<WireItem[]>;
+  /** Every shared vault's adoption record ({@link VaultLogRecord}), for hydrate. */
+  logRecords(): Promise<VaultLogRecord[]>;
 
   /** Cached server accountKeys payload (§A row 6) — the offline-unlock input.
    *  Returned RAW: the C3 read-time `assertServerKdfParams` gate belongs to
@@ -287,6 +325,33 @@ export interface VaultCache {
   accountKeys(): Promise<AccountKeys | null>;
   /** §D.2c keep-old-on-bad-write — resolves true iff the payload was written. */
   setAccountKeys(keys: AccountKeys): Promise<boolean>;
+  /** The post-cut-over account keys with their genesis (spec 02 §8), for an offline unlock through openAccount. */
+  accountKeysV2(): Promise<AccountKeysV2 | null>;
+  /**
+   * Whether a row for {@link accountKeysV2} is stored at all, usable or not: at an unlock, a copy whose keys cannot be
+   * read (a row that is not a usable key set) is told apart from a copy that holds no keys yet (spec 01 §7).
+   */
+  hasAccountKeysV2Row(): Promise<boolean>;
+  setAccountKeysV2(keys: AccountKeysV2): Promise<boolean>;
+  /**
+   * The wraps of password changes sent with no answer yet (spec 01 §7), kept beside the copy of the account keys, oldest
+   * first, as core keeps its pending record: an offline unlock opens with either password until the server's word
+   * settles them. A row that is not a list of wraps reads as none.
+   */
+  pendingWraps(): Promise<PendingWrap[]>;
+  /** Replaces that list; an empty one removes the row. Resolves true iff it was written. */
+  setPendingWraps(wraps: readonly PendingWrap[]): Promise<boolean>;
+  /**
+   * Design §3.13: the half-made new vaults of stopped moves that wait for their deletion (store.ts `halfMadeDue`), kept
+   * across a reload. Their ids, in the clear as every vault row's id is, each with the copies the move made in it (each
+   * copy's item id and its revision at the server, which every item row also carries in the clear), so that it is
+   * deleted only while it holds nothing else; a name is read from the vault's own sealed meta when it is needed, never
+   * kept here. A row that is not such a list reads as none; an entry kept as a bare id (before the copies were kept)
+   * reads with `copies: null` (not known: such a vault is deleted only while it holds nothing at all).
+   */
+  halfMadeDue(): Promise<HalfMadeDueRow[]>;
+  /** Replaces that list; an empty one removes the row. Resolves true iff it was written. */
+  setHalfMadeDue(rows: readonly HalfMadeDueRow[]): Promise<boolean>;
   /** R41 (audit H67): drop the cached accountKeys row and NOTHING else — the offline queue,
    *  envelopes and holding all survive. Called on exactly one verdict: the cached payload is
    *  STRUCTURALLY damaged (not decodable base64url / an envelope version this build does not
@@ -381,6 +446,133 @@ function deleteDb(f: IDBFactory, name: string): Promise<void> {
   });
 }
 
+/**
+ * Opens [name] as it is, never creating it: null when it does not exist (the create that `open` would begin is
+ * aborted, so nothing is minted). Rejects when an existing database cannot be opened. The handle closes itself on
+ * a sibling's versionchange, so it never blocks a wipe.
+ */
+function openExisting(f: IDBFactory, name: string): Promise<IDBDatabase | null> {
+  return new Promise((resolve, reject) => {
+    let missing = false;
+    let r: IDBOpenDBRequest;
+    try {
+      r = f.open(name);
+    } catch (e) {
+      reject(e instanceof Error ? e : new Error("IndexedDB open failed"));
+      return;
+    }
+    r.onupgradeneeded = () => {
+      missing = true;
+      try {
+        r.transaction?.abort();
+      } catch {
+        /* already aborting */
+      }
+    };
+    r.onsuccess = () => {
+      const db = r.result;
+      db.onversionchange = () => db.close();
+      resolve(db);
+    };
+    r.onerror = () => (missing ? resolve(null) : reject(r.error ?? new Error("IndexedDB open failed")));
+  });
+}
+
+/** What waits in a copy, read without changing it (see {@link readWaiting}). */
+export type WaitingRead =
+  /** This browser keeps no copy of the account. */
+  | { readonly kind: "none" }
+  /** A copy exists and cannot be read (another schema, another owner, a broken store, a failed read). */
+  | { readonly kind: "unreadable" }
+  /** The queue's rows not yet refused ([pending], in order), the rows the server refused for their vault ([staged]),
+   *  and the number of changes parked with vaults held back. */
+  | { readonly kind: "read"; readonly pending: Mutation[]; readonly staged: Mutation[]; readonly parked: number };
+
+/**
+ * The changes that wait in [userId]'s copy, read in one read-only transaction over the copy as it is: nothing is made
+ * (no copy is created by asking), repaired or deleted (a copy that exists and cannot be opened stays, and reads as
+ * `unreadable`, never as empty). Never rejects.
+ */
+export async function readWaiting(userId: string): Promise<WaitingRead> {
+  const f = factory();
+  if (!f) return { kind: "none" };
+  let db: IDBDatabase | null;
+  try {
+    db = await openExisting(f, vaultDbName(userId));
+  } catch {
+    return { kind: "unreadable" };
+  }
+  if (db === null) return { kind: "none" };
+  try {
+    if (db.version !== DB_VERSION || !hasAllStores(db)) return { kind: "unreadable" };
+    const tx = db.transaction([STORE_KV, STORE_QUEUE, STORE_HELD], "readonly");
+    const [owner, rows, held] = await Promise.all([
+      req(tx.objectStore(STORE_KV).get("userId")),
+      req(tx.objectStore(STORE_QUEUE).getAll()) as Promise<unknown[]>,
+      req(tx.objectStore(STORE_HELD).getAll()) as Promise<unknown[]>,
+    ]);
+    if (kvValue(owner) !== userId) return { kind: "unreadable" };
+    const pending: Mutation[] = [];
+    const staged: Mutation[] = [];
+    for (const row of rows) {
+      const q = row as Partial<QueueRow> | null;
+      if (!q || typeof q !== "object" || !q.mutation || typeof q.mutation !== "object" || typeof q.mutation.mutationId !== "string") return { kind: "unreadable" };
+      if (q.staged === 0) pending.push(q.mutation);
+      else if (q.staged === 1) staged.push(q.mutation);
+      else return { kind: "unreadable" };
+    }
+    let parked = 0;
+    for (const h of held) {
+      const p = (h as { parked?: unknown } | null)?.parked;
+      if (p === undefined) continue;
+      if (!Array.isArray(p)) return { kind: "unreadable" };
+      parked += p.length;
+    }
+    return { kind: "read", pending, staged, parked };
+  } catch {
+    return { kind: "unreadable" };
+  } finally {
+    try {
+      db.close();
+    } catch {
+      /* already closed */
+    }
+  }
+}
+
+/** How a wipe of a copy ended (see {@link deleteCopy}). */
+export type CopyDeletion = "gone" | "blocked" | "failed";
+
+/**
+ * Deletes [userId]'s copy and says whether it is gone: `gone` only when the browser said the database was deleted (or
+ * there is no IndexedDB at all, so no copy); `failed` when it refused; `blocked` when it was not done within [waitMs]
+ * (a connection that does not close holds it). A blocked deletion stays asked: when what blocked it ends, the browser
+ * completes it and [later] is called with whether it is gone then.
+ */
+export function deleteCopy(userId: string, waitMs: number, later?: (gone: boolean) => void): Promise<CopyDeletion> {
+  const f = factory();
+  if (!f) return Promise.resolve("gone");
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (d: CopyDeletion): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(d);
+    };
+    let r: IDBOpenDBRequest;
+    try {
+      r = f.deleteDatabase(vaultDbName(userId));
+    } catch {
+      resolve("failed");
+      return;
+    }
+    const timer = setTimeout(() => settle("blocked"), waitMs);
+    r.onsuccess = () => (settled ? later?.(true) : settle("gone"));
+    r.onerror = () => (settled ? later?.(false) : settle("failed"));
+  });
+}
+
 /** Open (creating v1 with the FULL §B.2 schema + owner stamp on fresh create). */
 function openDb(f: IDBFactory, name: string, userId: string): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -436,6 +628,61 @@ function hasAllStores(db: IDBDatabase): boolean {
 
 const kvValue = (row: unknown): unknown => (row && typeof row === "object" ? (row as KvRow).value : undefined);
 
+const KV_ACCOUNT_KEYS_V2 = "accountKeys.v2";
+const KV_PENDING_WRAPS = "pendingWraps";
+const KV_HALF_MADE_DUE = "halfMadeDue";
+
+/** A half-made vault due for deletion, with the copies its move made in it ({@link VaultCache.halfMadeDue}). */
+export interface HalfMadeDueRow {
+  readonly vaultId: string;
+  /** Each copy's item id and its revision at the server (null: not known); null when no record of the copies is kept. */
+  readonly copies: readonly (readonly [string, number | null])[] | null;
+}
+
+/** One kept entry: a bare id (kept before the copies were: not known) or an id with its copies; null when it is neither. */
+function parseHalfMadeDueRow(v: unknown): HalfMadeDueRow | null {
+  if (typeof v === "string") return v === "" ? null : { vaultId: v, copies: null };
+  if (typeof v !== "object" || v === null) return null;
+  const r = v as { vaultId?: unknown; copies?: unknown };
+  if (typeof r.vaultId !== "string" || r.vaultId === "") return null;
+  if (r.copies === null) return { vaultId: r.vaultId, copies: null };
+  if (!Array.isArray(r.copies)) return null;
+  const copies: (readonly [string, number | null])[] = [];
+  for (const c of r.copies as unknown[]) {
+    if (!Array.isArray(c) || c.length !== 2 || typeof c[0] !== "string" || (c[1] !== null && !Number.isSafeInteger(c[1]))) return null;
+    copies.push([c[0], c[1] as number | null]);
+  }
+  return { vaultId: r.vaultId, copies };
+}
+
+/** One pending wrap as kept: the salt, cost and wrapped UVK a password change sent (vault/sessionwrap.ts SessionKeys). */
+export interface PendingWrap {
+  readonly kdfSalt: string;
+  readonly kdfParams: AccountKeys["kdfParams"];
+  readonly wrappedUvk: string;
+  /**
+   * When this browser first kept the wrap (ms since the epoch): the day of the change that sent it, for the unlock that
+   * finds the change never reached the server. Stamped when the wrap is first written; absent in rows kept before.
+   */
+  readonly at?: number;
+}
+
+const atOf = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined);
+
+function isPendingWrap(v: unknown): v is PendingWrap {
+  if (!v || typeof v !== "object") return false;
+  const w = v as Partial<PendingWrap>;
+  return typeof w.kdfSalt === "string" && typeof w.wrappedUvk === "string" && floorGood(w as unknown as AccountKeys);
+}
+
+/** A cached post-cut-over key set worth keeping: floor-good KDF parameters and a genesis to check at offline unlock. */
+function isCachedKeysV2(v: unknown): v is AccountKeysV2 {
+  if (!v || typeof v !== "object") return false;
+  const k = v as Partial<AccountKeysV2>;
+  return typeof k.genesis === "string" && k.genesis !== "" && typeof k.kdfSalt === "string" && typeof k.wrappedUvk === "string" &&
+    typeof k.encryptedIdentitySeed === "string" && typeof k.identityPub === "string" && floorGood(k as unknown as AccountKeys);
+}
+
 /** §D.2c/breaker #5: a payload is floor-good iff kdfParams is present AND
  *  passes the H1 fence (same assert as the online path in client.ts). */
 function floorGood(keys: AccountKeys | null | undefined): boolean {
@@ -451,7 +698,7 @@ function floorGood(keys: AccountKeys | null | undefined): boolean {
 /** A2: strip the plaintext `cachedName` and stamp the top-level key (§B.2 keyPath). */
 function toHeldRow(held: HeldVaultRecord & { cachedName?: string }): HeldRow {
   const { cachedName: _dropped, ...rec } = held;
-  return { vaultId: rec.vault.vaultId, ...rec };
+  return { vaultId: heldRowKey(rec.vault.vaultId, rec.setAside === true), ...rec };
 }
 
 function fromHeldRow(row: HeldRow): HeldVaultRecord {
@@ -461,13 +708,28 @@ function fromHeldRow(row: HeldRow): HeldVaultRecord {
 
 // ---- in-transaction op helpers (shared by standalone methods and applyPull) ----
 
-function clearIn(tx: IDBTransaction): void {
+async function clearIn(tx: IDBTransaction, keep: ReadonlySet<string> = new Set()): Promise<void> {
   // §D.1 ENUMERATED contract (breaker #2): items/grants/vaults + kv:cursor ONLY.
   // queue/held/consumedDeleteIds/transferSeq and kv:accountKeys/userId/policy/
   // lastSyncAt are deliberately untouched.
-  tx.objectStore(STORE_ITEMS).clear();
-  tx.objectStore(STORE_GRANTS).clear();
-  tx.objectStore(STORE_VAULTS).clear();
+  const items = tx.objectStore(STORE_ITEMS);
+  const grants = tx.objectStore(STORE_GRANTS);
+  const vaults = tx.objectStore(STORE_VAULTS);
+  // The rows of a kept vault are read first and put back as they were, in the same transaction.
+  const kept: { items: unknown[]; grants: unknown[]; vaults: unknown[] } = { items: [], grants: [], vaults: [] };
+  for (const vaultId of keep) {
+    kept.items.push(...((await req(items.index("vaultId").getAll(vaultId))) as unknown[]));
+    const g = (await req(grants.get(vaultId))) as unknown;
+    if (g !== undefined) kept.grants.push(g);
+    const v = (await req(vaults.get(vaultId))) as unknown;
+    if (v !== undefined) kept.vaults.push(v);
+  }
+  items.clear();
+  grants.clear();
+  vaults.clear();
+  for (const r of kept.items) items.put(r);
+  for (const r of kept.grants) grants.put(r);
+  for (const r of kept.vaults) vaults.put(r);
   tx.objectStore(STORE_KV).put({ key: "cursor", value: 0 } satisfies KvRow);
 }
 
@@ -661,16 +923,6 @@ export class IdbVaultCache implements VaultCache {
     });
   }
 
-  freezeDone(): Promise<boolean> {
-    return this.read([STORE_KV], false, async (tx) => kvValue(await req(tx.objectStore(STORE_KV).get("grantFreezeDone"))) === 1);
-  }
-
-  setFreezeDone(): Promise<void> {
-    return this.write([STORE_KV], (tx) => {
-      tx.objectStore(STORE_KV).put({ key: "grantFreezeDone", value: 1 } satisfies KvRow);
-    });
-  }
-
   // -- items (wire envelopes only) --
 
   upsertItem(wire: WireItem): Promise<void> {
@@ -749,7 +1001,7 @@ export class IdbVaultCache implements VaultCache {
           tx.objectStore(STORE_VAULTS).put(vault);
         }),
       dropVault: (vaultId) => ops.push((tx) => dropVaultIn(tx, vaultId)),
-      clear: () => ops.push((tx) => clearIn(tx)),
+      clear: (keep) => ops.push((tx) => clearIn(tx, keep)),
       enqueue: (mutation) => ops.push((tx) => enqueueIn(tx, mutation)),
       dequeue: (mutationId) => ops.push((tx) => dequeueIn(tx, mutationId)),
       dropPending: (vaultId) => ops.push((tx) => dropPendingIn(tx, vaultId)),
@@ -772,15 +1024,6 @@ export class IdbVaultCache implements VaultCache {
         ops.push((tx) => {
           tx.objectStore(STORE_TRANSFER).put({ vaultId, seq });
         }),
-      addConsumedNonce: (vaultId, nonce, issuedAt) =>
-        ops.push((tx) => {
-          tx.objectStore(STORE_KV).put({ key: `${KV_CONSUMED_NONCE}${vaultId}|${nonce}`, value: issuedAt } satisfies KvRow);
-        }),
-      setLiveSince: (vaultId, at) =>
-        ops.push((tx) => {
-          if (at === null) tx.objectStore(STORE_KV).delete(`${KV_LIVE_SINCE}${vaultId}`);
-          else tx.objectStore(STORE_KV).put({ key: `${KV_LIVE_SINCE}${vaultId}`, value: at } satisfies KvRow);
-        }),
       setItemHome: (itemId, vaultId) =>
         ops.push((tx) => {
           tx.objectStore(STORE_KV).put({ key: `${KV_ITEM_HOME}${itemId}`, value: vaultId } satisfies KvRow);
@@ -789,6 +1032,14 @@ export class IdbVaultCache implements VaultCache {
         ops.push((tx) => {
           // One row per itemId (the newest refusal): bounded by the homes this device holds, whatever the server sends.
           tx.objectStore(STORE_KV).put({ key: `${KV_QUARANTINE}${item.itemId}`, value: item } satisfies KvRow);
+        }),
+      setLogRecord: (rec) =>
+        ops.push((tx) => {
+          tx.objectStore(STORE_KV).put({ key: `${KV_LOG_RECORD}${rec.vaultId}`, value: { addSeq: rec.addSeq, carried: rec.carried } } satisfies KvRow);
+        }),
+      removeLogRecord: (vaultId) =>
+        ops.push((tx) => {
+          tx.objectStore(STORE_KV).delete(`${KV_LOG_RECORD}${vaultId}`);
         }),
     };
     fn(batch); // pure buffering — a throw here commits nothing and is not a storage strike
@@ -919,19 +1170,6 @@ export class IdbVaultCache implements VaultCache {
     return this.read([STORE_TRANSFER], [], async (tx) => (await req(tx.objectStore(STORE_TRANSFER).getAll())) as { vaultId: string; seq: number }[]);
   }
 
-  consumedNonces(): Promise<{ vaultId: string; nonce: string; issuedAt: number }[]> {
-    return this.read([STORE_KV], [], async (tx) => {
-      const rows = (await req(tx.objectStore(STORE_KV).getAll())) as KvRow[];
-      const out: { vaultId: string; nonce: string; issuedAt: number }[] = [];
-      for (const r of rows) {
-        if (!r.key.startsWith(KV_CONSUMED_NONCE) || typeof r.value !== "number") continue;
-        const [vaultId, nonce] = r.key.slice(KV_CONSUMED_NONCE.length).split("|");
-        if (vaultId && nonce) out.push({ vaultId, nonce, issuedAt: r.value });
-      }
-      return out;
-    });
-  }
-
   itemHomes(): Promise<{ itemId: string; vaultId: string }[]> {
     return this.read([STORE_KV], [], async (tx) => {
       const rows = (await req(tx.objectStore(STORE_KV).getAll())) as KvRow[];
@@ -948,12 +1186,19 @@ export class IdbVaultCache implements VaultCache {
     });
   }
 
-  liveSinces(): Promise<{ vaultId: string; at: number }[]> {
+  logRecords(): Promise<VaultLogRecord[]> {
     return this.read([STORE_KV], [], async (tx) => {
       const rows = (await req(tx.objectStore(STORE_KV).getAll())) as KvRow[];
-      return rows
-        .filter((r) => r.key.startsWith(KV_LIVE_SINCE) && typeof r.value === "number")
-        .map((r) => ({ vaultId: r.key.slice(KV_LIVE_SINCE.length), at: r.value as number }));
+      const out: VaultLogRecord[] = [];
+      for (const r of rows) {
+        if (!r.key.startsWith(KV_LOG_RECORD)) continue;
+        const v = r.value as { addSeq?: unknown; carried?: unknown } | null;
+        // A record that does not read is no record: hydrate decides that vault as a copy from before records were kept.
+        if (v && typeof v === "object" && typeof v.addSeq === "number" && Number.isSafeInteger(v.addSeq) && typeof v.carried === "boolean") {
+          out.push({ vaultId: r.key.slice(KV_LOG_RECORD.length), addSeq: v.addSeq, carried: v.carried });
+        }
+      }
+      return out;
     });
   }
 
@@ -984,9 +1229,80 @@ export class IdbVaultCache implements VaultCache {
     return written && !this.closed;
   }
 
+  /** The post-cut-over account keys with their genesis (spec 02 §8): what an offline unlock opens with openAccount. */
+  accountKeysV2(): Promise<AccountKeysV2 | null> {
+    return this.read([STORE_KV], null, async (tx) => {
+      const v = kvValue(await req(tx.objectStore(STORE_KV).get(KV_ACCOUNT_KEYS_V2)));
+      return isCachedKeysV2(v) ? v : null;
+    });
+  }
+
+  hasAccountKeysV2Row(): Promise<boolean> {
+    return this.read([STORE_KV], false, async (tx) => (await req(tx.objectStore(STORE_KV).get(KV_ACCOUNT_KEYS_V2))) !== undefined);
+  }
+
+  /** As {@link setAccountKeys}: a copy without a genesis, or outside the KDF fence, never displaces a good one. */
+  async setAccountKeysV2(keys: AccountKeysV2): Promise<boolean> {
+    if (this.closed) return false;
+    let written = false;
+    await this.write([STORE_KV], async (tx) => {
+      const kv = tx.objectStore(STORE_KV);
+      if (!isCachedKeysV2(keys)) {
+        if (isCachedKeysV2(kvValue(await req(kv.get(KV_ACCOUNT_KEYS_V2))))) return; // keep old
+      }
+      kv.put({ key: KV_ACCOUNT_KEYS_V2, value: keys } satisfies KvRow);
+      written = true;
+    });
+    return written && !this.closed;
+  }
+
+  pendingWraps(): Promise<PendingWrap[]> {
+    return this.read([STORE_KV], [], async (tx) => {
+      const v = kvValue(await req(tx.objectStore(STORE_KV).get(KV_PENDING_WRAPS)));
+      return Array.isArray(v) ? v.filter(isPendingWrap).map((w) => ({ kdfSalt: w.kdfSalt, kdfParams: { ...w.kdfParams }, wrappedUvk: w.wrappedUvk, ...(atOf(w.at) !== undefined ? { at: atOf(w.at) } : {}) })) : [];
+    });
+  }
+
+  async setPendingWraps(wraps: readonly PendingWrap[]): Promise<boolean> {
+    if (this.closed) return false;
+    let written = false;
+    await this.write([STORE_KV], async (tx) => {
+      const kv = tx.objectStore(STORE_KV);
+      if (wraps.length === 0) kv.delete(KV_PENDING_WRAPS);
+      else {
+        // A wrap kept again keeps the day it was first kept; a new one is stamped now.
+        const held = kvValue(await req(kv.get(KV_PENDING_WRAPS)));
+        const firstKept = (w: PendingWrap): number => atOf(w.at) ?? (Array.isArray(held) ? held.filter(isPendingWrap).map((h) => (h.wrappedUvk === w.wrappedUvk ? atOf(h.at) : undefined)).find((a) => a !== undefined) : undefined) ?? Date.now();
+        kv.put({ key: KV_PENDING_WRAPS, value: wraps.map((w) => ({ kdfSalt: w.kdfSalt, kdfParams: { ...w.kdfParams }, wrappedUvk: w.wrappedUvk, at: firstKept(w) })) } satisfies KvRow);
+      }
+      written = true;
+    });
+    return written && !this.closed;
+  }
+
+  halfMadeDue(): Promise<HalfMadeDueRow[]> {
+    return this.read([STORE_KV], [], async (tx) => {
+      const v = kvValue(await req(tx.objectStore(STORE_KV).get(KV_HALF_MADE_DUE)));
+      return Array.isArray(v) ? v.map(parseHalfMadeDueRow).filter((r): r is HalfMadeDueRow => r !== null) : [];
+    });
+  }
+
+  async setHalfMadeDue(rows: readonly HalfMadeDueRow[]): Promise<boolean> {
+    if (this.closed) return false;
+    let written = false;
+    await this.write([STORE_KV], async (tx) => {
+      const kv = tx.objectStore(STORE_KV);
+      if (rows.length === 0) kv.delete(KV_HALF_MADE_DUE);
+      else kv.put({ key: KV_HALF_MADE_DUE, value: rows.map((r) => ({ vaultId: r.vaultId, copies: r.copies === null ? null : r.copies.map(([id, rev]) => [id, rev]) })) } satisfies KvRow);
+      written = true;
+    });
+    return written && !this.closed;
+  }
+
   async clearAccountKeys(): Promise<void> {
     if (this.closed) return;
     await this.write([STORE_KV], async (tx) => {
+      tx.objectStore(STORE_KV).delete(KV_ACCOUNT_KEYS_V2);
       tx.objectStore(STORE_KV).delete("accountKeys");
     });
   }
@@ -1041,10 +1357,10 @@ const NOOP_BATCH: PullBatch = {
   removeHeld: () => {},
   addConsumedDeleteId: () => {},
   setLastVerifiedTransferSeq: () => {},
-  addConsumedNonce: () => {},
-  setLiveSince: () => {},
   setItemHome: () => {},
   addQuarantined: () => {},
+  setLogRecord: () => {},
+  removeLogRecord: () => {},
 };
 
 /**
@@ -1064,11 +1380,6 @@ export class NullCache implements VaultCache {
   async lastSyncAt(): Promise<number | null> {
     return null;
   }
-  /** No durable rows, so nothing here can ever be pre-upgrade evidence. */
-  async freezeDone(): Promise<boolean> {
-    return true;
-  }
-  async setFreezeDone(): Promise<void> {}
 
   async upsertItem(_wire: WireItem): Promise<void> {}
   async deleteItem(_itemId: string): Promise<void> {}
@@ -1133,16 +1444,13 @@ export class NullCache implements VaultCache {
   async transferSeqs(): Promise<{ vaultId: string; seq: number }[]> {
     return [];
   }
-  async consumedNonces(): Promise<{ vaultId: string; nonce: string; issuedAt: number }[]> {
-    return [];
-  }
-  async liveSinces(): Promise<{ vaultId: string; at: number }[]> {
-    return [];
-  }
   async itemHomes(): Promise<{ itemId: string; vaultId: string }[]> {
     return [];
   }
   async quarantined(): Promise<WireItem[]> {
+    return [];
+  }
+  async logRecords(): Promise<VaultLogRecord[]> {
     return [];
   }
 
@@ -1151,6 +1459,27 @@ export class NullCache implements VaultCache {
   }
   async setAccountKeys(_keys: AccountKeys): Promise<boolean> {
     return false; // nothing persisted — honest
+  }
+  async accountKeysV2(): Promise<AccountKeysV2 | null> {
+    return null;
+  }
+  async hasAccountKeysV2Row(): Promise<boolean> {
+    return false;
+  }
+  async setAccountKeysV2(_keys: AccountKeysV2): Promise<boolean> {
+    return false;
+  }
+  async pendingWraps(): Promise<PendingWrap[]> {
+    return [];
+  }
+  async setPendingWraps(_wraps: readonly PendingWrap[]): Promise<boolean> {
+    return false; // no copy here, so nothing to keep beside it
+  }
+  async halfMadeDue(): Promise<HalfMadeDueRow[]> {
+    return [];
+  }
+  async setHalfMadeDue(_rows: readonly HalfMadeDueRow[]): Promise<boolean> {
+    return false; // no copy here: the session's own memory keeps the list
   }
   async clearAccountKeys(): Promise<void> {} // nothing cached to clear
   async policy(): Promise<CachePolicy | null> {

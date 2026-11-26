@@ -40,6 +40,12 @@ data class SavedCredentials(
     val appPackage: String,
     val card: SavedCard? = null,
     val webScheme: String? = null,
+    /**
+     * A typed field of the form belongs to a web page: it carries a web domain, or it is an HTML
+     * field. Unlike [webDomain] this survives [launderUntrustedCapture]: in an app that is not a verified browser such
+     * a capture is never filed as the app's own login ([AutofillSave.captureSite] refuses it).
+     */
+    val webPage: Boolean = false,
 ) {
     /** A login is only worth saving if it has a password. */
     val savable: Boolean get() = !password.isNullOrEmpty()
@@ -98,7 +104,7 @@ object SaveExtractor {
     fun extract(structure: AssistStructure): SavedCredentials {
         val appPackage = structure.activityComponent?.packageName ?: ""
 
-        class Captured(val signal: FieldSignal, val value: String?, val domain: String?, val scheme: String?, val isNewPassword: Boolean)
+        class Captured(val signal: FieldSignal, val value: String?, val domain: String?, val scheme: String?, val isNewPassword: Boolean, val html: Boolean = false)
         val nodes = ArrayList<Captured>()
 
         fun visit(node: AssistStructure.ViewNode, inheritedDomain: String?, inheritedScheme: String?, depth: Int) {
@@ -111,7 +117,7 @@ object SaveExtractor {
             if (node.autofillId != null && node.importantForAutofill != View.IMPORTANT_FOR_AUTOFILL_NO) {
                 // Value-less fields are collected too: refine() clusters the WHOLE form by
                 // frame, and a CC_NUMBER sibling matters even when this walk sees no text in it.
-                nodes.add(Captured(StructureParser.signalOf(node, nodeDomain), textValue(node), nodeDomain, nodeScheme, StructureParser.isNewPassword(node)))
+                nodes.add(Captured(StructureParser.signalOf(node, nodeDomain), textValue(node), nodeDomain, nodeScheme, StructureParser.isNewPassword(node), node.htmlInfo != null))
             }
             for (i in 0 until node.childCount) visit(node.getChildAt(i), nodeDomain, nodeScheme, depth + 1)
         }
@@ -190,7 +196,9 @@ object SaveExtractor {
             username = null
             password = null
         }
-        return SavedCredentials(username, password, domain, appPackage, card, webScheme = scheme)
+        // A2: any typed field of the form that belongs to a web page (a domain, or an HTML field) makes it a page's capture.
+        val webPage = nodes.any { it.value != null && (it.domain != null || it.html) }
+        return SavedCredentials(username, password, domain, appPackage, card, webScheme = scheme, webPage = webPage)
     }
 
     /** The field's current text: the typed AutofillValue if present, else the node's own text. */

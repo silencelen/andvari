@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { ApiClient, ApiError, type SessionEndKind } from "../api/client";
-import type { AttachmentRef, ClientPolicy, ItemDoc } from "../api/types";
+import type { AttachmentRef, ItemDoc } from "../api/types";
+import type { ClientPolicyV2 as ClientPolicy } from "../api/wire";
 import { toB64 } from "../crypto/bytes";
-import { shortFormMatches } from "../crypto/escrow";
 import { generatePassword } from "../crypto/generator";
 import { hibpCountInRange, hibpPrefix, hibpSha1UpperHex } from "../crypto/hibp";
-import { KdfPolicyError, WEAK_KDF_MESSAGE } from "../crypto/keys";
+import { KdfPolicyError } from "../crypto/keys";
 import { randomBytes } from "../crypto/provider";
 import { normalizeTotp, parseOtpauthUri, totpCode, totpSecondsRemaining } from "../crypto/totp";
 import type { Account } from "../vault/account";
@@ -18,23 +18,25 @@ import {
   LEFT_UNPROVEN,
   type LifecycleNotice,
   type MoveGesture,
+  MoveWaitingError,
   type PendingUpload,
   REMOVAL_REPLAY,
   REMOVED_LEGACY,
-  TRANSFER_NOT_OFFERED,
   type VaultInfo,
   type VaultItem,
   type VaultStore,
 } from "../vault/store";
 import { ImportError, MAX_BYTES, type ImportFormat, type ImportPlan, type ImportReport, type Parsed, type ParsedRow, parseCsvImport, planImport, rowOrdinalsByLine } from "../import/csv";
-import { Admin } from "./Admin";
 import { scheduleClipboardClear, writeClipboard } from "./clipboard";
 import { useCopy } from "./usecopy";
-import { UsageTracker } from "../vault/usage";
-import { CLIPBOARD_FAILED, CLIPBOARD_NOT_CLEARED, CLIPBOARD_NOT_CLEARED_SHORT, net, NetworkError, UNREACHABLE } from "./errors";
+import { copyRemovalText, saveErrorText } from "./saveerror";
+import { UsageTracker, type UsageWire } from "../vault/usage";
+import type { SettingsSession } from "../vault/settingsflow";
+import { answerLimitText, CLIPBOARD_FAILED, CLIPBOARD_NOT_CLEARED, CLIPBOARD_NOT_CLEARED_SHORT, net, NetworkError, UNREACHABLE } from "./errors";
 import { ExportPanel, type ExportMode } from "./ExportPanel";
 import { Field } from "./Field";
 import { fmtDay, fmtDayYear, humanSize } from "./format";
+import { vaultLabel, vaultLabels } from "./vaultlabel";
 import { applyListView, type SortMode, type TypeFilter } from "./listview";
 import { hashToView, viewToHash } from "./routes";
 import { safeSiteHref } from "./safeurl";
@@ -42,15 +44,35 @@ import { BackLink, BACK_GLYPH } from "./BackLink";
 import { Busy } from "./Busy";
 import { Announcer, Msg } from "./Msg";
 import { Health } from "./Health";
+import { useListedNow } from "./Staleness";
 import { clampClipboardClearSeconds } from "./policyclamp";
 import { Settings } from "./Settings";
 import type { DeletionEnd, DeletionTrack } from "./DeleteAccount";
-import { BrandSigil } from "./Sigil";
-import { Sharing } from "./Sharing";
+import { BrandSigil, Wordmark } from "./Sigil";
+import { friendlyError, Sharing, UnfinishedMoves, withdrawnText } from "./Sharing";
 import { Empty } from "./Empty";
 import { estimateStrength } from "./strength";
 import { windowRange, type WindowRange } from "./virtual";
-import { PersonalVaultBanner } from "./Household";
+import { NoPersonalVaultNotice } from "./NoPersonalVault";
+import { SharedPrompts } from "./SharedPrompts";
+import { EscrowPrompt } from "./EscrowPrompt";
+import { QuotaShortError } from "../vault/quota";
+import { quotaShortText } from "./quotatext";
+import { heldNoticeText } from "./heldtext";
+import { fill, RESEND_DELETE_ASK, RESEND_DELETE_ASK_KEEP, RESEND_DELETE_ASK_NOW, RESEND_DELETE_ASK_UNNAMED, RESEND_DELETE_MADE, RESEND_DELETE_MADE_UNNAMED, MOVE_STORED_COPIED, MOVE_STORED_COPY,MOVE_STORED_LATE, MOVE_STORED_NOTHING_LATE, MOVE_DELETED_OUTSIDE, MOVE_STORED_UNSEEN, MOVE_UNNAMED_OLD, MOVE_UNNAMED_VAULT, MOVE_WAITING_READ_ONLY, MOVE_WAITING_REFUSED, IMPORT_TOTP_DIFFERS, IMPORT_TOTP_DIFFERS_PREVIEW, MOVE_DISCARD_KEPT, ITEM_BROUGHT_BACK, ITEM_BROUGHT_BACK_MANY, ITEM_BROUGHT_BACK_UNNAMED, RESEND_DELETE_MADE_NO_DAY, RESEND_DELETE_MADE_UNNAMED_NO_DAY, ITEM_CLOSED, ITEM_CLOSED_EDITING, ITEM_CLOSED_EDITING_NOT_KEPT, ITEM_CLOSED_EDITING_SENT, EDITOR_VAULT_GONE } from "./copy";
+import { DELETED_PARKED_ONE } from "./copy";
+import {
+  ITEMS_SET_ASIDE_FROZEN_NOTICE,
+  ITEMS_SET_ASIDE_OTHER_NOTICE,
+  ITEMS_SET_ASIDE_PERSONAL_NAME,
+  ITEMS_SET_ASIDE_PERSONAL_NOTICE,
+  ITEMS_SET_ASIDE_SHARED_NOTICE,
+  VAULT_GONE_UNCHECKED_NOTICE,
+  VAULT_LEFT_FROZEN_NOTICE,
+} from "./copy";
+import { CARD_FORK, COPY_FOLLOWS_SERVER, GENERATE_REPLACE_ASK, kdfRefusalText, OFFLINE_OPENED, OFFLINE_TRY_SERVER, PERSONAL_REMOVAL_REFUSED, OWNER_OUT_OF_SPACE, OWNER_OUT_OF_SPACE_THEIRS, OWNER_OUT_OF_SPACE_YOURS, SERVER_KEYS_NOT_KNOWN_OPENED, SESSION_ENDED_COPY, SESSION_NOT_CONFIRMED_COPY } from "./copy";
+import { endedUnconfirmed } from "./sessionend";
+import { CopyBeingRemovedError } from "../vault/policywipe";
 
 type View = "vault" | "sharing" | "health" | "settings" | "admin" | "trash";
 
@@ -149,23 +171,27 @@ interface Props {
    *  output. Empty when the persisted session predates the field (fallback below). */
   email: string;
   policy: ClientPolicy | null;
+  /** Design §4.4: the session is the read-only copy under a forked pin (opened so, or frozen when a refresh found the
+   *  fork): no events socket, no usage load or flush, and the fork warning. */
+  readOnlyCopy?: boolean;
+  /** The vault was opened from this browser's offline copy, the server out of reach: said in a line until a sync lands. */
+  openedFromCopy?: boolean;
+  /** Spec 01 §7: a sign-in over this browser's copy that the typed password did not open; said in one line for the session. */
+  copySealedElsewhere?: boolean;
   isAdmin: boolean;
   mustChangePassword: boolean;
-  /** F57: this account's escrow is sealed to a superseded recovery key — offer a re-seal. */
-  escrowStale: boolean;
-  /** §8.4 escrow v2 migration (security review 2026-10, root cause A): the escrow is still a v1 seal —
-   *  the same banner asks the member to confirm the household recovery key, then re-seals v2. */
-  escrowNeedsV2?: boolean;
-  /** F57: the CURRENT org recovery fingerprint (re-seal target + short-form verify anchor). */
-  escrowFingerprint: string;
   /** §C6 (design 2026-07-13-web-offline-cache): this session came in via an OFFLINE unlock whose
    *  cached `recoveryConfirmed !== true` — show a persistent, NON-blocking reminder (never blocks;
    *  the online capture gate still hard-blocks the next time this device reconnects). */
   offlineRecoveryReminder: boolean;
+  /** The usage ledger's routes (spec 03 §3) on the post-cut-over wire client. */
+  usageWire: UsageWire;
+  /** The session the post-cut-over Settings flows act for. */
+  settings?: SettingsSession;
   /** F26: locks — keeps the persisted session; the user gets the Unlock card. */
   onLock: () => void;
-  /** F26: the session died server-side — full sign-out, not a lock. `kind` says
-   *  whether it was an explicit revocation or plain expiry (the copy differs). */
+  /** The session died server-side: App ends it (design §4.4: the offline copy stays; without one, a full sign-out).
+   *  `kind` says whether it was an explicit revocation or plain expiry (the copy differs). */
   onRevoked: (kind: SessionEndKind) => void;
   /** A14 (F5): hand App this session's usage-ledger flush, so a lock that revokes the tab's tokens
    *  (no offline copy on this browser) lets the last uses land first (the H33 order). */
@@ -177,15 +203,22 @@ interface Props {
   onDeletionTrack?: (event: DeletionTrack) => void;
 }
 
-export function Vault({ account, store, client, email, policy, isAdmin, mustChangePassword, escrowStale, escrowNeedsV2 = false, escrowFingerprint, offlineRecoveryReminder, onLock, onRevoked, registerUsageFlush, onAccountDeleted, onDeletionTrack }: Props) {
+export function Vault({ account, store, client, email, policy, readOnlyCopy: readOnlyProp = false, openedFromCopy = false, copySealedElsewhere = false, isAdmin, mustChangePassword, offlineRecoveryReminder, usageWire, settings, onLock, onRevoked, registerUsageFlush, onAccountDeleted, onDeletionTrack }: Props) {
+  // §4.4: App's flag, or the store's own (a frozen store never thaws).
+  const readOnlyCopy = readOnlyProp || store.isReadOnlyCopy();
   // Usage ledger (spec 02 §8.2) — one per unlocked session. Recording is in-memory and the flush
   // is debounced, because spec 03 §3 forbids a PUT per fill: that would turn the blob's own
   // updatedAt into a keystroke-grade activity trace, which is the leak the single-blob design
   // exists to avoid. A failure anywhere in here costs one health column and nothing else.
   const usageRef = useRef<UsageTracker | null>(null);
-  if (!usageRef.current) usageRef.current = new UsageTracker(client, account);
+  if (!usageRef.current) usageRef.current = new UsageTracker(usageWire, account);
   const usage = usageRef.current;
   useEffect(() => {
+    // §4.4: the ledger is a server blob; a read-only copy neither loads nor flushes it.
+    if (readOnlyCopy) {
+      usage.halt();
+      return;
+    }
     void usage.load();
     // pagehide, not unload: it is the one that fires reliably on mobile tab eviction, which is
     // exactly where a session's uses would otherwise be dropped.
@@ -196,16 +229,25 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
       registerUsageFlush?.(null);
       window.removeEventListener("pagehide", onHide);
       // Flush BEFORE dispose (dispose clears the map), and never block teardown on it — the
-      // Account in this closure outlives React's unmount, so the seal still has its key.
+      // Account in this closure outlives React's unmount, so the seal still has its key. A store frozen meanwhile (a
+      // fork found during the session) halts the ledger instead: nothing goes to a forked origin.
+      if (store.isReadOnlyCopy()) usage.halt();
       void usage.flush().finally(() => usage.dispose());
     };
-  }, [usage]);
+  }, [usage, readOnlyCopy, store]);
   // Route structure (owner dev-note 2026-08-19): the mount reads the fragment back, and Vault
   // mounts AFTER the unlock gate — so a refresh on "#/health" unlocks and returns to Health.
   // Enroll fragments were already captured-and-stripped by module load, and "#recover" belongs
   // to the signed-out flow; both parse to the home view here (routes.ts is total).
   const [view, setView] = useState<View>(() => hashToView(typeof window === "undefined" ? "" : window.location.hash, isAdmin));
-  const [items, setItems] = useState<VaultItem[]>(store.list());
+  // Spec 01 §7: after a sign-in over this browser's copy sealed under another master password, the line that says so
+  // shows above the view the vault opens on (whichever it is, Settings included), once: leaving that view ends it.
+  const [copyLineView, setCopyLineView] = useState<View | null>(() => (copySealedElsewhere ? view : null));
+  useEffect(() => {
+    if (copyLineView !== null && view !== copyLineView) setCopyLineView(null);
+  }, [view, copyLineView]);
+  // The list as the guarded reader handed it out at the last followStore; drawn only through `items` below.
+  const [snapshot, setSnapshot] = useState<VaultItem[]>(() => store.list());
   // Lifecycle notices (spec 03 §11) — the banner reflects the store's list after every sync.
   const [notices, setNotices] = useState<LifecycleNotice[]>(store.notices());
   const [query, setQuery] = useState("");
@@ -223,6 +265,19 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
   /** INV-EDIT (root cause A §5.1, A1b): the vault the open editor was bound to when it OPENED on an existing item.
    *  The save names it; a home that changed since refuses the save ("reopen it") instead of re-targeting it. */
   const [editingVaultId, setEditingVaultId] = useState<string | null>(null);
+  // The open item and the editor as this render has them, for followStore (which runs outside a render), and whether
+  // the mounted editor holds typing that was not saved (the Editor writes it at each of its renders).
+  const selectedRef = useRef<string | null>(selected);
+  selectedRef.current = selected;
+  const editingRef = useRef<ItemDoc | null>(editing);
+  editingRef.current = editing;
+  const editorDirty = useRef(false);
+  // Whether Save was pressed in the editor and the store's save has not settled yet (its answer may still be on its way).
+  const saveWaiting = useRef(false);
+  // Whether followStore closed the editor while that save waited (and said its outcome was unknown).
+  const closedWhileSaving = useRef(false);
+  // The one line that says why an open item or editor was closed (followStore); it goes with the next navigation.
+  const [closedLine, setClosedLine] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [exportMode, setExportMode] = useState<ExportMode | null>(null);
   // DN-1 (A1): the Sharing view's per-vault settings layer. The id lives HERE — not in
@@ -239,13 +294,20 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
   // never flashes grey; a *sustained* WS drop turns it grey (onDown is debounced ~2.5s).
   const [wsUp, setWsUp] = useState(true);
   const [syncOk, setSyncOk] = useState(true);
+  // The sentence for a last sync that one of the client's limits ended (errors.ts answerLimitText), else null.
+  const [syncLimit, setSyncLimit] = useState<string | null>(null);
+  // Opened from the offline copy: the line stays, and what needs the server is not offered, until a sync has landed.
+  const [fromCopy, setFromCopy] = useState(openedFromCopy);
+  const copySyncedAt = useRef(store.lastSyncAt);
   const online = wsUp && syncOk;
   const degraded = !wsUp || !syncOk;
   // a11yweb-04/AM-3: one connectivity string — the tooltip AND the visually-hidden text
   // twin in the appbar read from it, so a screen reader hears the state flip.
   const connStatus = online
     ? "Connected"
-    : wsUp
+    : syncLimit !== null
+      ? syncLimit
+      : wsUp
       ? "Last sync failed — will retry"
       : "Live updates down — checking for changes every 60 s";
   // Manual "Sync now" (F29): disabled while a click-driven sync is in flight.
@@ -305,10 +367,41 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
   }, [view]);
   useBackGuard(deep, closeTop, routeHash);
 
-  const refresh = () => {
-    setItems(store.list());
+  /**
+   * THE one function by which this screen follows the store: after every sync (syncNow), after every refresh (every
+   * `refresh` below is this function), at the `storage` event by which the browser tells this tab that another tab of
+   * the profile wrote a record (a vault's log among them), and at any render that finds the open item no longer handed
+   * out. It re-reads the list and the notices through the store's guarded reader; where the open item (the detail, or the
+   * editor of an existing item) is no longer handed out, it closes the editor and the detail and says why in one line.
+   * Typing that was not saved is not kept and not made into a change: nobody pressed Save, and the line says it was not
+   * kept. Everything else on this screen that shows an item reads through the guarded reader at each render.
+   */
+  const followStore = useCallback(() => {
+    const next = store.list();
+    setSnapshot((prev) => (sameItems(prev, next) ? prev : next));
     setNotices(store.notices());
-  };
+    const open = selectedRef.current;
+    if (open === null || store.get(open) !== undefined) return;
+    const wasEditing = editingRef.current !== null;
+    // A save still waiting for its answer may have reached the vault: it is said to be unknown, never "not saved".
+    closedWhileSaving.current = wasEditing && saveWaiting.current;
+    setClosedLine(!wasEditing ? ITEM_CLOSED : saveWaiting.current ? ITEM_CLOSED_EDITING_SENT : editorDirty.current ? ITEM_CLOSED_EDITING_NOT_KEPT : ITEM_CLOSED_EDITING);
+    selectedRef.current = null;
+    editingRef.current = null;
+    editorDirty.current = false;
+    setEditing(null);
+    setEditorGenerate(false);
+    setEditingVaultId(null);
+    setSelected(null);
+  }, [store]);
+  const refresh = followStore;
+
+  // Another tab of this browser profile moved a vault's log (or any record): the browser says so with a `storage` event.
+  useEffect(() => {
+    const onStorage = () => followStore();
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [followStore]);
 
   const dismissNotice = (id: string) => {
     store.dismissNotice(id);
@@ -324,6 +417,8 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
     try {
       await store.sync();
       setSyncOk(true);
+      // A pull that landed reached the server (its stamp moved past the copy's): the vault is no longer only this browser's copy.
+      if (store.lastSyncAt !== copySyncedAt.current) setFromCopy(false);
       // G04: a landed full sync is the ONE moment the store's item set is provably COMPLETE, so
       // this is the only place the usage ledger may be pruned (usage.ts pruneUsage). The
       // pagehide/unmount/debounce flushes stay bare flush() — a partial/in-flight view there
@@ -331,23 +426,27 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
       // in undecryptable/missing-VK ids too, so an item this device just can't read (newer fv,
       // unarrived grant) keeps its cross-device usage instead of being pruned away.
       void usage.flush(new Set([...store.list().map((it) => it.itemId), ...store.undecryptable().map((it) => it.itemId)]));
-    } catch {
+      setSyncLimit(null);
+    } catch (e) {
       setSyncOk(false);
+      // A sync the client's limit ended (the server stopped sending, or took too long) is said in a line of its own; the
+      // poll below tries again, never without that word.
+      setSyncLimit(answerLimitText(e));
     } finally {
       // Refresh on BOTH arms: a genuine offline-write denial THROWS out of sync() only
       // AFTER the pull applied and the store reverted the refused rows + minted the durable
       // "write-refused" notice — those must render even though this background catch
       // swallows the throw (the notice, not the throw, is the user-facing surface).
-      setItems(store.list());
-      setNotices(store.notices());
+      followStore();
     }
-  }, [store, usage]);
+  }, [store, usage, followStore]);
 
   // WS dirty-bell → pull. The bell auto-reconnects (client.ts: backoff + fresh ticket per
   // attempt) and onOpen fires on EVERY (re)open, so the sync there catches both the mint
   // round-trip window and any bells missed while the socket was down (no replay server-side).
   // The returned close fn is the effect cleanup — no socket leaks across lock/unlock cycles.
   useEffect(() => {
+    if (readOnlyCopy) return; // §4.4: no socket to a forked origin (App closed a live one already)
     const close = client.events(
       (rev) => {
         // H38: remember the bell's rev BEFORE syncing — if this sync joins a pull already in
@@ -356,7 +455,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
         store.noteRev(rev);
         void syncNow(); // dirty bell
       },
-      (kind) => onRevoked(kind), // session died server-side — full sign-out (F26)
+      (kind) => onRevoked(kind), // session died server-side — App ends it (§4.4: the copy stays)
       () => {
         setWsUp(true);
         // PENDING until the catch-up pull lands: bells missed while the socket was
@@ -367,7 +466,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
       () => setWsUp(false), // sustained drop (debounced)
     );
     return close;
-  }, [client, store, syncNow, onRevoked]);
+  }, [client, store, syncNow, onRevoked, readOnlyCopy]);
 
   // F29: with the socket down (WS-stripping proxy, blocked ticket mint) the bell can't
   // ring — and a bell-pull that FAILED with the socket healthy would otherwise never
@@ -403,10 +502,25 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
     }
   };
 
-  // Vault metadata for badges + the new-item picker (recomputed whenever items refresh).
+  // Vault metadata for badges + the new-item picker, read through the store's guarded reader at each render (a vault
+  // whose key no longer works is not listed, whichever road moved its log), kept the same object while it reads the same.
+  const vaultsNow = store.vaults();
+  const vaultsKey = JSON.stringify(vaultsNow);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const vaultsInfo = useMemo(() => store.vaults(), [store, items]);
+  const vaultsInfo = useMemo(() => vaultsNow, [vaultsKey]);
+  // The list's snapshot (re-read by followStore) shows, at each render, only the items of the vaults listed now: an
+  // item of a vault that another tab, or any road outside this tab's sync, took away is not drawn even before the
+  // snapshot is read again. Health, Staleness, Duplicates, the search and the rows all draw from this. The person's own
+  // vault counts also where the server serves no row for it (VaultStore.shownVaultIds: named by the opened account only).
+  const shownKey = store.shownVaultIds().join(",");
+  const items = useMemo(() => {
+    const listed = new Set(shownKey.split(","));
+    return snapshot.filter((it) => listed.has(it.vaultId));
+  }, [snapshot, shownKey]);
   const vaultNameById = useMemo(() => new Map(vaultsInfo.map((v) => [v.vaultId, v.name])), [vaultsInfo]);
+  // Two vaults of one name are told apart by when each was made where vaults are listed to pick from. An item row's tag
+  // keeps the plain name: on a phone the longer label pushed the item's own name out of its row.
+  const vaultLabelById = useMemo(() => vaultLabels(vaultsInfo), [vaultsInfo]);
 
   // A vault filter pointing at a vault we no longer hold (left/revoked mid-session) degrades
   // to "all" instead of pinning the list to a silent empty set behind a blank select.
@@ -433,11 +547,17 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
     });
   }, [items, query, sortMode, typeFilter, effVaultFilter]);
   // New items may target the personal vault or any shared vault we can write to.
-  const newItemVaultChoices = useMemo(
-    () => vaultsInfo.filter((v) => v.type === "personal" || v.role === "owner" || v.role === "writer"),
-    [vaultsInfo],
-  );
-  const hasWritableShared = newItemVaultChoices.some((v) => v.type !== "personal");
+  // Design §3.13 as decided on 2026-11-17: a vault whose move's deletion waits takes nothing new, so it is no target.
+  // Read per render from the store, not memoized: a move's deletion starts waiting, and a move's new vault appears,
+  // without the item list changing (the walk of 2026-11-17 saw a stale picker offer the waiting vault).
+  // Decided on 23 November 2026: a shared vault whose log is frozen or withheld here can be read and takes no write
+  // (VaultStore.mayWrite), so it is no target either.
+  const newItemVaultChoices = store.vaults().filter((v) => (v.type === "personal" || v.role === "owner" || v.role === "writer") && !store.moveDeleteWaiting(v.vaultId) && store.mayWrite(v.vaultId));
+  // The one line above an item of such a vault, and above the list filtered to it.
+  const moveWaitingLine = (vaultId: string | null | undefined) =>
+    vaultId && store.moveDeleteWaiting(vaultId) ? (
+      <div className="msg info" style={{ display: "block", marginTop: 12 }} role="status">{fill(MOVE_WAITING_READ_ONLY, vaultNameById.get(vaultId) ?? MOVE_UNNAMED_OLD)}</div>
+    ) : null;
 
   // fv fail-close surface (design 2026-07-09): items sealed by a NEWER client sit in the
   // store's undecryptable set instead of degrading — surface a count so "invisible" reads
@@ -464,6 +584,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
     setExportMode(null);
     setSelected(null);
     setSharingSettingsVaultId(null);
+    setClosedLine(null);
   }, []);
 
   const startNew = (type: "login" | "note" | "card") => {
@@ -484,7 +605,22 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
 
   const save = async (doc: ItemDoc, newFiles: PendingUpload[], onProgress?: (done: number, total: number) => void, vaultId?: string) => {
     // An edit names the vault its editor opened on (INV-EDIT); a new item names the picker's destination.
-    await store.save(selected, doc, newFiles, onProgress, selected !== null ? (editingVaultId ?? undefined) : vaultId);
+    saveWaiting.current = true;
+    closedWhileSaving.current = false;
+    try {
+      await store.save(selected, doc, newFiles, onProgress, selected !== null ? (editingVaultId ?? undefined) : vaultId);
+    } finally {
+      saveWaiting.current = false;
+    }
+    // The save is done: the editor holds nothing unsaved any more. Its marks are cleared before the screen follows the
+    // store, so that an item a removal took away meanwhile is closed as an item, never with "what you typed was not saved".
+    editingRef.current = null;
+    editorDirty.current = false;
+    // Closed while it waited: the answer has come now, so the line no longer says the outcome is unknown.
+    if (closedWhileSaving.current) {
+      closedWhileSaving.current = false;
+      setClosedLine((line) => (line === ITEM_CLOSED_EDITING_SENT ? ITEM_CLOSED : line));
+    }
     refresh();
     setEditorGenerate(false);
     setEditing(null);
@@ -493,7 +629,13 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
 
   const remove = async (itemId: string) => {
     await store.remove(itemId);
+    leaveItem();
     refresh();
+  };
+
+  /** The person's own act took the open item off the list (a delete, a move): it is left, with no line about it. */
+  const leaveItem = () => {
+    selectedRef.current = null;
     setSelected(null);
   };
 
@@ -526,7 +668,18 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
     <button className={`navbtn ${view === v ? "active" : ""}`} aria-current={view === v ? "page" : undefined} onClick={() => { if (editing && editorBack.current) return editorBack.current(); setView(v); closeLayers(); }}>{label}</button>
   );
 
+  // The open item through the guarded reader at this render. The detail is drawn from it, and the editor of an existing
+  // item is drawn only while it is handed out; a render that finds it gone has followStore close both and say why
+  // (before the browser paints).
   const current = selected ? store.get(selected) : null;
+  const openGone = selected !== null && current === undefined;
+  useLayoutEffect(() => {
+    if (openGone) followStore();
+  }, [openGone, followStore]);
+  const openGuard = useMemo(
+    () => ({ shown: () => selected === null || store.get(selected) !== undefined, onGone: followStore }),
+    [selected, store, followStore],
+  );
 
   // One row for BOTH list paths — the virtualizer below is a slicing layer over
   // this exact element, not a second row implementation (F56).
@@ -572,22 +725,18 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
       <a className="skip-link" href={`#${MAIN_ID}`} onClick={(e) => { e.preventDefault(); document.getElementById(MAIN_ID)?.focus(); }}>Skip to content</a>
       <header className="appbar">
         <div className="row">
-          {/* H138 (audit 2026-09-13): the signed-in appbar was the one BROWSER-surface header
-              with no mark — the extension popup and options headers, and web's own Welcome/Recover
-              heroes, all pair the ᛅ sigil with the wordmark, so inside a browser the signed-in
-              vault alone read as a different product's chrome. Owner's call was to add it here
-              rather than strip it from the popup.
-
-              R51 corrected the scope of this note: the two NATIVE signed-in toolbars stay
-              deliberately Material-plain (desktop `Ui.kt` renders `Text("andvari", titleLarge)`,
-              and the phone's toolbar likewise) — a platform toolbar is not browser chrome, and
-              the phone's mark lives on its launcher icon where the OS shows it. So this is not
-              "one lockup fleet-wide"; it is one lockup on every surface a browser draws. This is the same lockup extension/popup.html ships (sigil, then the
-              wordmark, no whitespace between the spans — they are in inline flow, so a newline
-              from JSX formatting would render as a visible gap); .brand .sigil-sm in styles.css is
-              the literal twin of the popup.css rule. The sigil is aria-hidden inside BrandSigil:
-              the wordmark text beside it already names the app, so announcing it twice is noise. */}
-          <span className="brand"><span className="sigil-sm"><BrandSigil size={18} /></span><span className="a-mark">and</span>vari</span>
+          {/* The signed-in appbar carries the brand as every other header a browser draws does
+              (the extension's popup and options headers, the web app's first screen): the rune,
+              then the drawn name, so inside a browser the signed-in vault does not read as another
+              product's chrome. The two native signed-in toolbars stay plain on purpose (the
+              desktop's and the phone's title bars set the name as text in their title style): a
+              platform toolbar is not browser chrome, and the phone shows its mark on its launcher
+              icon. This is the lockup extension/popup.html ships (rune, then name, no whitespace
+              between them: they are in inline flow, so a newline from JSX formatting would render
+              as a gap); .brand .sigil-sm in styles.css is the twin of the popup.css rule. The rune
+              is aria-hidden inside BrandSigil and the drawing is named "andvari", so a screen
+              reader says the name once. */}
+          <span className="brand"><span className="sigil-sm"><BrandSigil size={18} /></span><Wordmark /></span>
           <nav className="nav">
             {navBtn("vault", "Vault")}
             {navBtn("sharing", "Sharing")}
@@ -596,7 +745,6 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
                 toolbar icon. Settings left the nav for the gear beside Lock — the appbar's
                 right side is the session controls, and Settings is one. */}
             {navBtn("health", "Health")}
-            {isAdmin && navBtn("admin", "Admin")}
           </nav>
         </div>
         <div className="row">
@@ -610,9 +758,10 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
           </span>
           {/* F29: while degraded, let the user pull over plain HTTP right now instead
               of waiting out the poll window. */}
-          {!online && (
+          {/* §4.4: a read-only copy asks nothing of the server, so it offers no Sync now. */}
+          {!online && !readOnlyCopy && (
             <button className="ghost" disabled={syncBusy} onClick={() => void manualSync()}>
-              {syncBusy ? "Syncing…" : "Sync now"}
+              {syncBusy ? "Syncing…" : fromCopy ? OFFLINE_TRY_SERVER : "Sync now"}
             </button>
           )}
           {/* Owner dev-note 2026-08-18: the Settings entry point — a gear beside Lock. Same
@@ -645,11 +794,8 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
         </div>
       )}
 
-      {(escrowStale || escrowNeedsV2) && escrowFingerprint && <ReSealBanner account={account} client={client} escrowFingerprint={escrowFingerprint} migration={!escrowStale} />}
-
-      {/* Security review 2026-10, root cause A §4.3 / §8.5 (A5): no confirmed personal vault ⇒ no default
-          destination, usage paused, and (when the migration needs the human) "Which vault is your Personal vault?". */}
-      <PersonalVaultBanner account={account} store={store} onChanged={refresh} client={client} />
+      {/* Design §5.3: a withheld or unopenable personal wrap ⇒ "no personal vault" with the anomaly, no question. */}
+      <NoPersonalVaultNotice account={account} />
 
       {/* §C6 (design 2026-07-13-web-offline-cache): an OFFLINE unlock with cached
           recoveryConfirmed !== true PROCEEDS with this persistent, non-dismissable REMINDER —
@@ -663,7 +809,39 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
         </div>
       )}
 
-      <NoticesBanner notices={notices} onDismiss={dismissNotice} />
+      {/* Spec 02 §8: opened from this browser's offline copy, the server out of reach. The line stays until a sync lands,
+          and the prompts below that need the server (shares to accept, a move to finish, the recovery copy's re-seal)
+          wait for it instead of being offered as though they would work. */}
+      {/* Sharing and Settings say it in their own line, beside what they show disabled: one line there, not two. */}
+      {syncLimit !== null && !syncOk && (
+        <div className="msg err top-prompt" style={{ display: "block" }} role="status" data-testid="sync-limit">{syncLimit}</div>
+      )}
+      {fromCopy && !readOnlyCopy && view !== "sharing" && view !== "settings" && (
+        <div className="msg info top-prompt" style={{ display: "block" }} role="status">{OFFLINE_OPENED}</div>
+      )}
+      {/* Spec 01 §7, "leaves both": opened from the copy while the server serves keys this browser does not know; above
+          every view, for the whole session. */}
+      {settings?.wrap.serverKeysNotKnown === true && (
+        <div className="msg err top-prompt" style={{ display: "block" }} role="status">{SERVER_KEYS_NOT_KNOWN_OPENED}</div>
+      )}
+      {/* Spec 01 §7: a sign-in over this browser's copy of the same account, sealed under another master password; the
+          copy now follows the server's. One line, above the view the vault opened on, once (copyLineView). */}
+      {copyLineView !== null && copyLineView === view && (
+        <div className="msg info top-prompt" style={{ display: "block" }} role="status">{COPY_FOLLOWS_SERVER}</div>
+      )}
+      {!fromCopy && <SharedPrompts shared={store.sharedLogs()} onChanged={() => void syncNow()} />}
+      {/* Design §3.13: a move whose old vault's deletion is signed and waiting says so here, first, and offers to finish. */}
+      {!readOnlyCopy && !fromCopy && <UnfinishedMoves store={store} onChanged={() => void syncNow()} />}
+      {/* Design §4.5 at unlock: the silent re-seal after a signed rotation, or "Keep that?" / the unsigned-change warning. */}
+      <EscrowPrompt settings={readOnlyCopy || fromCopy ? undefined : settings} shared={store.sharedLogs()} />
+      {/* §4.4: a copy read under a forked pin keeps the warning in view; it sends, accepts and writes nothing. */}
+      {/* §4.4: the copy of a session the server ended says so instead ("with a notice in view"). */}
+      {readOnlyCopy && store.readOnlyCopyReason() === "ended" ? (
+        <div className="msg info" style={{ display: "block" }} role="status">{endedUnconfirmed(account.userId) ? SESSION_NOT_CONFIRMED_COPY : SESSION_ENDED_COPY}</div>
+      ) : readOnlyCopy ? (
+        <div className="msg err" style={{ display: "block" }} role="alert">{CARD_FORK}</div>
+      ) : null}
+      <NoticesBanner notices={notices} onDismiss={dismissNotice} store={store} onCopied={refresh} />
 
       {/* Calm, no-shame copy (the newer client is someone else's device, not an error), and
           deliberately non-dismissable — it clears itself once the items decrypt post-update
@@ -682,6 +860,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
           one view, and each view's ViewHeader title is that view's <h1> — so the landmark and
           the heading tree both say where the user is. */}
       <main className="wrap" id={MAIN_ID} tabIndex={-1}>
+        <OpenItemGuard.Provider value={openGuard}>
         {/* The page heading for the two branches that render no ViewHeader — the vault
             (list / item / editor / import-export panels) and Trash. Visually hidden because
             both deliberately carry no visible view title; every other view's ViewHeader title
@@ -705,14 +884,17 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
             settingsVaultId={sharingSettingsVaultId}
             onOpenSettings={setSharingSettingsVaultId}
             onCloseSettings={() => setSharingSettingsVaultId(null)}
+            offline={fromCopy && !readOnlyCopy}
           />
         ) : view === "settings" ? (
           <Settings
             client={client}
             account={account}
+            settings={settings}
             store={store}
             policy={policy}
             onPasswordChanged={() => setMustChange(false)}
+            offline={fromCopy && !readOnlyCopy}
             /* IA P3: backing up from Settings flips to the vault view first so the ExportPanel
                layer renders (the view axis wins over exportMode in this switch), mirroring
                Sharing's "Back up first". Always offered while unlocked (§5.4.2). */
@@ -724,10 +906,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
             onAccountDeleted={onAccountDeleted}
             onDeletionTrack={onDeletionTrack}
             onOpenVaultSettings={(vaultId) => { setView("sharing"); closeLayers(); setSharingSettingsVaultId(vaultId); }}
-            onOpenAdmin={isAdmin ? () => { setView("admin"); closeLayers(); } : undefined}
           />
-        ) : view === "admin" && isAdmin ? (
-          <Admin client={client} policy={policy} account={account} />
         ) : exportMode ? (
           <ExportPanel
             mode={exportMode}
@@ -741,50 +920,69 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
             store={store}
             /* R47: the destination is resolved by identity, not by the server's `type` label. */
             personalVaultId={account.personalVaultId}
-            onClose={() => setImportOpen(false)}
+            // "‹ Back to vault" after an import that ran must show what it added, as Done does.
+            onClose={() => { setImportOpen(false); refresh(); }}
             onDone={() => { setImportOpen(false); refresh(); }}
           />
-        ) : editing ? (
+        ) : editing && (selected === null || current) ? (
           <Editor
             initial={editing}
             policy={policy}
-            vaultChoices={selected === null && (hasWritableShared || !account.personalVaultId) ? newItemVaultChoices : undefined}
+            // A new item is offered the vaults it may go to now, at each render; with the personal vault the only one, no
+            // picker is drawn (the Editor draws one for more than one, or when the chosen vault is no longer offered).
+            vaultChoices={selected === null ? newItemVaultChoices : undefined}
+            dirtyRef={editorDirty}
             generateOnOpen={editorGenerate}
             onSave={save}
+            // Whose space a refused save filled: the vault it goes to, as save() resolves it (an edit keeps its vault).
+            ownsTarget={(picked) => {
+              const target = selected !== null ? editingVaultId : (picked ?? account.personalVaultId);
+              return target === null || target === undefined || target === account.personalVaultId || account.roleFor(target) === "owner";
+            }}
             onCancel={() => { setEditing(null); setEditorGenerate(false); }}
             backRef={editorBack}
           />
         ) : current ? (
+          <>
+          {moveWaitingLine(current.vaultId)}
           <Detail
             item={current}
             client={client}
             store={store}
             policy={policy}
-            readOnly={account.roleFor(current.vaultId) === "reader"}
+            readOnly={readOnlyCopy || account.roleFor(current.vaultId) === "reader" || store.moveDeleteWaiting(current.vaultId) || !store.mayWrite(current.vaultId)}
+            // With readOnly, true only where the vault's log alone keeps it from being written: the key works here and
+            // the member's role may write.
+            copyOut={!readOnlyCopy && account.roleFor(current.vaultId) !== "reader" && !store.moveDeleteWaiting(current.vaultId) && account.mayWrite(current.vaultId)}
             vaultName={current.vaultId !== account.personalVaultId ? vaultNameById.get(current.vaultId) : undefined}
             moveTargets={newItemVaultChoices.filter((v) => v.vaultId !== current.vaultId)}
             onUsed={() => usage.record(current.itemId)}
             onEdit={() => { setEditing(current.doc); setEditingVaultId(current.vaultId); }}
             onDelete={() => remove(current.itemId)}
-            onMoved={() => { refresh(); setSelected(null); }}
+            onMoved={() => { leaveItem(); refresh(); }}
             onBack={() => setSelected(null)}
           />
+          </>
         ) : (
           <>
+            {closedLine !== null && <div className="msg info" style={{ display: "block", marginTop: 12 }} role="status" data-testid="item-closed">{closedLine}</div>}
+            {effVaultFilter !== "all" && moveWaitingLine(effVaultFilter)}
             <div className="toolbar">
               <input aria-label="Search vault" placeholder="Search vault…" value={query} onChange={(e) => setQuery(e.target.value)} autoFocus={finePointer} />
-              <button className="ghost" onClick={() => startNew("login")}>+ Login</button>
-              <button className="ghost" onClick={() => startNew("note")}>+ Note</button>
+              {/* §4.4: a read-only copy (a forked pin, a session the server ended) is read, copied from and exported;
+                  nothing is written, so it offers no add and no import (the walk's C16 and C18 still showed them). */}
+              {!readOnlyCopy && <button className="ghost" onClick={() => startNew("login")}>+ Login</button>}
+              {!readOnlyCopy && <button className="ghost" onClick={() => startNew("note")}>+ Note</button>}
               {/* Dark until the Option A gate clears (0.2.x MSI retired) — see CARD_CREATE_ENABLED.
                   Everything downstream (row/detail/editor for EXISTING cards) renders regardless. */}
-              {CARD_CREATE_ENABLED && <button className="ghost" onClick={() => startNew("card")}>+ Card</button>}
+              {CARD_CREATE_ENABLED && !readOnlyCopy && <button className="ghost" onClick={() => startNew("card")}>+ Card</button>}
               {/* Owner dev-note 2026-08-18: Import/Export shrank to icons in the trash cluster so
                   the + buttons are the toolbar's only labeled actions; Health moved to the nav. */}
-              <button type="button" className="ghost" aria-label="Import" title="Import" onClick={() => { closeLayers(); setImportOpen(true); }}>
+              {!readOnlyCopy && <button type="button" className="ghost" aria-label="Import" title="Import" onClick={() => { closeLayers(); setImportOpen(true); }}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ verticalAlign: "-2px" }}>
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="3" x2="12" y2="15" />
                 </svg>
-              </button>
+              </button>}
               {/* The two export destinations live under one menu so the toolbar can't crush the
                   search box. Rendered whenever unlocked (§5.4.2 — the origin gate is gone). */}
               <ExportMenu
@@ -826,7 +1024,7 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
                   <select value={effVaultFilter} aria-label="Filter by vault" onChange={(e) => setVaultFilter(e.target.value)}>
                     <option value="all">All vaults</option>
                     {vaultsInfo.map((v) => (
-                      <option key={v.vaultId} value={v.vaultId}>{v.name}</option>
+                      <option key={v.vaultId} value={v.vaultId}>{vaultLabelById.get(v.vaultId) ?? v.name}</option>
                     ))}
                   </select>
                 )}
@@ -837,15 +1035,41 @@ export function Vault({ account, store, client, email, policy, isAdmin, mustChan
                 <p>{items.length === 0 ? "Your hoard is empty. Add your first secret." : query.trim() ? "Nothing matches that search." : "Nothing matches these filters."}</p>
               </Empty>
             ) : filtered.length > VIRTUAL_THRESHOLD ? (
-              <VirtualList items={filtered} renderRow={renderRow} />
+              <VirtualList items={filtered} renderRow={renderRow} store={store} />
             ) : (
               <div className="list vault-list">{filtered.map(renderRow)}</div>
             )}
           </>
         )}
+        </OpenItemGuard.Provider>
       </main>
     </div>
   );
+}
+
+/**
+ * The open item's guard, for the item view and the editor and every part of them that renders by its own state (a Show,
+ * a ticking code, typing, a history opened) without the vault screen rendering: [shown] asks the store's guarded reader at
+ * that render whether the open item is still handed out; where it is not, the part draws nothing and [onGone] has the vault
+ * screen follow the store (followStore), which closes the item and says why. Outside an open item it always answers yes.
+ */
+const OpenItemGuard = createContext<{ readonly shown: () => boolean; readonly onGone: () => void }>({ shown: () => true, onGone: () => {} });
+
+function useStillShown(): boolean {
+  const guard = useContext(OpenItemGuard);
+  const here = guard.shown();
+  useLayoutEffect(() => {
+    if (!here) guard.onGone();
+  }, [here, guard]);
+  return here;
+}
+
+/** The import's destination is no longer one the person holds (it went while the panel was open, or the pick raced it). */
+const DESTINATION_GONE = "That vault isn't available any more — it may have been removed. Pick another destination.";
+
+/** Whether two reads of the list hand out the same items, in the same order (the store keeps an unchanged item's object). */
+function sameItems(a: readonly VaultItem[], b: readonly VaultItem[]): boolean {
+  return a.length === b.length && a.every((it, i) => it === b[i]);
 }
 
 // F56 vault-list windowing geometry. ROW_H/LIST_GAP mirror styles.css
@@ -873,8 +1097,13 @@ const VIRTUAL_THRESHOLD = 500;
  * The measuring effect is a LAYOUT effect: the initial state assumes scrollTop 0, and
  * a mount while scrolled deep (filter cleared) or a shrink via the background sync's
  * post-paint render would otherwise paint one stale/blank frame before correcting.
+ *
+ * It renders by its own state (a scroll, a resize) without the vault screen rendering, so it reads its rows through the
+ * store's guarded reader at its own render (useListedNow, as Health does): a vault whose key stopped working by a road
+ * this tab has not followed yet (another tab carried a removal out) draws no row.
  */
-function VirtualList({ items, renderRow }: { items: VaultItem[]; renderRow: (it: VaultItem) => ReactElement }) {
+function VirtualList({ items: given, renderRow, store }: { items: VaultItem[]; renderRow: (it: VaultItem) => ReactElement; store: Pick<VaultStore, "shownVaultIds"> }) {
+  const items = useListedNow(store, given);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [range, setRange] = useState<WindowRange>(() => windowRange(0, window.innerHeight, STRIDE, OVERSCAN, items.length));
 
@@ -917,16 +1146,52 @@ function VirtualList({ items, renderRow }: { items: VaultItem[]; renderRow: (it:
   );
 }
 
-function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
+export function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
   const name = n.vaultName || "a vault";
   switch (n.kind) {
+    case "personal-kept":
+      return { warn: true, body: PERSONAL_REMOVAL_REFUSED };
+    case "held-not-made":
+    case "held-given-up":
+    case "held-found-made":
+      return { warn: true, body: heldNoticeText(n) };
+    case "held-found-not-made":
+      return { warn: false, body: heldNoticeText(n) };
+    case "held-delete-ask":
+      // A vault it cannot name has words of its own: never "the new vault", which is a move's.
+      return { warn: true, body: n.vaultName ? fill(RESEND_DELETE_ASK, n.vaultName) : RESEND_DELETE_ASK_UNNAMED };
+    case "held-delete-made":
+      // The day only where the server served it; otherwise the line points to the list of deleted vaults.
+      if (n.purgeAt === undefined) return { warn: true, body: n.vaultName ? fill(RESEND_DELETE_MADE_NO_DAY, n.vaultName) : RESEND_DELETE_MADE_UNNAMED_NO_DAY };
+      return { warn: true, body: n.vaultName ? fill(RESEND_DELETE_MADE, n.vaultName, fmtDay(n.purgeAt)) : fill(RESEND_DELETE_MADE_UNNAMED, fmtDay(n.purgeAt)) };
+    case "half-made-kept":
+      return { warn: true, body: fill(MOVE_DISCARD_KEPT, n.vaultName || MOVE_UNNAMED_VAULT) };
+    case "item-brought-back": {
+      // One change has a line of its own, named or not; "1 of your changes" is never said.
+      const count = n.parkedCount ?? 1;
+      if (count === 1) return { warn: false, body: n.itemName !== undefined ? fill(ITEM_BROUGHT_BACK, n.itemName, name) : fill(ITEM_BROUGHT_BACK_UNNAMED, name) };
+      return { warn: false, body: fill(ITEM_BROUGHT_BACK_MANY, String(count), name) };
+    }
+    case "move-stored": {
+      // Design §3.13 as decided on 2026-11-17: never a quiet departure. What is late, and what this browser cannot save.
+      const newName = n.newVaultName || MOVE_UNNAMED_VAULT;
+      const added = n.lateAdded ?? 0;
+      const changed = n.lateChanged ?? 0;
+      const count = (k: number): string => `${k} ${k === 1 ? "item" : "items"}`;
+      const late = added + changed === 0 ? fill(MOVE_STORED_NOTHING_LATE, newName) : fill(MOVE_STORED_LATE, count(added + changed), String(added), String(changed), newName);
+      // Not "the server deleted": the same person may have deleted it from another device meanwhile (the stored deletion
+      // is not compared with the held one), so the line names no one.
+      return { warn: true, body: `${fill(MOVE_DELETED_OUTSIDE, name, newName)} ${late} ${MOVE_STORED_UNSEEN}` };
+    }
     case "deleted":
       return {
         warn: false,
         body:
           `“${name}” was deleted by its owner. Its items were moved off this device` +
-          (n.purgeAt ? ` (kept sealed until ${fmtDay(n.purgeAt)}, then removed).` : ".") +
-          (n.parkedCount ? ` ${n.parkedCount} of your edits hadn’t synced — they’ll be recovered if the vault is restored this week.` : ""),
+          // Design §3.8: the day this device's copy leaves the holding area, never the vault's purge time.
+          (n.keptUntil ? ` (kept sealed until ${fmtDay(n.keptUntil)}, then removed).` : ".") +
+          // One edit has a line of its own, never "1 of your edits".
+          (n.parkedCount === 1 ? ` ${DELETED_PARKED_ONE}` : n.parkedCount ? ` ${n.parkedCount} of your edits hadn’t synced — they’ll be recovered if the vault is restored this week.` : ""),
       };
     case "removed":
       // A7 review MEDIUM-2 / LOW-3: TWINS of core HouseholdCopy.removalAlreadyRecordedNotice / removedLegacyNotice,
@@ -1029,22 +1294,12 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
       return { warn: true, body: `${lead} — ${why} ${tail}` };
     }
     case "added":
-      // Root cause A §1.6 (A6): a verified grant names the PINNED contact who signed it. TWIN of core
-      // HouseholdCopy.addedNotice, byte-equal, pinned by vault-copy.test.ts.
-      return { warn: false, body: n.byLabel ? `You were added to “${name}” by ${n.byLabel}.` : `You were added to “${name}”.` };
+      // TWIN of core HouseholdCopy.addedNotice without a label, byte-equal, pinned by vault-copy.test.ts. The web's one
+      // "added" notice carries no adder (the label branch was dead and is gone).
+      return { warn: false, body: `You were added to “${name}”.` };
     case "transfer-complete":
       return { warn: false, body: n.becameMine ? `You are now the owner of “${name}”.` : `“${name}” now has a new owner.` };
     case "transfer-anomaly":
-      // Sharing review 2026-11 (finding 1): a proof that checks, for an offer this account did not make or had cancelled.
-      // TWIN of core HouseholdCopy.transferNotOfferedNotice, byte-equal.
-      if (n.reason === TRANSFER_NOT_OFFERED) {
-        return {
-          warn: true,
-          body:
-            `The server says “${name}” has a new owner, from an offer you didn't make or had cancelled. Your devices keep their record that you own it. ` +
-            `If you didn't hand it over, tell your admin — the server, or a member of the vault, may be misbehaving.`,
-        };
-      }
       return {
         warn: true,
         body:
@@ -1059,10 +1314,27 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
           `A sealed copy of its data is kept on this device for 30 days (Sharing → the trash icon). ` +
           `If nobody in your household did this, tell your admin — the server may be misbehaving.`,
       };
+    case "left-frozen":
+      // A removal of a vault frozen here, after the person's own leave of it: never quiet, since nothing after the leave
+      // can be checked. The copy is held as at the anomaly.
+      return { warn: true, body: fill(VAULT_LEFT_FROZEN_NOTICE, name) };
+    case "unchecked-gone":
+      // A full pull that holds nothing of the vault no longer grants a shared vault frozen here: no name, nothing held.
+      return { warn: true, body: VAULT_GONE_UNCHECKED_NOTICE };
+    case "items-set-aside": {
+      // A full list neither carried nor marked as deleted items this browser held: they were set aside, never dropped.
+      const count = `${n.parkedCount ?? 0} ${n.parkedCount === 1 ? "item" : "items"}`;
+      if (n.personal === true) return { warn: true, body: fill(ITEMS_SET_ASIDE_PERSONAL_NOTICE, count) };
+      return { warn: true, body: fill(n.frozen === true ? ITEMS_SET_ASIDE_FROZEN_NOTICE : ITEMS_SET_ASIDE_SHARED_NOTICE, count, name) };
+    }
+    case "items-set-aside-other": {
+      // Items set aside were sent again in their vault with other content than the copy kept here: the copy stays.
+      const count = `${n.parkedCount ?? 0} ${n.parkedCount === 1 ? "item" : "items"}`;
+      return { warn: true, body: fill(ITEMS_SET_ASIDE_OTHER_NOTICE, count, n.personal === true ? ITEMS_SET_ASIDE_PERSONAL_NAME : name) };
+    }
     case "vk-mismatch":
-      // Root cause A §3.1 (security review 2026-10): our own UVK-wrapped key was kept and a
-      // conflicting seal refused. TWIN of core HouseholdCopy.vkMismatchNotice, byte-equal, pinned
-      // by vault-copy.test.ts.
+      // Root cause A §3.1 (security review 2026-10): the held key was kept and a row's wrap of another key ignored.
+      // TWIN of core HouseholdCopy.vkMismatchNotice, byte-equal, pinned by vault-copy.test.ts.
       return {
         warn: true,
         body: `The server sent a key for “${name}” that doesn't match the one saved for your account. andvari kept your own key and ignored the other. Tell your admin — the server may be misbehaving.`,
@@ -1081,27 +1353,6 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
         warn: true,
         body: "The server sent records with malformed ids. andvari ignored them and kept your vaults as they were. Tell your admin — the server may be misbehaving.",
       };
-    case "key-unreadable":
-      // Root cause A §3.1: our UVK wrap is present and does not open; no seal fallback. TWIN of
-      // core HouseholdCopy.KEY_UNREADABLE_NOTICE, byte-equal, pinned by vault-copy.test.ts.
-      return {
-        warn: true,
-        body: "The key for one of your vaults is unreadable — tell your admin. The copy saved for your account is damaged or was replaced, so that vault stays closed rather than open with a key the server could have made.",
-      };
-    case "grant-anomaly":
-      // Root cause A §1.4 (A6): a v2 grant failed a check only a misbehaving server explains; nothing was adopted.
-      // TWINS of core HouseholdCopy.GRANT_VK_MISMATCH_NOTICE (with the recovery path, A6 re-review LOW-C) and
-      // GRANT_ANOMALY_NOTICE, byte-equal, pinned by vault-copy.test.ts.
-      if (n.reason === "vk_mismatch") {
-        return {
-          warn: true,
-          body: "A shared-vault invitation named a different key than the one this device already trusts for that vault, so andvari kept its own key and changed nothing. If the vault looks wrong or empty, leave it and ask its owner to add you again (the key this device trusted before the upgrade may itself be the wrong one), and tell your admin — the server may be misbehaving.",
-        };
-      }
-      return {
-        warn: true,
-        body: "A shared-vault invitation could not be verified, so andvari ignored it and changed nothing. Tell your admin — the server may be misbehaving.",
-      };
     case "meta-regression":
       // spec 02 §4 warn-and-keep-newer: a delivered metaBlob whose metaV regressed below the
       // one held here was kept as-is (anti-replay). Calm, informational — never an error tone.
@@ -1114,112 +1365,9 @@ function noticeBody(n: LifecycleNotice): { body: string; warn: boolean } {
   }
 }
 
-/**
- * F57: after a recovery-key re-ceremony an account's escrow is sealed to the DEAD key (spec 04
- * §4). This prompt re-seals the UVK to the CURRENT recovery key — but ONLY after the user
- * confirms the new fingerprint against their PRINTED recovery sheet (short-form). resealEscrowFor
- * then binds the server-fetched pubkey to that verified fingerprint and refuses on mismatch, so a
- * hostile server cannot redirect the escrow to an attacker key. Non-blocking: "Later" just leaves
- * it for the next unlock (escrowStale persists server-side until the re-seal lands).
- */
-function ReSealBanner({ account, client, escrowFingerprint, migration = false }: { account: Account; client: ApiClient; escrowFingerprint: string; migration?: boolean }) {
-  const [open, setOpen] = useState(false);
-  const [entry, setEntry] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState(false);
-  const [err, setErr] = useState("");
-  const shortOk = shortFormMatches(entry, escrowFingerprint);
-
-  const reseal = async () => {
-    setBusy(true);
-    setErr("");
-    try {
-      // net() wraps only the network legs — a resealEscrowFor throw (fingerprint refusal)
-      // must never read as a connectivity problem.
-      const pub = await net(client.recoveryPubkey());
-      const { sealed, fingerprint } = await account.resealEscrowFor(pub, escrowFingerprint);
-      await net(client.putEscrow(sealed, fingerprint));
-      setDone(true);
-    } catch (e) {
-      // ux-copy--2: canon copy, never e.message — an ApiError here carried the server's raw
-      // text ("forbidden", "Failed to fetch") straight into the banner.
-      setErr(
-        e instanceof NetworkError
-          ? UNREACHABLE
-          : e instanceof ApiError
-            ? "The server had a problem answering — try again in a moment."
-            : "Couldn't re-protect this account — try again, or contact your admin.",
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (done) {
-    return <div className="banner"><span>Account re-protected — your recovery is up to date. ✓</span></div>;
-  }
-  if (!open) {
-    return (
-      <div className="banner">
-        <span>
-          {migration
-            ? "Confirm your household recovery key — it upgrades how this account is protected for an admin recovery."
-            : "Your household's recovery key changed — re-protect this account so it stays recoverable."}
-        </span>
-        <button className="link" onClick={() => setOpen(true)}>Re-protect →</button>
-      </div>
-    );
-  }
-  return (
-    <div className="banner">
-      <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", width: "100%" }}>
-        <span className="muted">
-          {migration
-            ? "Confirm the recovery fingerprint from your printed household recovery sheet, then re-protect."
-            : "Confirm the NEW recovery fingerprint from your printed recovery sheet, then re-protect."}{" "}
-          Your master key never leaves this device except sealed to the recovery key you verify below.
-        </span>
-        {/* Audit F10: this gate's twin in the ENROLLMENT path (Welcome's required-typed check
-            block) is a `Field`, so its prompt is associated with its box; here the bare <label>
-            named nothing and a screen reader reached the one un-skippable, one-shot re-protect
-            input hearing "edit, blank". Same component, same association, same copy. */}
-        <Field
-          label="Type the FIRST 32 characters of the fingerprint on your printed recovery sheet"
-          prompt
-          /* The banner is a flex column with its own gap — .field's own margin would double it. */
-          style={{ marginBottom: 0 }}
-          hint={
-            <>
-              {!shortOk && entry && (
-                <span style={{ color: "var(--danger)" }}>
-                  doesn't match this server's recovery key — if you copied the sheet correctly, STOP and contact your admin
-                </span>
-              )}
-              {shortOk && <span className="muted">matches — {escrowFingerprint.replace(/(.{4})/g, "$1 ").trim()}</span>}
-            </>
-          }
-        >
-          <input
-            value={entry}
-            onChange={(e) => setEntry(e.target.value)}
-            placeholder="from the sheet, not this screen"
-            autoComplete="off"
-            spellCheck={false}
-          />
-        </Field>
-        {err && <span style={{ color: "var(--danger)" }}>{err}</span>}
-        <div style={{ display: "flex", gap: "0.5rem" }}>
-          <button className="primary" disabled={!shortOk || busy} onClick={reseal}>{busy ? "Re-protecting…" : "Re-protect account"}</button>
-          <button className="ghost" disabled={busy} onClick={() => setOpen(false)}>Later</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 /** The lifecycle notices banner (spec 03 §11): attributed only when the proof verified; the
  *  anomaly warning renders in the danger tone. Each notice is individually dismissable. */
-function NoticesBanner({ notices, onDismiss }: { notices: LifecycleNotice[]; onDismiss: (id: string) => void }) {
+function NoticesBanner({ notices, onDismiss, store, onCopied }: { notices: LifecycleNotice[]; onDismiss: (id: string) => void; store?: VaultStore; onCopied?: () => void }) {
   if (notices.length === 0) return null;
   return (
     <div className="wrap" style={{ paddingBottom: 0 }}>
@@ -1227,12 +1375,89 @@ function NoticesBanner({ notices, onDismiss }: { notices: LifecycleNotice[]; onD
         const { body, warn } = noticeBody(n);
         return (
           <div key={n.id} className={`msg ${warn ? "err" : "info"}`} role={warn ? "alert" : undefined} style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
-            <span style={{ flex: 1 }}>{body}</span>
+            <span style={{ flex: 1 }}>
+              {body}
+              {n.kind === "move-stored" && store !== undefined && <MoveLateCopy notice={n} store={store} onCopied={onCopied} />}
+              {n.kind === "held-delete-ask" && store !== undefined && <HeldDeleteAsk notice={n} store={store} onDone={() => { onDismiss(n.id); onCopied?.(); }} />}
+            </span>
             <button type="button" className="link" onClick={() => onDismiss(n.id)}>Dismiss</button>
           </div>
         );
       })}
     </div>
+  );
+}
+
+/**
+ * The two acts under a "held-delete-ask" notice: the person's deletion of the vault waits and is sent again only at
+ * their word. Delete it now (sent once, byte for byte), or keep the vault (the deletion is withdrawn). Nothing is sent
+ * until one is chosen; a failure is said under the notice.
+ */
+export function HeldDeleteAsk({ notice, store, onDone }: { notice: LifecycleNotice; store: VaultStore; onDone: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [line, setLine] = useState("");
+  if (line === "" && store.heldChangeFor(notice.vaultId)?.kind !== "delete") return null;
+  const deleteNow = async () => {
+    setBusy(true);
+    setLine("");
+    try {
+      await store.sendHeldDeletion(notice.vaultId);
+      onDone();
+    } catch (e) {
+      setLine(friendlyError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const keep = () => {
+    const known = store.withdrawHeldChangeAs(notice.vaultId);
+    if (known === null) onDone();
+    else setLine(withdrawnText(known));
+  };
+  return (
+    <span style={{ display: "block", marginTop: 6 }}>
+      {line !== "" && <span style={{ display: "block" }}>{line}</span>}
+      {store.heldChangeFor(notice.vaultId)?.kind === "delete" && (
+        <>
+          <button type="button" className="ghost" disabled={busy} onClick={deleteNow} style={{ color: "var(--danger)" }}>{RESEND_DELETE_ASK_NOW}</button>{" "}
+          <button type="button" className="ghost" disabled={busy} onClick={keep}>{RESEND_DELETE_ASK_KEEP}</button>
+        </>
+      )}
+    </span>
+  );
+}
+
+/**
+ * Design §3.13 as decided on 2026-11-17: the offer under a "move-stored" notice, to copy what the move had not copied
+ * from the copy kept here into the new vault. Shown only while the held copy has something late and the new vault is
+ * this browser's; after the copy it says how many landed.
+ */
+export function MoveLateCopy({ notice, store, onCopied }: { notice: LifecycleNotice; store: VaultStore; onCopied?: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState("");
+  const [err, setErr] = useState("");
+  const late = store.moveLate(notice.vaultId);
+  const newName = notice.newVaultName || MOVE_UNNAMED_VAULT;
+  if (done !== "") return <span style={{ display: "block", marginTop: 6 }}>{done}</span>;
+  if (late === null || late.added + late.changed === 0 || !store.vaults().some((v) => v.vaultId === late.newVaultId)) return null;
+  const run = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      const r = await store.copyLateIntoMove(notice.vaultId);
+      setDone(fill(MOVE_STORED_COPIED, `${r.copied} ${r.copied === 1 ? "item" : "items"}`, newName));
+      onCopied?.(); // the list shows the copies at once (the walk of 2026-11-17 found it stale until the next sync)
+    } catch (e) {
+      setErr(friendlyError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <span style={{ display: "block", marginTop: 6 }}>
+      {err && <span style={{ display: "block" }}>{err}</span>}
+      <button type="button" className="ghost" disabled={busy} onClick={run}>{fill(MOVE_STORED_COPY, newName)}</button>
+    </span>
   );
 }
 
@@ -1322,7 +1547,13 @@ export function detailUris(uris: string[] | undefined): string[] {
   return (uris ?? []).filter((u) => u.trim().length > 0);
 }
 
-function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets, onUsed, onEdit, onDelete, onMoved, onBack }: { item: VaultItem; client: ApiClient; store: VaultStore; policy: ClientPolicy | null; readOnly: boolean; vaultName?: string; moveTargets: VaultInfo[]; onUsed: () => void; onEdit: () => void; onDelete: () => Promise<void>; onMoved: () => void; onBack: () => void }) {
+/**
+ * An item's detail. [readOnly]: nothing that writes the item or its vault is offered. [copyOut]: the person may copy the
+ * item out though [readOnly] holds, which is so where only its vault's log keeps the vault from being written (frozen or
+ * withheld here; decided on 23 November 2026: such a vault is read, written by no device, and its items are copied out).
+ */
+export function Detail({ item, client, store, policy, readOnly, copyOut, vaultName, moveTargets, onUsed, onEdit, onDelete, onMoved, onBack }: { item: VaultItem; client: ApiClient; store: VaultStore; policy: ClientPolicy | null; readOnly: boolean; copyOut: boolean; vaultName?: string; moveTargets: VaultInfo[]; onUsed: () => void; onEdit: () => void; onDelete: () => Promise<void>; onMoved: () => void; onBack: () => void }) {
+  const shownNow = useStillShown();
   // §2.3 clamp (B1-1): a server-declared clipboard window is honored only inside [1, 300 s].
   const clearSecs = clampClipboardClearSeconds(policy?.clipboardClearSeconds ?? 30);
   const { flash, copyErr, wipeStuck, copy } = useCopy(clearSecs);
@@ -1347,7 +1578,9 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
       await onDelete(); // resolves → parent unmounts this Detail; no need to reset busy
     } catch (e) {
       setDelErr(
-        e instanceof ApiError && e.status === 403
+        e instanceof CopyBeingRemovedError
+          ? copyRemovalText(e)
+          : e instanceof ApiError && e.status === 403
           ? `You don't have permission to delete “${doc.name}” — your access to this vault may have been changed to view-only. Nothing was removed.`
           : e instanceof ApiError
             ? `The server refused to delete “${doc.name}” — nothing was removed. Try again in a moment.`
@@ -1356,6 +1589,7 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
       setDelBusy(false);
     }
   };
+  if (!shownNow) return null;
   return (
     <div className="sheet">
       {/* BL-1: copy confirmation is polite async info — the visible .copy-flash span mounts
@@ -1385,7 +1619,7 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
             <div className="field">
               <label>Username</label>
               <div className="secret-row">
-                <input readOnly value={doc.login.username} className="mono" />
+                <input readOnly aria-label="Username" value={doc.login.username} className="mono" />
                 <button className="ghost" onClick={() => copy("username", doc.login!.username!)}>Copy</button>
               </div>
             </div>
@@ -1394,7 +1628,7 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
             <div className="field">
               <label>Password {copyPill("password")}</label>
               <div className="secret-row">
-                <PasswordField value={doc.login.password} />
+                <PasswordField label="Password" value={doc.login.password} />
                 <button className="ghost" onClick={() => { onUsed(); copy("password", doc.login!.password!); }}>Copy</button>
               </div>
             </div>
@@ -1436,7 +1670,7 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
             <div className="field">
               <label>Cardholder</label>
               <div className="secret-row">
-                <input readOnly value={doc.card.cardholderName} />
+                <input readOnly aria-label="Cardholder" value={doc.card.cardholderName} />
                 <button className="ghost" onClick={() => copy("cardholder", doc.card!.cardholderName!)}>Copy</button>
               </div>
             </div>
@@ -1446,7 +1680,7 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
               <label>Card number {copyPill("card number")}</label>
               {/* Reveal shows the grouped form; Copy hands checkout forms the bare digits. */}
               <div className="secret-row">
-                <PasswordField value={groupNumber(doc.card.number)} />
+                <PasswordField label="Card number" value={groupNumber(doc.card.number)} />
                 <button className="ghost" onClick={() => copy("card number", doc.card!.number!)}>Copy</button>
               </div>
             </div>
@@ -1455,7 +1689,7 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
             <div className="field">
               <label>Expiry</label>
               <div className="secret-row" style={{ alignItems: "center" }}>
-                <input readOnly className="mono" value={expiryLabel(doc.card)!} />
+                <input readOnly aria-label="Expiry" className="mono" value={expiryLabel(doc.card)!} />
                 {isExpired(doc.card.expMonth, doc.card.expYear) && <span className="tag expired">expired</span>}
                 {/* Copy hands combined checkout inputs the canonical MM/YY (Tier 2 §6 parity) —
                     a half that won't canonicalize keeps the row copy-less, never copies junk. */}
@@ -1469,7 +1703,7 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
             <div className="field">
               <label>Security code {copyPill("security code")}</label>
               <div className="secret-row">
-                <PasswordField value={doc.card.securityCode} />
+                <PasswordField label="Security code" value={doc.card.securityCode} />
                 <button className="ghost" onClick={() => copy("security code", doc.card!.securityCode!)}>Copy</button>
               </div>
             </div>
@@ -1478,7 +1712,7 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
             <div className="field">
               <label>Billing ZIP / postal code</label>
               <div className="secret-row">
-                <input readOnly value={doc.card.postalCode} />
+                <input readOnly aria-label="Billing ZIP / postal code" value={doc.card.postalCode} />
                 <button className="ghost" onClick={() => copy("postal code", doc.card!.postalCode!)}>Copy</button>
               </div>
             </div>
@@ -1528,6 +1762,8 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
           {!deleting && moveTargets.length > 0 && <MoveCopyControl item={item} store={store} targets={moveTargets} onMoved={onMoved} />}
         </>
       )}
+      {/* A vault only its log keeps from being written: its items are copied out, never moved (a move deletes the source). */}
+      {readOnly && copyOut && moveTargets.length > 0 && <MoveCopyControl item={item} store={store} targets={moveTargets} onMoved={onMoved} copyOnly />}
     </div>
   );
 }
@@ -1544,7 +1780,8 @@ function Detail({ item, client, store, policy, readOnly, vaultName, moveTargets,
  * So this list is bounded to 30 days of deletions, not everything ever deleted.
  */
 function TrashView({ store, roleFor, onRestored }: { store: VaultStore; roleFor: (vaultId: string) => string | null; onRestored: () => void }) {
-  const [items, setItems] = useState<{ itemId: string; vaultId: string; deletedAt: number; doc: ItemDoc | null }[] | null>(null);
+  // The rows as `store.deletedItems()` gave them at the last load; drawn only through `items` below.
+  const [loaded, setItems] = useState<{ itemId: string; vaultId: string; deletedAt: number; doc: ItemDoc | null }[] | null>(null);
   const [err, setErr] = useState("");
   const [restoringId, setRestoringId] = useState<string | null>(null);
   const [purgingId, setPurgingId] = useState<string | null>(null);
@@ -1565,11 +1802,11 @@ function TrashView({ store, roleFor, onRestored }: { store: VaultStore; roleFor:
 
   useEffect(() => { void load(); }, [load]);
 
-  const purge = async (itemId: string) => {
+  const purge = async (itemId: string, vaultId: string) => {
     setPurgingId(itemId);
     setErr("");
     try {
-      await store.purgeDeleted(itemId);
+      await store.purgeDeleted(itemId, vaultId);
       // quality-perf--0: drop the row locally — a full load() re-runs one itemVersions
       // round trip per REMAINING tombstone, so every "Delete forever" used to re-spin
       // the whole list. Nothing else changed server-side; there is nothing to re-fetch.
@@ -1578,7 +1815,9 @@ function TrashView({ store, roleFor, onRestored }: { store: VaultStore; roleFor:
       // G22: a 403 is the server's reader-role refusal (no_grant) — a permission fact, not a
       // transient; "try again" would loop the user straight back into the same 403.
       setErr(
-        e instanceof ApiError && e.status === 403
+        e instanceof MoveWaitingError
+          ? MOVE_WAITING_REFUSED
+          : e instanceof ApiError && e.status === 403
           ? "You don't have permission to delete items from this vault — your access may have been changed to view-only. Nothing was removed."
           : "Couldn't delete it permanently — try again.",
       );
@@ -1599,7 +1838,9 @@ function TrashView({ store, roleFor, onRestored }: { store: VaultStore; roleFor:
     } catch (e) {
       // G22: same 403 mapping as the purge arm — the honest permission sentence, never a retry.
       setErr(
-        e instanceof ApiError && e.status === 403
+        e instanceof MoveWaitingError
+          ? MOVE_WAITING_REFUSED
+          : e instanceof ApiError && e.status === 403
           ? "You don't have permission to restore items into this vault — your access may have been changed to view-only. Nothing was changed."
           : "Restore failed — try again.",
       );
@@ -1611,6 +1852,12 @@ function TrashView({ store, roleFor, onRestored }: { store: VaultStore; roleFor:
       await load(true);
     }
   };
+
+  // The rows loaded are drawn, at each render, only for the vaults the store's guarded reader lists now: a deleted item
+  // of a vault the person was removed from (by a sync, or by another tab of this browser) is neither named nor offered.
+  // The person's own vault counts also where the server serves no row for it (VaultStore.shownVaultIds).
+  const listedVaults = new Set(store.shownVaultIds());
+  const items = loaded === null ? null : loaded.filter((d) => listedVaults.has(d.vaultId));
 
   return (
     <div className="sheet">
@@ -1624,6 +1871,9 @@ function TrashView({ store, roleFor, onRestored }: { store: VaultStore; roleFor:
         “Delete forever” removes it now.
       </div>
       {err && <Msg kind="err">{err}</Msg>}
+      {[...new Set((items ?? []).map((d) => d.vaultId))].filter((v) => store.moveDeleteWaiting(v)).map((v) => (
+        <div key={v} className="msg info" style={{ display: "block", marginTop: 12 }} role="status">{fill(MOVE_WAITING_READ_ONLY, store.vaults().find((x) => x.vaultId === v)?.name ?? MOVE_UNNAMED_OLD)}</div>
+      ))}
       {items === null ? (
         <div className="muted"><Busy>Loading…</Busy></div>
       ) : items.length === 0 ? (
@@ -1634,7 +1884,10 @@ function TrashView({ store, roleFor, onRestored }: { store: VaultStore; roleFor:
           // tombstones — but the server refuses a reader's restore/purge (no_grant). Gate the
           // actions here like every sibling surface (Detail/ItemHistory) instead of offering a
           // guaranteed 403; same shape as the Android Trash row.
-          const readOnly = roleFor(d.vaultId) === "reader";
+          // Design §3.13 as decided on 2026-11-17: a vault whose move's deletion waits takes no restore and no "Delete
+          // forever" either; its rows read as view only, and the read-only line above the list says why. Nor does a shared
+          // vault whose log is frozen or withheld here (VaultStore.mayWrite, decided on 23 November 2026).
+          const readOnly = roleFor(d.vaultId) === "reader" || store.moveDeleteWaiting(d.vaultId) || !store.mayWrite(d.vaultId);
           return (
             <div key={d.itemId} className="secret-row" style={{ alignItems: "center", marginTop: 8 }}>
               <span style={{ flex: 1 }}>
@@ -1649,7 +1902,7 @@ function TrashView({ store, roleFor, onRestored }: { store: VaultStore; roleFor:
                 (confirmPurgeId === d.itemId ? (
                   <>
                     <span className="muted">Delete forever?</span>
-                    <button className="ghost" style={{ color: "var(--danger)" }} disabled={purgingId !== null} onClick={() => purge(d.itemId)}>
+                    <button className="ghost" style={{ color: "var(--danger)" }} disabled={purgingId !== null} onClick={() => purge(d.itemId, d.vaultId)}>
                       {purgingId === d.itemId ? "Deleting…" : "Confirm"}
                     </button>
                     <button className="ghost" disabled={purgingId !== null} onClick={() => setConfirmPurgeId(null)}>Keep</button>
@@ -1679,6 +1932,7 @@ function TrashView({ store, roleFor, onRestored }: { store: VaultStore; roleFor:
  * Honest bound: "up to the last 10 saves" — never "nothing is ever lost" (spec 02 §7).
  */
 function ItemHistory({ item, store, readOnly, onRestored }: { item: VaultItem; store: VaultStore; readOnly: boolean; onRestored: () => void }) {
+  const shownNow = useStillShown();
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [versions, setVersions] = useState<{ rev: number; archivedAt: number; doc: ItemDoc }[] | null>(null);
@@ -1720,6 +1974,7 @@ function ItemHistory({ item, store, readOnly, onRestored }: { item: VaultItem; s
     }
   };
 
+  if (!shownNow) return null;
   if (!open) {
     return <button className="link" style={{ marginTop: 12 }} onClick={load}>Version history</button>;
   }
@@ -1737,7 +1992,7 @@ function ItemHistory({ item, store, readOnly, onRestored }: { item: VaultItem; s
               reads as this July. Trash keeps fmtDay: its rows expire in 30 days. */}
           <span className="muted mono" style={{ minWidth: 92 }}>{fmtDayYear(v.archivedAt)}</span>
           {v.doc.type === "login" && v.doc.login?.password ? (
-            <PasswordField value={v.doc.login.password} />
+            <PasswordField label={`Password, version of ${fmtDayYear(v.archivedAt)}`} value={v.doc.login.password} />
           ) : (
             <span className="muted" style={{ flex: 1 }}>{v.doc.type === "login" ? "(no password in this version)" : v.doc.type === "card" ? cardSubtitle(v.doc) : "note"}</span>
           )}
@@ -1762,7 +2017,9 @@ function ItemHistory({ item, store, readOnly, onRestored }: { item: VaultItem; s
  * gesture; a transient failure keeps the SAME gesture so Retry converges (never duplicates); a
  * denied copy or a changed source aborts with an honest message (source untouched).
  */
-function MoveCopyControl({ item, store, targets, onMoved }: { item: VaultItem; store: VaultStore; targets: VaultInfo[]; onMoved: () => void }) {
+/** [copyOnly]: only "Copy to vault…" is offered (the item's vault may be read, not written). */
+function MoveCopyControl({ item, store, targets, onMoved, copyOnly = false }: { item: VaultItem; store: VaultStore; targets: VaultInfo[]; onMoved: () => void; copyOnly?: boolean }) {
+  const shownNow = useStillShown();
   const [mode, setMode] = useState<"move" | "copy" | null>(null);
   const [target, setTarget] = useState(targets[0]?.vaultId ?? "");
   const [busy, setBusy] = useState(false);
@@ -1806,10 +2063,11 @@ function MoveCopyControl({ item, store, targets, onMoved }: { item: VaultItem; s
     }
   };
 
+  if (!shownNow) return null;
   if (!mode) {
     return (
       <div className="actions" style={{ marginTop: 6 }}>
-        <button type="button" className="ghost" onClick={() => { setMode("move"); resetGesture(); }}>Move to vault…</button>
+        {!copyOnly && <button type="button" className="ghost" onClick={() => { setMode("move"); resetGesture(); }}>Move to vault…</button>}
         <button type="button" className="ghost" onClick={() => { setMode("copy"); resetGesture(); }}>Copy to vault…</button>
       </div>
     );
@@ -1827,7 +2085,7 @@ function MoveCopyControl({ item, store, targets, onMoved }: { item: VaultItem; s
       <div className="secret-row">
         <select value={target} aria-label={mode === "move" ? "Move to another vault" : "Copy to another vault"} onChange={(e) => { setTarget(e.target.value); resetGesture(); }} disabled={busy} style={{ width: "auto" }}>
           {targets.map((v) => (
-            <option key={v.vaultId} value={v.vaultId}>{v.name}{v.type === "personal" ? "" : " (shared)"}</option>
+            <option key={v.vaultId} value={v.vaultId}>{vaultLabel(v, targets)}{v.type === "personal" ? "" : " (shared)"}</option>
           ))}
         </select>
         <button type="button" className="primary" disabled={busy || !target} onClick={run}>
@@ -1841,6 +2099,7 @@ function MoveCopyControl({ item, store, targets, onMoved }: { item: VaultItem; s
 
 /** Detail-view attachments: download → decrypt → hand the browser a one-shot object URL. */
 function AttachmentList({ item, store }: { item: VaultItem; store: VaultStore }) {
+  const shownNow = useStillShown();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [err, setErr] = useState("");
 
@@ -1857,13 +2116,14 @@ function AttachmentList({ item, store }: { item: VaultItem; store: VaultStore })
       a.click();
       a.remove();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch {
-      setErr(`Could not download “${ref.name}” — the blob is missing or failed to decrypt.`);
+    } catch (e) {
+      setErr(answerLimitText(e) ?? `Could not download “${ref.name}” — the blob is missing or failed to decrypt.`);
     } finally {
       setBusyId(null);
     }
   };
 
+  if (!shownNow) return null;
   return (
     <div className="field">
       <label>Attachments</label>
@@ -1883,11 +2143,13 @@ function AttachmentList({ item, store }: { item: VaultItem; store: VaultStore })
   );
 }
 
-function PasswordField({ value }: { value: string }) {
+function PasswordField({ value, label }: { value: string; label: string }) {
+  const shownNow = useStillShown();
   const [show, setShow] = useState(false);
+  if (!shownNow) return null;
   return (
     <>
-      <input readOnly className="mono" type={show ? "text" : "password"} value={value} />
+      <input readOnly aria-label={label} className="mono" type={show ? "text" : "password"} value={value} />
       <button className="ghost" onClick={() => setShow((s) => !s)}>{show ? "Hide" : "Show"}</button>
     </>
   );
@@ -1897,7 +2159,9 @@ function PasswordField({ value }: { value: string }) {
  *  CVV renders through this (design: SecretField); login passwords keep the plain editor
  *  idiom (generate-and-glance), a deliberate difference, not an oversight. */
 function SecretInput({ value, onChange, ariaLabel }: { value: string; onChange: (v: string) => void; ariaLabel?: string }) {
+  const shownNow = useStillShown();
   const [show, setShow] = useState(false);
+  if (!shownNow) return null;
   return (
     <div className="secret-row">
       {/* BL-2: this custom input never gets Field's injected id, so name it here. */}
@@ -1910,6 +2174,8 @@ function SecretInput({ value, onChange, ariaLabel }: { value: string; onChange: 
 }
 
 function TotpView({ uri, pill, onCopy }: { uri: string; pill: ReactNode; onCopy: (code: string) => void }) {
+  // Asked at each tick's render too: the code ticks every second by this view's own state.
+  const shownNow = useStillShown();
   const [code, setCode] = useState("······");
   const [remaining, setRemaining] = useState(30);
   const [period, setPeriod] = useState(30);
@@ -1937,6 +2203,7 @@ function TotpView({ uri, pill, onCopy }: { uri: string; pill: ReactNode; onCopy:
     const id = window.setInterval(tick, 1000);
     return () => window.clearInterval(id);
   }, [uri]);
+  if (!shownNow) return null;
   return (
     <div className="field">
       {/* Same copy-flash pill as the password/card fields — TotpView owns the label, so the
@@ -1969,6 +2236,8 @@ function HealthLine({ password, client }: { password: string; client: ApiClient 
   // fetch to the relay — so it renders as the shared <Busy> dial in sentence case like every
   // other wait in the app, not as a bare lower-case muted line. The VERDICTS below stay plain
   // text: they are results, and a dial spinning beside a finished answer reads as still-working.
+  const shownNow = useStillShown();
+  const guard = useContext(OpenItemGuard);
   const [status, setStatus] = useState<string>("");
   const [checking, setChecking] = useState(false);
   const check = async () => {
@@ -1976,6 +2245,11 @@ function HealthLine({ password, client }: { password: string; client: ApiClient 
     setStatus("");
     try {
       const hash = await hibpSha1UpperHex(password);
+      // Asked again after the digest, before anything of it is sent: an item a removal took away meanwhile sends nothing.
+      if (!guard.shown()) {
+        guard.onGone();
+        return;
+      }
       const body = await client.hibpRange(hibpPrefix(hash));
       const count = hibpCountInRange(body, hash);
       setStatus(count > 0 ? `⚠ found in ${count.toLocaleString()} breaches — change it` : "✓ not in any known breach");
@@ -1985,6 +2259,7 @@ function HealthLine({ password, client }: { password: string; client: ApiClient 
       setChecking(false);
     }
   };
+  if (!shownNow) return null;
   return (
     <div style={{ marginTop: 4 }}>
       {/* BL-1 (G25): the verdict is ASYNC info landing in a bare span — silent to AT. One
@@ -2012,12 +2287,18 @@ function expiryYearChoices(stored: (string | undefined)[]): string[] {
   return ys;
 }
 
-function Editor({ initial, policy, vaultChoices, generateOnOpen, onSave, onCancel, backRef }: { initial: ItemDoc; policy: ClientPolicy | null; vaultChoices?: VaultInfo[]; generateOnOpen?: boolean; onSave: (d: ItemDoc, files: PendingUpload[], onProgress?: (done: number, total: number) => void, vaultId?: string) => Promise<void>; onCancel: () => void; backRef?: React.MutableRefObject<(() => void) | null> }) {
+function Editor({ initial, policy, vaultChoices, generateOnOpen, onSave, onCancel, backRef, dirtyRef, ownsTarget }: { initial: ItemDoc; policy: ClientPolicy | null; vaultChoices?: VaultInfo[]; generateOnOpen?: boolean; ownsTarget: (pickedVaultId: string | undefined) => boolean; onSave: (d: ItemDoc, files: PendingUpload[], onProgress?: (done: number, total: number) => void, vaultId?: string) => Promise<void>; onCancel: () => void; backRef?: React.MutableRefObject<(() => void) | null>; dirtyRef?: React.MutableRefObject<boolean> }) {
+  const shownNow = useStillShown();
   const [doc, setDoc] = useState<ItemDoc>(structuredClone(initial));
   // New items only: which vault to create in (existing items never move vaults). A9 review LOW-2: the default is the
   // PERSONAL vault; with none in force there is no default — the human picks (the select shows a placeholder) and Save
   // stays disabled until then, so nothing lands in a shared vault by omission.
-  const [vaultId, setVaultId] = useState<string | undefined>(vaultChoices?.find((v) => v.type === "personal")?.vaultId);
+  const [picked, setVaultId] = useState<string | undefined>(vaultChoices?.find((v) => v.type === "personal")?.vaultId);
+  // A vault chosen here that is no longer offered (the person was removed from it, or it went read-only, while the editor
+  // was open) is chosen no longer: nothing is saved into it, and nothing is saved elsewhere in its place. The person
+  // picks again, and a line says why.
+  const pickGone = vaultChoices !== undefined && picked !== undefined && !vaultChoices.some((v) => v.vaultId === picked);
+  const vaultId = pickGone ? undefined : picked;
   const needsVaultPick = vaultChoices !== undefined && vaultId === undefined;
   const [pending, setPending] = useState<PendingUpload[]>([]);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
@@ -2157,22 +2438,8 @@ function Editor({ initial, policy, vaultChoices, generateOnOpen, onSave, onCance
     try {
       await onSave(toSave, pending, (done, total) => setProgress({ done, total }), vaultId);
     } catch (err) {
-      // ux-copy--2: the 413 sentence is the copy canon's 413 row (byte-twin of core
-      // HouseholdCopy) — never the server's raw message/statusText interpolated.
-      // H03 → recheck R38: a per-row `rejected` (store.ts throwIfRejected → ApiError with the
-      // server's reason) is PERMANENT — the referenced attachment is gone, and the same save
-      // fails identically forever — so it gets core's SAVE_REJECTED_ATTACHMENT row (byte-twin,
-      // pinned in vault-copy.test.ts), never the generic "nothing was changed" retry shape.
-      const rejectedAttachment = err instanceof ApiError && (err.code === "unknown_attachment" || err.code === "attachment_mismatch");
-      setSaveErr(
-        rejectedAttachment
-          ? "The server refused this save — an attachment it references is no longer there. Remove that attachment, then save again."
-          : err instanceof ItemChangedVaultsError
-            ? err.message // A1b INV-EDIT: "This item changed vaults; reopen it." (core HouseholdCopy.ITEM_CHANGED_VAULTS)
-          : err instanceof ApiError && err.status === 413
-            ? "The server refused that upload — it may be too large, or storage may be full."
-            : "Save failed — nothing was changed.",
-      );
+      // ux-copy--2, H03/R38, the owner's quota, the 413 row, the offline refusals and the anomaly refusals: saveerror.ts.
+      setSaveErr(saveErrorText(err, ownsTarget(vaultId)));
     } finally {
       setBusy(false);
       setProgress(null);
@@ -2191,6 +2458,9 @@ function Editor({ initial, policy, vaultChoices, generateOnOpen, onSave, onCance
   // again (attachments are metadata refs — file bytes live in `pending`, counted apart).
   // The vault <select> alone is deliberately NOT dirty: nothing typed, nothing to lose.
   const dirty = pending.length > 0 || JSON.stringify(doc) !== JSON.stringify(initial);
+  // The screen asks this when it closes the editor because the item is no longer handed out (its line says whether
+  // typing was lost). Written at each render, so it is current whenever the screen asks.
+  if (dirtyRef) dirtyRef.current = dirty;
   // ONE cancel path for the button AND hardware Back: pristine closes immediately; dirty
   // arms the confirm first, and only the second press/tap discards for real.
   const cancel = () => (dirty && !confirmCancel ? setConfirmCancel(true) : onCancel());
@@ -2207,6 +2477,7 @@ function Editor({ initial, policy, vaultChoices, generateOnOpen, onSave, onCance
     return () => { backRef.current = null; };
   });
 
+  if (!shownNow) return null;
   return (
     // Cut E (v2 #4): autoComplete off — WITHOUT it the browser's own password manager
     // interposes save/fill prompts inside the vault's editor (its suggestions overlay the
@@ -2225,12 +2496,13 @@ function Editor({ initial, policy, vaultChoices, generateOnOpen, onSave, onCance
             {needsVaultPick && <option value="">Choose a vault for this item.</option>}
             {vaultChoices.map((v) => (
               <option key={v.vaultId} value={v.vaultId}>
-                {v.name}{v.type === "personal" ? "" : " (shared)"}
+                {vaultLabel(v, vaultChoices)}{v.type === "personal" ? "" : " (shared)"}
               </option>
             ))}
           </select>
         </Field>
       )}
+      {pickGone && <div className="msg info" style={{ display: "block", marginTop: 8 }} role="status" data-testid="editor-vault-gone">{EDITOR_VAULT_GONE}</div>}
       <Field label="Name">
         <input autoFocus value={doc.name} onChange={(e) => setDoc({ ...doc, name: e.target.value })} />
       </Field>
@@ -2250,7 +2522,7 @@ function Editor({ initial, policy, vaultChoices, generateOnOpen, onSave, onCance
               <button type="button" className="ghost" aria-label={showPw ? "Hide password" : "Show password"} onClick={() => setShowPw((s) => !s)}>{showPw ? "Hide" : "Show"}</button>
               <button type="button" className="ghost" onClick={gen}>{confirmGen ? "Replace?" : "Generate"}</button>
             </div>
-            {confirmGen && <span className="muted" style={{ color: "var(--gold-text)" }}>this replaces the current password — tap “Replace?” to confirm, or edit the field to cancel</span>}
+            {confirmGen && <span className="muted" style={{ color: "var(--gold-text)" }}>{GENERATE_REPLACE_ASK}</span>}
             {/* H117: arrived here from the verification run's "Generate a new password" offer.
                 Say what happened AND that it is not saved yet — the whole point of landing in the
                 editor rather than writing the password behind the user's back. */}
@@ -2340,7 +2612,7 @@ function Editor({ initial, policy, vaultChoices, generateOnOpen, onSave, onCance
             ))}
           </div>
         )}
-        <input ref={fileInput} type="file" multiple style={{ display: "none" }} onChange={(e) => addFiles(e.target.files)} />
+        <input ref={fileInput} type="file" multiple aria-label="Attach files" style={{ display: "none" }} onChange={(e) => addFiles(e.target.files)} />
         <button type="button" className="ghost" onClick={() => fileInput.current?.click()}>+ Attach files</button>
         {/* Owner dev-note 2026-08-19: "encrypted on this device" read as DEVICE-LOCAL storage.
             It meant where the encryption happens; the sealed file syncs to every member of the
@@ -2523,7 +2795,12 @@ const IMPORT_INTERRUPTED =
  * Exported for import-push-outcome.test.ts (the offlineCopyModel idiom).
  */
 export function importPushOutcome(e: unknown): { message: string; fatal: boolean } {
-  if (e instanceof KdfPolicyError) return { message: WEAK_KDF_MESSAGE, fatal: true }; // H1 (spec 05 T1)
+  // A push the client's limit ended (the server stopped answering): said so; Retry sends the same ids again.
+  const limit = answerLimitText(e);
+  if (limit !== null) return { message: limit, fatal: false };
+  if (e instanceof KdfPolicyError) return { message: kdfRefusalText(e), fatal: true }; // H1 (spec 05 T1)
+  // Spec 03 §14.4: the check before the import found the account short. Nothing was sent; a retry would be short again.
+  if (e instanceof QuotaShortError) return { message: quotaShortText(e.limits), fatal: true };
   if (e instanceof ApiError && e.status === 403) return { message: "You don't have permission to do that.", fatal: true };
   if (e instanceof ApiError && e.status === 413) {
     return { message: "The server refused that upload — it may be too large, or storage may be full.", fatal: true };
@@ -2590,7 +2867,16 @@ function NameList({ names }: { names: string[] }) {
 
 /** Every report bucket, enumerated by name — rendered on the preview AND the finished
  *  screen so nothing about what the plan did is a surprise afterwards. */
-function ReportBuckets({ report }: { report: ImportReport }) {
+/**
+ * [preview]: the report shown before Import is pressed (nothing is imported yet), where "imported separately" would be
+ * untrue: the preview's own lines say what will be done.
+ */
+/** The one-time-code group's line: on the preview, what will be done; on the finished screen, what was done. */
+export function importTotpDiffersText(preview: boolean): string {
+  return preview ? IMPORT_TOTP_DIFFERS_PREVIEW : IMPORT_TOTP_DIFFERS;
+}
+
+function ReportBuckets({ report, preview = false }: { report: ImportReport; preview?: boolean }) {
   const bucket = (names: string[], intro: string) =>
     names.length > 0 ? (
       <div className="msg info" style={{ display: "block" }}>
@@ -2600,8 +2886,8 @@ function ReportBuckets({ report }: { report: ImportReport }) {
   return (
     <>
       {bucket(report.alreadyInVault, "Already in your vault — skipped:")}
-      {bucket(report.passwordDiffers, "Same site and username as your vault, but a different password — imported separately (renamed) so you can review which one is current:")}
-      {bucket(report.totpDiffers, "Same login as your vault, but a different 2FA secret — imported separately (renamed) for review:")}
+      {bucket(report.passwordDiffers, preview ? "Same site and username as your vault, but a different password — will be imported separately (renamed) so you can review which one is current:" : "Same site and username as your vault, but a different password — imported separately (renamed) so you can review which one is current:")}
+      {bucket(report.totpDiffers, importTotpDiffersText(preview))}
       {bucket(report.flagged, "Renamed so every item keeps a distinct name:")}
       {bucket(report.archivedSkipped, "Archived in the export — not imported:")}
       {bucket(report.unknownTypeSkipped, "Item types andvari can't import yet — skipped:")}
@@ -2668,7 +2954,7 @@ function ImportPanel({ store, personalVaultId, onClose, onDone }: { store: Vault
   // F18 idiom (mirrors newItemVaultChoices): personal + shared vaults we can WRITE to —
   // readers never appear. Computed per render, not memoized: the first sync can finish
   // while this panel is open and newly-held vaults must surface without a remount.
-  const vaultChoices = store.vaults().filter((v) => v.type === "personal" || v.role === "owner" || v.role === "writer");
+  const vaultChoices = store.vaults().filter((v) => (v.type === "personal" || v.role === "owner" || v.role === "writer") && !store.moveDeleteWaiting(v.vaultId) && store.mayWrite(v.vaultId));
 
   const reset = () => {
     setPlanned(null);
@@ -2746,7 +3032,7 @@ function ImportPanel({ store, personalVaultId, onClose, onDone }: { store: Vault
     // snapshot) — never re-plan against a vault we no longer hold: its projections read
     // empty and every row plans as "to import" (native importSetVault parity).
     if (!store.vaults().some((v) => v.vaultId === vault.vaultId)) {
-      setPickErr("That vault isn't available any more — it may have been removed. Pick another destination.");
+      setPickErr(DESTINATION_GONE);
       return;
     }
     setPickErr("");
@@ -2757,8 +3043,19 @@ function ImportPanel({ store, personalVaultId, onClose, onDone }: { store: Vault
     setPlanned({ plan: planImport(parsed, store.importProjections(vault.vaultId), () => crypto.randomUUID()), vault });
   };
 
+  // The plan's destination, read through the store's guarded reader at each render: a vault the person was removed from
+  // while the panel was open is no destination; nothing is imported until another is picked (and re-planned).
+  const destGone = planned !== null && !finished && !store.vaults().some((v) => v.vaultId === planned.vault.vaultId);
+  // A finished import's report is derived from its destination's items ("already in the vault", a different password):
+  // once that vault is no longer one whose items are shown (a removal carried out), the report is closed, read at each
+  // render, and the panel with it.
+  const reportGone = planned !== null && finished && !store.shownVaultIds().includes(planned.vault.vaultId);
+  useEffect(() => {
+    if (reportGone) onDone();
+  }, [reportGone, onDone]);
+
   const runImport = async () => {
-    if (!planned) return;
+    if (!planned || destGone) return;
     setBusy(true);
     setImportErr("");
     setImportFatal(false);
@@ -2791,7 +3088,7 @@ function ImportPanel({ store, personalVaultId, onClose, onDone }: { store: Vault
           the completion, which swaps in the report branch, is not silently mounted. */}
       <Announcer
         text={
-          finished && report
+          finished && report && !reportGone
             ? `Import complete. Added ${report.imported} ${report.imported === 1 ? "item" : "items"} to ${destLabel}.`
             : busy && planned
               ? `Importing ${planned.plan.items.length} ${planned.plan.items.length === 1 ? "item" : "items"}…`
@@ -2814,11 +3111,12 @@ function ImportPanel({ store, personalVaultId, onClose, onDone }: { store: Vault
         ref={fileInput}
         type="file"
         accept=".csv,text/csv,text/plain"
+        aria-label="Choose a CSV file to import"
         style={{ display: "none" }}
         onChange={(e) => onFile(e.target.files)}
       />
 
-      {finished && report ? (
+      {reportGone ? null : finished && report ? (
         <>
           <ReportTiles report={report} done />
           <ReportBuckets report={report} />
@@ -2836,15 +3134,16 @@ function ImportPanel({ store, personalVaultId, onClose, onDone }: { store: Vault
             {fileName && <>“{fileName}” · </>}detected {format ? FORMAT_LABEL[format] : "password"} export · into {destLabel}
           </div>
 
-          {pickErr && <div className="muted" style={{ marginBottom: 8 }}>{pickErr}</div>}
-          {/* S2: destination picker (F18 idiom — rendered only when there is a real choice).
-              Changing it re-plans against that vault's projections (changeDestination). */}
-          {vaultChoices.length > 1 && (
+          {(pickErr || destGone) && <div className="muted" style={{ marginBottom: 8 }}>{pickErr || DESTINATION_GONE}</div>}
+          {/* S2: destination picker (F18 idiom — rendered only when there is a real choice, or when the planned
+              destination is gone). Changing it re-plans against that vault's projections (changeDestination). */}
+          {(vaultChoices.length > 1 || destGone) && (
             <Field label="Import into">
-              <select value={planned.vault.vaultId} disabled={importLocked} onChange={(e) => changeDestination(e.target.value)}>
+              <select value={destGone ? "" : planned.vault.vaultId} disabled={importLocked} onChange={(e) => changeDestination(e.target.value)}>
+                {destGone && <option value="">—</option>}
                 {vaultChoices.map((v) => (
                   <option key={v.vaultId} value={v.vaultId}>
-                    {v.name}{v.type === "personal" ? "" : " (shared)"}
+                    {vaultLabel(v, vaultChoices)}{v.type === "personal" ? "" : " (shared)"}
                   </option>
                 ))}
               </select>
@@ -2862,7 +3161,7 @@ function ImportPanel({ store, personalVaultId, onClose, onDone }: { store: Vault
           )}
 
           <ReportTiles report={report} done={false} />
-          <ReportBuckets report={report} />
+          <ReportBuckets report={report} preview />
 
           {report.errors.length > 0 && (
             <div className="field">
@@ -2908,7 +3207,7 @@ function ImportPanel({ store, personalVaultId, onClose, onDone }: { store: Vault
             ) : importErr ? (
               <button type="button" className="primary" disabled={busy} onClick={runImport}>{busy ? "Retrying…" : "Retry"}</button>
             ) : (
-              <button type="button" className="primary" disabled={busy || nothingToImport} onClick={runImport}>
+              <button type="button" className="primary" disabled={busy || nothingToImport || destGone} onClick={runImport}>
                 {busy ? "Importing…" : `Import ${report.imported} ${report.imported === 1 ? "item" : "items"}`}
               </button>
             )}

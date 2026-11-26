@@ -114,6 +114,16 @@ test("the Safari worker has no session of its own: its handlers read the app's v
   assert.match(fn, /case "totp":\s*if \(sender\.tab !== undefined\) return/);
 });
 
+test("Safari's Lock clears the login and card grants with the app's vault, as the own-session lock does", () => {
+  const bg = readFileSync(new URL("./background.ts", import.meta.url), "utf8");
+  const lane = bg.slice(bg.indexOf("async function appVaultDispatch("), bg.indexOf("// ---- end of the Safari app-vault lane ----"));
+  const lock = lane.slice(lane.indexOf('case "lock":'), lane.indexOf('return { ok: true } satisfies Res<"lock">;', lane.indexOf('case "lock":')));
+  for (const step of ["vault.close();", "grants.clear();", "cardGrants.clear();"]) assert.ok(lock.includes(step), step);
+  // The own-session lock clears the same two maps (doLock), so neither lane leaves a pick redeemable after Lock.
+  const doLock = bg.slice(bg.indexOf("async function doLock("), bg.indexOf("type TokenPair ="));
+  for (const step of ["grants.clear();", "cardGrants.clear();"]) assert.ok(doLock.includes(step), `doLock: ${step}`);
+});
+
 test("a page frame gets a secret only through the popup's grant, never a code, and the popup must confirm another site", () => {
   const bg = readFileSync(new URL("./background.ts", import.meta.url), "utf8");
   const reveal = bg.slice(bg.indexOf("async function appVaultReveal("), bg.indexOf("async function appVaultCode("));
@@ -128,7 +138,7 @@ test("a page frame gets a secret only through the popup's grant, never a code, a
   assert.match(lane, /const page = await activePageHost\(\);/);
   // A login saved for another site is not granted to the active page until the person confirmed it.
   const fill = bg.slice(bg.indexOf("async function fillFromPopup("), bg.indexOf("async function topOrigin("));
-  const confirm = fill.indexOf("const confirmed = confirmedOtherSite !== null && confirmedOtherSite === (page ?? top);");
+  const confirm = fill.indexOf("const confirmed = confirmedOtherSite !== null && confirmedOtherSite === otherSiteConfirmation(itemId, top);");
   assert.ok(confirm > 0 && confirm < fill.indexOf("grants.set(tab.id"), "asked before any grant is minted, and held to the page it was given for");
   // A popup a page asked for does not raise Face ID by itself.
   // It is marked only once the sender passed every check (the active tab of the focused window, the right frame), and
@@ -144,7 +154,7 @@ test("a page frame gets a secret only through the popup's grant, never a code, a
   }
   const popup = readFileSync(new URL("./popup.ts", import.meta.url), "utf8");
   assert.ok(popup.includes("s.pageSummoned === true"));
-  assert.match(fill, /needsConfirm: \{ savedFor, page: page \?\? top \}/);
+  assert.match(fill, /needsConfirm: otherSiteQuestion\(itemId, saved, top, pslResolve\)/);
 });
 
 test("each capture is queued under its own id, and the old session is retired before the app's server is adopted", () => {
@@ -322,7 +332,7 @@ test("the Safari worker fills a card only into a payment provider's box, only by
   assert.match(lane, /case "revealCardField": \{[\s\S]*?if \(sender\.tab !== undefined\) return \{ ok: false, error: "not allowed from a page" \}/);
 });
 
-// ---- work that outlives a lock (release 0.30.0 port of the overhaul's fix 56292bb6) ----
+// ---- Work that outlives a lock ----
 
 test("a Lock while the handler answers drops its answer: no login or card goes on under a vault that ended", async () => {
   let release: (() => void) | null = null;

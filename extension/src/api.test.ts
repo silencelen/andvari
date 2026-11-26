@@ -11,6 +11,7 @@ import {
   CLIPBOARD_CLEAR_MAX_SECONDS,
   clampAutoLockSeconds,
   clampClipboardClearSeconds,
+  RefreshUnansweredError,
 } from "./api.ts";
 
 // A minimal Response stand-in. `json`-mode bodies parse; `text`-mode bodies make .json() throw
@@ -147,21 +148,22 @@ test("E1-9: refresh 503 → refresh token RESTORED + notified; a later refresh r
       refreshBodies.push(JSON.parse(init.body).refreshToken);
       if (failNext) {
         failNext = false;
-        return jsonResp(503, { error: "unavailable" });
+        return jsonResp(503, { error: "unavailable", message: "busy" });
       }
       return jsonResp(200, { accessToken: "a2", refreshToken: "r2" });
     }
     throw new Error("unexpected " + url);
   }) as unknown as typeof fetch;
   api.setTokens("a1", "r1");
-  await assert.rejects(api.sync(0), (e: unknown) => e instanceof ApiError && e.status === 401);
+  // The server's own answer for the moment: a renewal not done, never the request's 401 (read as the session's end).
+  await assert.rejects(api.sync(0), (e: unknown) => e instanceof RefreshUnansweredError && e.kind === "unavailable");
   assert.equal(api.getTokens().refresh, "r1", "the transient failure restored the refresh token");
   assert.ok(changes.includes("r1"), "onTokensChanged fired on the restore");
   await api.sync(0); // now the refresh succeeds using the restored token
   assert.deepEqual(refreshBodies, ["r1", "r1"], "the later refresh reused the same, still-valid token");
 });
 
-test("E1-9: refresh network throw → refresh token restored + notified", async () => {
+test("E1-9: refresh network throw → the token is kept in memory for its one more try, and no record keeps it", async () => {
   const changes: (string | null)[] = [];
   const api = new AndvariApi("https://x", "1.2.3");
   api.onTokensChanged = () => void changes.push(api.getTokens().refresh);
@@ -171,9 +173,9 @@ test("E1-9: refresh network throw → refresh token restored + notified", async 
     throw new Error("unexpected " + url);
   }) as unknown as typeof fetch;
   api.setTokens("a1", "r1");
-  await assert.rejects(api.sync(0));
-  assert.equal(api.getTokens().refresh, "r1");
-  assert.ok(changes.includes("r1"));
+  await assert.rejects(api.sync(0), (e: unknown) => e instanceof RefreshUnansweredError && e.kind === "unanswered");
+  assert.equal(api.getTokens().refresh, null, "the server may have taken it: handed to no record");
+  assert.ok(!changes.includes("r1"), "no record was written with it");
 });
 
 test("E1-9: refresh 401 → BOTH tokens cleared + notified (definitive death)", async () => {
@@ -182,7 +184,7 @@ test("E1-9: refresh 401 → BOTH tokens cleared + notified (definitive death)", 
   api.onTokensChanged = () => void changes.push(api.getTokens());
   globalThis.fetch = (async (url: string) => {
     if (url.includes("/sync")) return jsonResp(401, { error: "expired" });
-    if (url.includes("/refresh")) return jsonResp(401, { error: "invalid_grant" });
+    if (url.includes("/refresh")) return jsonResp(401, { error: "invalid_grant", message: "refused" });
     throw new Error("unexpected " + url);
   }) as unknown as typeof fetch;
   api.setTokens("a1", "r1");
@@ -284,7 +286,7 @@ test("forceRefresh: rotated → new pair held; consumed (refresh:null) persisted
 
 test("forceRefresh: a definitive 401 → 'revoked' + BOTH tokens cleared (drives the full-wipe path)", async () => {
   const api = new AndvariApi("https://x", "1.2.3");
-  globalThis.fetch = (async () => jsonResp(401, { error: "invalid_grant" })) as unknown as typeof fetch;
+  globalThis.fetch = (async () => jsonResp(401, { error: "invalid_grant", message: "refused" })) as unknown as typeof fetch;
   api.setTokens("a1", "r1");
   assert.equal(await api.forceRefresh(), "revoked");
   assert.deepEqual(api.getTokens(), { access: null, refresh: null });
@@ -292,7 +294,7 @@ test("forceRefresh: a definitive 401 → 'revoked' + BOTH tokens cleared (drives
 
 test("forceRefresh: a 503 → 'transient' + the refresh token RESTORED (blob kept, master pw this time)", async () => {
   const api = new AndvariApi("https://x", "1.2.3");
-  globalThis.fetch = (async () => jsonResp(503, { error: "unavailable" })) as unknown as typeof fetch;
+  globalThis.fetch = (async () => jsonResp(503, { error: "unavailable", message: "busy" })) as unknown as typeof fetch;
   api.setTokens("a1", "r1");
   assert.equal(await api.forceRefresh(), "transient");
   assert.equal(api.getTokens().refresh, "r1", "the pair is restored so it isn't dead-ended");
@@ -305,13 +307,14 @@ test("forceRefresh: a network throw → 'transient' + restored; a missing refres
   }) as unknown as typeof fetch;
   api.setTokens("a1", "r1");
   assert.equal(await api.forceRefresh(), "transient");
-  assert.equal(api.getTokens().refresh, "r1");
+  // The server may have taken it: the token stays in this worker's memory for its one more try, and no record keeps it.
+  assert.equal(api.getTokens().refresh, null);
   api.setTokens("a1", null);
   assert.equal(await api.forceRefresh(), "revoked", "no refresh token ⇒ cannot rotate ⇒ definitive");
 });
 
 test("forceRefresh: an answer that arrives after another sign-in set its own pair changes nothing (doRefresh's outcome guard)", async () => {
-  for (const answer of [() => jsonResp(200, { accessToken: "redeem-a2", refreshToken: "redeem-r2" }), () => jsonResp(401, { error: "invalid_grant" }), () => jsonResp(503, {})]) {
+  for (const answer of [() => jsonResp(200, { accessToken: "redeem-a2", refreshToken: "redeem-r2" }), () => jsonResp(401, { error: "invalid_grant", message: "refused" }), () => jsonResp(503, {})]) {
     const api = new AndvariApi("https://x", "1.2.3");
     let notified = 0;
     let release!: () => void;
@@ -334,6 +337,40 @@ test("forceRefresh: an answer that arrives after another sign-in set its own pai
     assert.equal(await rot, "transient", "the late answer is not this pair's");
     assert.deepEqual(api.getTokens(), { access: "signin-a", refresh: "signin-r" }, "the sign-in's pair stands");
     assert.equal(notified, before, "and nothing is persisted on its behalf");
+  }
+});
+
+test("a refresh answered after a lock cleared the pair hands its outcome to onLateRefresh, and only then", async () => {
+  const cases: { answer: () => Response; meanwhile: [string | null, string | null]; late: unknown }[] = [
+    { answer: () => jsonResp(200, { accessToken: "a2", refreshToken: "r2" }), meanwhile: [null, null], late: ["a1", { access: "a2", refresh: "r2" }] },
+    // A 503 page that is not the server's envelope: the server may have taken the token, so it is handed on to no one.
+    { answer: () => jsonResp(503, {}), meanwhile: [null, null], late: ["a1", { access: "a1", refresh: null }] },
+    { answer: () => jsonResp(503, { error: "unavailable", message: "busy" }), meanwhile: [null, null], late: ["a1", { access: "a1", refresh: "r1" }] },
+    { answer: () => jsonResp(401, { error: "invalid_grant", message: "refused" }), meanwhile: [null, null], late: null },
+    { answer: () => jsonResp(200, { accessToken: "a2", refreshToken: "r2" }), meanwhile: ["signin-a", "signin-r"], late: null },
+  ];
+  for (const c of cases) {
+    const api = new AndvariApi("https://x", "1.2.3");
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let posted!: () => void;
+    const onWire = new Promise<void>((r) => (posted = r));
+    globalThis.fetch = (async (url: string) => {
+      if (!String(url).endsWith("/auth/refresh")) return jsonResp(401, { error: "unauthorized" });
+      posted();
+      await held;
+      return c.answer();
+    }) as unknown as typeof fetch;
+    api.setTokens("a1", "r1");
+    let late: unknown = null;
+    api.onLateRefresh = async (consumed, pair) => void (late = [consumed, pair]);
+    const call = api.getAccountKeys().catch(() => undefined);
+    await onWire;
+    api.setTokens(...c.meanwhile); // a lock that stopped waiting (cleared), or a sign-in's own pair
+    release();
+    await call;
+    assert.deepEqual(late, c.late);
+    assert.deepEqual(api.getTokens(), { access: c.meanwhile[0], refresh: c.meanwhile[1] }, "the client's pair is left as it was set");
   }
 });
 
@@ -468,4 +505,27 @@ test("R4: a block that appears while a refresh is being persisted stops the POST
   await assert.rejects(api.sync(0));
   assert.equal(fetched, 1, "the sync went out (before the block); the refresh POST did not");
   assert.deepEqual(api.getTokens(), { access: "a1", refresh: "r1" }, "transient-keep: the consumed refresh token is restored");
+});
+
+test("no redirect is followed on the server's routes: every request asks for redirect manual, and a redirect is an answer that is not the server's", async () => {
+  const redirects: Response[] = [
+    { ok: false, status: 302, type: "basic", redirected: false, statusText: "Found", json: async () => ({}), text: async () => "" } as unknown as Response,
+    { ok: false, status: 0, type: "opaqueredirect", redirected: false, statusText: "", json: async () => ({}), text: async () => "" } as unknown as Response,
+  ];
+  for (const answer of redirects) {
+    const inits: RequestInit[] = [];
+    globalThis.fetch = (async (_url: string, init: RequestInit) => {
+      inits.push(init);
+      return answer;
+    }) as unknown as typeof fetch;
+    const api = new AndvariApi("https://x", "1.2.3");
+    api.setTokens("a1", "r1");
+    await assert.rejects(api.sync(0), (e: unknown) => e instanceof ApiError && e.code === "redirect_refused" && e.status === 0);
+    assert.equal(await api.logout(), false, "a redirected sign-out is not confirmed");
+    assert.equal(await api.forceRefresh(), "transient", "a redirected refresh rotated nothing the browser can read");
+    // A redirect is not the server's answer: the server may have taken the token, so no record is handed it again.
+    assert.deepEqual(api.getTokens(), { access: "a1", refresh: null }, "the refresh token is kept for its one more try only");
+    assert.ok(inits.length >= 3);
+    for (const init of inits) assert.equal(init.redirect, "manual");
+  }
 });

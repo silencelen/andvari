@@ -7,11 +7,20 @@
  * External module only (MV3 CSP forbids inline); vault strings land via textContent only.
  */
 import type { CardFieldKind } from "./detect";
-import { bioUnlockErrorCopy, CARD_COPY_FAILED, CARD_DUPLICATE_FIELDS, cardFillOffLine, CARD_MIXED_FORMS, CARD_NO_FRAME_ORIGIN, CARD_PAGE_FORM, cardFillErrorCopy, cardProviderNotAllowedCopy, CLIPBOARD_FAILED, CONFIRM_SERVER_FIRST, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, revealErrorCopy, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy, waitingGrantsLine } from "./errors";
+import { drawWordmarks, runeSvg } from "./brand";
+import { CARD_MOVE_NOT_FOLLOWED_TITLE, CARD_RECORD_DAMAGED_TITLE, CARD_REFUSED_KEPT, CARD_WITHHELD, cardRecordDamagedCopy, chooseServerCopy, chooseServerMessage, FORGET_DELETES_COPY, GATE_TITLE_KIND_CHANGE, moveNotFollowedCopy, RECOVER_IN_APP, SERVER_CHANGED_UPDATE, serverEndedNotice, SERVER_FORK, sessionNotConfirmedNotice, SIGN_OUT_NOT_CONFIRMED, unlockErrorMessage } from "./errors";
+import { bioUnlockErrorCopy, CARD_COPY_FAILED, CARD_DUPLICATE_FIELDS, cardFillOffLine, CARD_MIXED_FORMS, CARD_NO_FRAME_ORIGIN, CARD_PAGE_FORM, cardFillErrorCopy, cardProviderNotAllowedCopy, CLIPBOARD_FAILED, CONFIRM_SERVER_FIRST, enrollBioErrorCopy, enrollErrorCopy, fillErrorCopy, lockNoticeCopy, pinUnlockErrorCopy, QUICK_UNLOCK_NOT_CONFIRMED, QUICK_UNLOCK_NOT_UPDATED, revealErrorCopy, SESSION_NOT_SAVED, timerNoticeLine, TOTP_ADDED, totpAddErrorCopy, UNREACHABLE, unlockErrorCopy, waitingGrantsLine } from "./errors";
+import * as T from "./copy";
+import { fillApproved } from "./errors";
+import { ACCOUNT_REMEMBERED, FORGET_EARLIER_CONFIRM, FORGET_EARLIER_CONFIRM_BUTTON, FORGET_EARLIER_DONE, FORGET_EARLIER_FAILED, FORGET_EARLIER_NOT_OFFERED, FORGET_EARLIER_OFFER, FORGET_EARLIER_OPEN, FORGET_EARLIER_READ_FIRST } from "./errors";
+import { capturesLostLine, COUNT_UNKNOWN, forgetUnsavedLine, unsavedArmStep, unsavedCapturesLine } from "./unsavedarm";
 import { wrongVaultLine } from "./itemhome";
-import { clearLiveMsg, setLiveMsg } from "./livemsg";
-import { send, type CardItem, type MatchItem, type Req, type Res, type ServerBlockWire } from "./messages";
-import { DEFAULT_SERVER_URL, middleTruncateOrigin, originMatchPattern } from "./serverurl";
+import { clearLiveMsg, messageBlocks, renderBlocks, setLiveMsg, setLiveMsgBlocks } from "./livemsg";
+import { send, type CardItem, type MatchItem, type Req, type Res, type ServerBlockWire, type UnlockNotice } from "./messages";
+import type { OtherSiteQuestion } from "./othersite";
+import { middleTruncateOrigin, originMatchPattern } from "./serverurl";
+import { PUBLIC_INSTANCE } from "./publicinstance";
+import { masterPasswordLabel } from "./trustgate";
 import { offerDownloadUrl } from "./updateoffer";
 import { BROAD_ORIGIN_PATTERN, shouldRouteToOptions } from "./grantflow";
 import { BUILD_TARGET } from "./buildtarget";
@@ -19,6 +28,7 @@ import { CARD_FILL } from "./cardfillflag";
 import { fillDestination } from "./cardrelease";
 import { askAppServerDetailed, nativeSender } from "./appserver";
 import { displaySite, safeSiteUrl } from "./siteurl";
+import { tabPageOf } from "./senderorigin";
 import { reuseWarning } from "./reusealert";
 
 const FLASH_MS = 1200;
@@ -39,9 +49,7 @@ async function ask<T extends Req["type"]>(req: Extract<Req, { type: T }>): Promi
   }
 }
 
-let tabHost: string | null = null;
-/** The origin of the page the "This site" list was drawn for: a fill names it, and the worker fills only while the
- *  active tab is still on it (the tab may have moved to another site while the popup was open). */
+/** The active tab's origin, as the worker is told it (F4: its scheme decides which addresses match). */
 let tabPage: string | null = null;
 /** S3: whether the active tab has a payment provider's card form we may Fill into, and to which origin (owner decision
  *  2026-11-14: andvari fills a card only there). Fetched once per unlocked render — the active tab can't change while
@@ -88,11 +96,11 @@ let bioCapable = false;
 
 /** The connector's RP-ID claim rides the manifest's install-time host permission for the reference
  *  instance (design 2026-07-18 §3), which the browser can withhold at runtime. Same pattern the SW
- *  broker probes — kept as one derivation from DEFAULT_SERVER_URL rather than a second literal.
+ *  broker probes — kept as one derivation from PUBLIC_INSTANCE.origin rather than a second literal.
  *  A missing permissions API answers TRUE (never hide a working button on an unaskable engine). */
 async function bioRpPermissionHeld(): Promise<boolean> {
   try {
-    return await chrome.permissions.contains({ origins: [`${DEFAULT_SERVER_URL}/*`] });
+    return await chrome.permissions.contains({ origins: [`${PUBLIC_INSTANCE.origin}/*`] });
   } catch {
     return true;
   }
@@ -103,7 +111,7 @@ function bioLabel(): string {
   const ua = navigator.userAgent;
   if (/Mac|iPhone|iPad|iPod/.test(ua)) return "Touch ID";
   if (/Windows/.test(ua)) return "Windows Hello";
-  return "your device";
+  return T.YOUR_DEVICE;
 }
 
 /** bug-ext-gating--4: this probed ONLY for a platform authenticator, and that single boolean both
@@ -126,14 +134,22 @@ async function probeBioCapable(): Promise<void> {
     bioCapable = false;
   }
   const label = bioLabel();
-  el("qu-bio-unlock").textContent = label === "your device" ? "Unlock with your device" : `Unlock with ${label}`;
+  el("qu-bio-unlock").textContent = label === T.YOUR_DEVICE ? T.UNLOCK_WITH_YOUR_DEVICE : fillApproved(T.UNLOCK_WITH, label);
 }
 
-function showMsg(kind: "err" | "info", text: string): void {
+function showMsg(kind: "err" | "info", text: string, title: string | null = null): void {
   // a11y 2a — ORDER MATTERS (the static-read caveat); the rule and its rationale live in
   // livemsg.ts now, because two other copies of this idiom had it inverted. Errors are assertive
   // (role=alert), info is polite (role=status).
-  setLiveMsg(el("msg"), `msg ${kind}`, kind === "err" ? "alert" : "status", text);
+  // A title, or a paragraph break in the words, takes the message's parts: a title above, one paragraph per line, each
+  // set as text (livemsg.ts renderBlocks), never as markup.
+  if (title !== null || text.includes("\n")) setLiveMsgBlocks(el("msg"), `msg ${kind}`, kind === "err" ? "alert" : "status", title, text);
+  else setLiveMsg(el("msg"), `msg ${kind}`, kind === "err" ? "alert" : "status", text);
+}
+
+/** A message with its title (the owner's approved words come as a title and a body). */
+function showTitled(kind: "err" | "info", m: { title: string | null; body: string }): void {
+  showMsg(kind, m.body, m.title);
 }
 
 function clearMsg(): void {
@@ -144,8 +160,8 @@ function setConn(ok: boolean, noServer = false): void {
   const dot = el("conn");
   dot.className = `dot ${ok ? "on" : "off"}`;
   // A15 review F1: while a server is pending nothing was dialed, so "unreachable" would be the wrong word.
-  dot.title = ok ? "server reachable" : noServer ? "no server confirmed" : "server unreachable";
-  el("conn-status").textContent = ok ? "Server reachable" : noServer ? "No server confirmed" : "Server unreachable"; // a11y 5a twin
+  dot.title = ok ? T.SERVER_DOT_REACHABLE : noServer ? T.SERVER_DOT_NONE : T.SERVER_DOT_UNREACHABLE;
+  el("conn-status").textContent = ok ? T.SERVER_REACHABLE : noServer ? T.SERVER_NONE_CONFIRMED : T.SERVER_UNREACHABLE; // a11y 5a twin
 }
 
 /** a11y 2d — one polite announcer for copy confirmations. The visible feedback (button ✓, TOTP
@@ -173,10 +189,7 @@ function showView(unlocked: boolean): void {
   el("count").hidden = !unlocked;
   if (!unlocked) {
     stopTotp();
-    el("must-change").hidden = true; // unlocked-session chrome — refresh() re-derives it
-    el("personal-change").hidden = true; // A5b: likewise
-    el("personal-change-accept").hidden = true; // A6: re-offered only after a fresh co-holder lookup
-    el("grants-waiting").hidden = true; // A6: likewise
+    el("grants-waiting").hidden = true; // unlocked-session chrome — refresh() re-derives it
     el("wrong-vault").hidden = true; // A1b: likewise
     el("qu-offer").hidden = true; // quick-unlock offer/enroll are unlocked-only chrome (spec 01 §8.4)
     el("qu-enroll").hidden = true;
@@ -193,37 +206,56 @@ function showView(unlocked: boolean): void {
   }
 }
 
+/** The captures-lost line this popup said (popup life only; Res<"status">.capturesLost is taken by the read). */
+let capturesLostShown: string | null = null;
+
 async function refresh(): Promise<void> {
   // A15 review F1: while a server is pending the worker signs in nowhere, so the popup leads with the confirm route
   // INSTEAD of any sign-in form (and opens no server page). Asked first, on every render.
   const info = await ask({ type: "serverInfo" });
+  passwordLabelServer = info && !info.block && typeof info.url === "string" && info.url !== "" ? { name: info.name ?? null, origin: info.url } : null;
   if (info?.block) {
-    showConfirmServer(info.block, info.trustedStore === true);
-    return;
+    // §4.4 "A fork stops traffic, not reading": an unlocked vault stays readable under a fork, with the warning and
+    // "Forget this server" in view (the card notice below); a locked one cannot be opened (that needs the server).
+    const readable = info.block.kind === "fork" ? (await ask({ type: "status" }))?.unlocked === true : false;
+    if (!readable) {
+      showConfirmServer(info.block, info.trustedStore === true);
+      return;
+    }
   }
   el("confirm-server").hidden = true;
   el("open-vault").hidden = false;
-  const s = await ask({ type: "status" });
+  // takeLost: this render says the captures a lock nobody was asked about deleted unsaved, once (the read takes them).
+  const s = await ask({ type: "status", takeLost: true });
+  // Design §4.4 (decided on 2026-11-17): kept for this popup's life while it stays locked, in its own line, so an error
+  // the popup shows meanwhile (a refused PIN unlock) is not replaced by it.
+  const lostNow = capturesLostLine(s?.capturesLost ?? 0);
+  if (lostNow !== null) capturesLostShown = lostNow;
+  if (s?.unlocked) capturesLostShown = null;
+  el("captures-lost").hidden = capturesLostShown === null;
+  el("captures-lost").textContent = capturesLostShown ?? "";
   if (!s) {
     showView(false);
-    showMsg("err", "Extension backend not responding — try reloading the extension.");
+    showMsg("err", T.BACKEND_NOT_RESPONDING);
     return;
   }
   showView(s.unlocked);
   renderQuickUnlock(s.quickUnlock, s.unlocked); // spec 01 §8.4 — PIN entry (locked) / offer+settings (unlocked)
   if (BUILD_TARGET === "safari") renderAppLocked(s.unlocked);
-  // E1-6: rescue-issued temporary password — a persistent, non-dismissable strip for the
-  // whole unlocked session; it clears only via a fresh unlock whose response drops the flag.
-  el("must-change").hidden = !(s.unlocked && s.mustChangePassword);
-  el("personal-change").hidden = !(s.unlocked && s.personalChange); // A5b M-2: never a silent switch
-  if (s.unlocked && s.personalChangeText) el("personal-change-text").textContent = s.personalChangeText; // LOW-3: both vaults named
-  el("personal-change-accept").textContent = s.unlocked && s.personalProposal ? "Use this personal vault" : "Use the new personal vault"; // A9 review MEDIUM-1
-  if (s.unlocked && s.personalChange) await renderPersonalChangeChoice();
-  else {
-    el("personal-change-accept").hidden = true;
-    el("personal-change-coholders").hidden = true;
+  renderCardNotice(s.cardNotice);
+  // §4.4: the server ended this session — readable here, nothing sent or saved, with the notice in view.
+  if (s.unlocked && s.serverEnded) {
+    // Never advises the lock where it would delete logins or cards caught and not saved.
+    // A session the extension could not confirm in time ended here, not at the server: said as that end.
+    const unsaved = typeof s.unsavedCaptures === "number" ? s.unsavedCaptures : null;
+    showMsg("info", s.serverEndedUnconfirmed ? sessionNotConfirmedNotice(unsaved) : serverEndedNotice(unsaved));
+    // Quick unlock cannot be enrolled while it stands (the worker refuses it): the popup does not offer it.
+    el("qu-offer").hidden = true;
+    el("qu-enroll").hidden = true;
+    el("qu-settings").hidden = true;
   }
-  // A6 (§1.7, Q8): grants the extension will not open wait for a full client.
+  // §12.2 rule 1: the count of served shared vaults whose key this session does not hold: a grant that waits for a
+  // full client, or a vault closed in this session and served again, which opens at the next unlock here.
   const waiting = s.unlocked ? s.waitingGrants ?? 0 : 0;
   el("grants-waiting").hidden = waiting <= 0;
   el("grants-waiting").textContent = waitingGrantsLine(waiting);
@@ -231,13 +263,12 @@ async function refresh(): Promise<void> {
   const wrong = s.unlocked ? s.wrongVault ?? 0 : 0;
   el("wrong-vault").hidden = wrong <= 0;
   el("wrong-vault").textContent = wrongVaultLine(wrong);
+  // An alarm the browser refused (twice); for the auto-lock's, the deadline still keeps the lock's time.
+  const timerLine = s.unlocked ? timerNoticeLine(s.timerNotice) : "";
+  el("timer-notice").hidden = timerLine === "";
+  el("timer-notice").textContent = timerLine;
   if (s.unlocked) {
     await loadUnlocked();
-    // a11y 2c: on a recovery-password session, move focus onto the critical notice so a screen
-    // reader announces it (loadUnlocked otherwise leaves focus on #search). It IS a button — the
-    // last focus wins, so this beats the focus race rather than relying on an appears-populated
-    // role=alert. No-op if the strip is hidden (e.g. a mid-load relock).
-    if (s.mustChangePassword) el("must-change").focus();
     // Security review 2026-10: the signup reuse warning lives here (and on the badge), never in
     // the page — an in-page toast was readable by the page, one membership bit per guess.
     const reuse = await ask({ type: "reuseNotice" });
@@ -254,7 +285,10 @@ async function refresh(): Promise<void> {
   }
   // F26 (E1-7): say WHY the vault is locked — recorded for idle autolock only (manual lock
   // renders no reason line, web useAutoLock parity); verbatim web copy via lockNoticeCopy.
-  if (s.lockNotice) showMsg("info", lockNoticeCopy(s.lockNotice.seconds));
+  if (s.lockNotice?.kind === "idle") showMsg("info", lockNoticeCopy(s.lockNotice.seconds));
+  else if (s.lockNotice?.kind === "operator") showMsg("err", unlockErrorCopy("operator_account")); // §12.2 rule 7, by the card
+  // A quick unlock that found this browser's session unconfirmed: said at every locked render until the next unlock.
+  else if (s.lockNotice?.kind === "not_confirmed") showMsg("info", QUICK_UNLOCK_NOT_CONFIRMED);
   // Armed quick unlock (and not falling back) → the PIN field (or the bio button) owns the focus; else
   // the master form.
   if (s.quickUnlock.armed && !pinFallback) {
@@ -266,7 +300,18 @@ async function refresh(): Promise<void> {
     const remembered = s.email ?? s.rememberedEmail ?? null; // A15: kept by the worker, not in storage.local
     if (remembered) email.value = remembered;
   }
+  renderPasswordLabel();
   (email.value ? el("password") : email).focus();
+}
+
+/** The server the password label names (§4.4), from the last serverInfo; null while none is in effect. */
+let passwordLabelServer: { name: string | null; origin: string } | null = null;
+
+/** §4.4: "Master password for *email* on *name* (*origin*)". */
+function renderPasswordLabel(): void {
+  const s = passwordLabelServer;
+  el("password-label").textContent =
+    s === null || s.origin === "" ? T.MASTER_PASSWORD_LABEL : masterPasswordLabel(el<HTMLInputElement>("email").value, s.name, s.origin);
 }
 
 /** Render the self-update banner from the SW's SW-validated verdict. `latest` is non-null only
@@ -293,17 +338,17 @@ async function renderUpdate(): Promise<void> {
   }
   quiet.hidden = true; // an offer supersedes the quiet note (mutually exclusive)
   banner.hidden = false; // a11y 2a: in the tree before its text lands (see above)
-  el("update-text").textContent = `Update available — andvari ${r.latest}. `;
+  el("update-text").textContent = fillApproved(T.UPDATE_AVAILABLE, String(r.latest));
   // Firefox gets the Firefox zip; everything else (Chrome/Edge/Brave) the Chrome zip. Fall back
   // to whichever URL exists so a single-target publish still links somewhere real.
   // A15 step 0: the popup re-checks the link itself before it becomes an href — only
-  // `${DEFAULT_SERVER_URL}/downloads/<basename>`, and only while the current server is the default.
+  // `${UPDATE_ORIGIN}/downloads/<basename>`, and only while the current server is the public instance.
   const isFirefox = /firefox/i.test(navigator.userAgent);
   const server = (await currentServer()) ?? ""; // no answer / pending: no link (offerDownloadUrl needs the default)
   const url = [isFirefox ? r.firefoxUrl : r.chromeUrl, r.chromeUrl, r.firefoxUrl].map((u) => offerDownloadUrl(u, server)).find((u) => u !== null) ?? null;
   if (url) {
     link.href = url;
-    link.textContent = "Download & reload";
+    link.textContent = T.UPDATE_DOWNLOAD_RELOAD;
     link.hidden = false;
   } else {
     link.hidden = true; // a version with no usable link: still tell them one exists
@@ -314,8 +359,8 @@ async function renderUpdate(): Promise<void> {
  *  code). Mirrors the desktop's two quiet Settings lines (DesktopState UPDATE_*_NOTICE). */
 function updateQuietCopy(reason: string): string {
   return reason === "stale"
-    ? "Updates: the server’s update listing hasn’t been re-signed in a while — if you’re expecting an update, mention it to your admin."
-    : "Updates: the server’s update listing couldn’t be verified, so no update will be offered from it. Your vault and sync are unaffected.";
+    ? T.UPDATE_LISTING_STALE
+    : T.UPDATE_LISTING_UNVERIFIED;
 }
 
 /** A15: the configured server origin, from the worker (the only reader of its trusted store) — asked on every use,
@@ -338,45 +383,246 @@ function showConfirmServer(block: ServerBlockWire, storeKept: boolean): void {
   box.hidden = false;
   const notMine = el<HTMLButtonElement>("confirm-server-not-mine");
   const open = el<HTMLButtonElement>("confirm-server-open");
+  const pub = el<HTMLButtonElement>("confirm-server-public");
+  pub.hidden = true;
   if (BUILD_TARGET === "safari") {
     // The server is the andvari app's, and only the app changes it: nothing to confirm here, no Options, no default.
-    el("confirm-server-h").textContent = "No server yet";
+    el("confirm-server-h").textContent = T.NO_SERVER_YET;
     el("confirm-server-lead").hidden = true;
     el("confirm-server-origin").hidden = true;
-    el("confirm-server-body").textContent = appAnswered === "none" ? APP_SERVER_NONE : APP_SERVER_UNKNOWN;
+    el("confirm-server-body").textContent = appAnswered === "none" ? T.APP_SERVER_NONE : T.APP_SERVER_UNKNOWN;
     open.hidden = true;
     notMine.hidden = true;
     return;
   }
   if (block.kind === "unsettled") {
-    el("confirm-server-h").textContent = "andvari couldn’t load its settings";
+    el("confirm-server-h").textContent = T.SETTINGS_NOT_LOADED_TITLE;
     el("confirm-server-lead").hidden = true;
     el("confirm-server-origin").hidden = true;
-    el("confirm-server-body").textContent =
-      "It can’t tell which server you use right now, so it won’t sign in anywhere. Close this window and open it again in a minute.";
+    el("confirm-server-body").textContent = T.SETTINGS_NOT_LOADED;
     open.hidden = true;
     notMine.hidden = true;
     return;
   }
-  el("confirm-server-h").textContent = "Confirm your server";
-  el("confirm-server-lead").hidden = false;
-  el("confirm-server-lead").textContent = block.keepable
-    ? "Before this update, andvari was set to use:"
-    : "This browser has a server address saved by an older version of andvari:";
   const origin = el("confirm-server-origin");
+  if (block.kind === "no_store" || !storeKept) {
+    el("confirm-server-h").textContent = T.NO_STORE_TITLE;
+    el("confirm-server-lead").hidden = true;
+    origin.hidden = true;
+    el("confirm-server-body").textContent = T.NO_STORE;
+    open.hidden = true;
+    notMine.hidden = true;
+    return;
+  }
+  if (block.kind === "fork" || block.kind === "pin_damaged") {
+    // §4.4: a fork is durable and stops everything; a damaged record blocks the origin. "Forget this server" only.
+    el("confirm-server-h").textContent = block.kind === "fork" ? T.FORK_TITLE : CARD_RECORD_DAMAGED_TITLE;
+    el("confirm-server-lead").hidden = true;
+    origin.hidden = false;
+    origin.textContent = block.origin;
+    // Entry 12's two paragraphs stay two paragraphs: one element per line, each set as text.
+    if (block.kind === "fork") el("confirm-server-body").textContent = `${SERVER_FORK} ${FORGET_DELETES_COPY}`;
+    else renderBlocks(el("confirm-server-body"), messageBlocks(null, cardRecordDamagedCopy(block.origin)));
+    open.hidden = true;
+    notMine.hidden = false;
+    notMine.textContent = T.FORGET_THIS_SERVER;
+    forgetArms.delete(notMine); // a fresh render starts unarmed
+    // Rendered run: not focused at open (it drew a heavy ring at rest, and Enter would have deleted this
+    // browser's copy of the vault: the first screen's no-preselection rule). Tab still reaches it.
+    return;
+  }
+  // `no_server`: the first popup (§12.2) — the public instance, or the person's own server behind the Trust Gate.
+  el("confirm-server-h").textContent = T.CHOOSE_YOUR_SERVER;
+  el("confirm-server-lead").hidden = false;
+  el("confirm-server-lead").textContent = T.PUBLIC_SERVER_LEAD;
   origin.hidden = false;
-  origin.textContent = block.origin;
-  el("confirm-server-body").textContent = block.keepable
-    ? "andvari won’t sign in anywhere until you confirm it once, in Options. If it isn’t yours, choose “Not mine”."
-    : storeKept
-      ? "andvari couldn’t confirm it when it updated, and a web page could have changed it, so andvari won’t sign in anywhere until you decide. If it’s your own server, enter its address in Options and connect. If it isn’t yours, choose “Not mine”."
-      : "andvari can’t keep a server choice in this browser mode (Firefox’s “Never remember history”), so it won’t sign in to another server in its place. To keep using this one, turn that setting off, restart Firefox and enter the address in Options. If it isn’t yours, choose “Not mine”.";
+  origin.textContent = PUBLIC_INSTANCE.origin;
+  el("confirm-server-body").textContent = T.OWN_SERVER_BODY;
+  pub.hidden = false;
+  pub.textContent = PUBLIC_INSTANCE.name;
   open.hidden = false;
-  open.textContent = block.keepable ? "Confirm in Options" : "Open Options";
-  notMine.hidden = false;
-  notMine.textContent = `Not mine — use ${new URL(DEFAULT_SERVER_URL).host} instead`;
-  open.focus();
+  open.textContent = T.YOUR_OWN_SERVER;
+  notMine.hidden = true;
+  // Rendered run 2026-11-16: neither choice is preselected (§12.1's first-screen rule, the safer reading for this one):
+  // a focused "andvari" made Enter pick the public server.
+  if (document.activeElement === pub) pub.blur();
 }
+
+/** §4.4: the card notice beside a working server. Names are plain text, always beside their origin. */
+function renderCardNotice(n: Res<"status">["cardNotice"]): void {
+  const box = el("card-notice");
+  const text = el("card-notice-text");
+  const follow = el<HTMLButtonElement>("card-notice-follow");
+  const title = el("card-notice-title");
+  const later = el<HTMLButtonElement>("card-notice-later");
+  follow.hidden = true;
+  title.hidden = true;
+  later.hidden = true;
+  if (!n) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  delete follow.dataset["forget"];
+  if (n.kind === "fork") {
+    text.textContent = `${n.origin}: ${SERVER_FORK} ${FORGET_DELETES_COPY}`;
+    follow.hidden = false;
+    follow.textContent = T.FORGET_THIS_SERVER;
+    forgetArms.delete(follow); // a fresh render starts unarmed
+    follow.dataset["forget"] = "1";
+    delete follow.dataset["to"];
+    delete follow.dataset["hash"];
+    return;
+  }
+  if (n.kind === "withheld") text.textContent = CARD_WITHHELD;
+  else if (n.kind === "invalid") text.textContent = CARD_REFUSED_KEPT;
+  else if (n.kind === "changed") text.textContent = SERVER_CHANGED_UPDATE;
+  else if (n.kind === "move") {
+    text.textContent = fillApproved(T.SERVER_MOVED_NOTICE, n.name, n.from, n.to);
+    follow.hidden = false;
+    follow.textContent = fillApproved(T.MOVE_TO, n.to);
+    follow.dataset["to"] = n.to;
+    follow.dataset["hash"] = n.hash;
+  } else {
+    // The kind change gate (§12.3; approved wording, entry 10): the title, §12.3's sentence, Continue and Not now.
+    title.hidden = false;
+    title.textContent = GATE_TITLE_KIND_CHANGE;
+    text.textContent = fillApproved(T.KIND_CHANGE_NOTICE, n.name, n.origin, n.to);
+    follow.hidden = false;
+    follow.textContent = T.CONTINUE;
+    delete follow.dataset["to"];
+    follow.dataset["hash"] = n.hash;
+    later.hidden = false;
+    later.textContent = T.NOT_NOW;
+    later.dataset["hash"] = n.hash;
+  }
+}
+
+// Entry 10: "Not now" closes the kind change notice until the next unlock; the old kind stays in force.
+el("card-notice-later").addEventListener("click", async () => {
+  const hash = el<HTMLButtonElement>("card-notice-later").dataset["hash"] ?? "";
+  await ask({ type: "deferServerChange", hash });
+  await refresh();
+});
+
+// §12.3 "Forget this server" on the popup's own stop card and fork notice, as on the options page (design §4.4, decided
+// on 2026-11-17): it deletes the logins and cards this browser captured on pages and has not saved, so with any waiting,
+// or when the worker does not answer the count, the first click says how many (or that andvari cannot tell) and the
+// second forgets; with none it forgets at once. Leaving the button cancels a half-armed Forget (the first click's own
+// move of the focus to its line excepted).
+// The second step has the guard of "Forget the earlier account" (FORGET_SECOND_STEP_AFTER_MS): it is taken only from a
+// press (or a click that came with no press, as assistive technology sends it) begun a moment after the first step's
+// line stood, and the first step moves the focus off the button, so two clicks in one turn, a double click or a held key
+// never pass both steps; a click not taken says to read the line first, which stays.
+/** Each armed button: the count its first click said, and when that line stood. */
+const forgetArms = new Map<HTMLButtonElement, { count: number; at: number }>();
+/** The press under way on each button (its start, or `repeat` for a held key's repeat); each click takes it. */
+const forgetServerPress = new Map<HTMLButtonElement, number | "repeat">();
+async function popupCapturesNow(): Promise<number> {
+  try {
+    const s = await ask({ type: "status" });
+    return typeof s?.unsavedCaptures === "number" ? s.unsavedCaptures : COUNT_UNKNOWN;
+  } catch {
+    return COUNT_UNKNOWN;
+  }
+}
+/** True when this click forgets; otherwise it armed [b] and said the count. */
+async function forgetSecondClick(b: HTMLButtonElement): Promise<boolean> {
+  // Read before anything is awaited: the click's own press, and its time.
+  const press = forgetServerPress.get(b) ?? null;
+  forgetServerPress.delete(b);
+  const began = press ?? performance.now();
+  const armed = forgetArms.get(b);
+  if (armed !== undefined && (began === "repeat" || began < armed.at + FORGET_SECOND_STEP_AFTER_MS)) {
+    showMsg("info", `${T.FORGET_SERVER_READ_FIRST}\n${forgetUnsavedLine(armed.count) ?? ""}`);
+    return false;
+  }
+  const now = await popupCapturesNow();
+  const step = unsavedArmStep(armed?.count ?? null, now, false);
+  if (step.act) {
+    forgetArms.delete(b);
+    return true;
+  }
+  forgetArms.set(b, { count: step.armed!, at: performance.now() });
+  b.textContent = T.FORGET_CONFIRM;
+  showMsg("info", forgetUnsavedLine(now) ?? "");
+  // The focus leaves the button for the line, so a key still held does not press it again.
+  const msg = el("msg");
+  msg.tabIndex = -1;
+  msg.focus();
+  return false;
+}
+function disarmForget(b: HTMLButtonElement): void {
+  if (!forgetArms.has(b)) return;
+  forgetArms.delete(b);
+  b.textContent = T.FORGET_THIS_SERVER;
+  clearMsg();
+}
+for (const id of ["card-notice-follow", "confirm-server-not-mine"]) {
+  const b = el<HTMLButtonElement>(id);
+  b.addEventListener("pointerdown", () => void forgetServerPress.set(b, performance.now()));
+  b.addEventListener("keydown", (e: KeyboardEvent) => void forgetServerPress.set(b, e.repeat ? "repeat" : performance.now()));
+  // Leaving the button cancels a half-armed Forget, except for the first click's own move to its line.
+  b.addEventListener("blur", (e: FocusEvent) => {
+    if (e.relatedTarget !== el("msg")) disarmForget(b);
+  });
+}
+
+// §4.4: one tap follows a move (the browser's access to the new address is asked first, in this gesture) or a kind change.
+el("card-notice-follow").addEventListener("click", async () => {
+  const b = el<HTMLButtonElement>("card-notice-follow");
+  if (b.dataset["forget"] === "1") {
+    if (!(await forgetSecondClick(b))) return;
+    const r = await ask({ type: "forgetServer" });
+    if (!r?.ok) showMsg("err", T.FORGET_FAILED);
+    await renderServerOrigin();
+    await refresh();
+    return;
+  }
+  const to = b.dataset["to"];
+  const hash = b.dataset["hash"] ?? "";
+  if (to) {
+    const pattern = originMatchPattern(to);
+    let granted = false;
+    try {
+      granted = pattern !== null && (await chrome.permissions.request({ origins: [pattern] }));
+    } catch {
+      granted = false;
+    }
+    if (!granted) {
+      showMsg("err", chooseServerCopy("no_permission"));
+      return;
+    }
+  }
+  const r = await ask({ type: "followServerChange", hash });
+  // A move this browser can't follow because it already knows the new address says so in the approved words, naming it.
+  if (!r?.ok) {
+    if (r?.code === "pin_conflict" && to) showMsg("err", moveNotFollowedCopy(to), CARD_MOVE_NOT_FOLLOWED_TITLE);
+    else showMsg("err", chooseServerCopy(r?.code));
+  }
+  await renderServerOrigin();
+  await refresh();
+});
+
+// §12.2: "andvari" — the public instance, pinned from its baked card. The browser's access is asked in this gesture.
+el("confirm-server-public").addEventListener("click", async () => {
+  let granted = false;
+  try {
+    granted = await chrome.permissions.request({ origins: [`${PUBLIC_INSTANCE.origin}/*`] });
+  } catch {
+    granted = false;
+  }
+  if (!granted) {
+    showMsg("err", chooseServerCopy("no_permission"));
+    return;
+  }
+  showMsg("info", T.CHECKING_CARD);
+  const r = await ask({ type: "chooseServer", choice: "public" });
+  if (!r?.ok) showTitled("err", chooseServerMessage(r, PUBLIC_INSTANCE.origin));
+  else clearMsg();
+  await renderServerOrigin();
+  await refresh();
+});
 
 function relocked(): void {
   pinFallback = false; // a fresh relock re-offers the quick-unlock PIN if the SW armed one
@@ -386,26 +632,25 @@ function relocked(): void {
   // the reason is announced. (Safari has no email field: its one button takes the focus.)
   if (BUILD_TARGET === "safari") renderAppLocked(false);
   el(BUILD_TARGET === "safari" ? "app-unlock" : "email").focus();
-  showMsg("info", "Session locked — unlock to continue.");
+  showMsg("info", T.SESSION_LOCKED);
   // Re-query status so an armed quick-unlock (an idle autolock ARMS it — spec 01 §8.4) shows its PIN
   // field; refresh() refines the focus + lock-notice (an idle notice supersedes the message above).
   void refresh();
 }
 
 async function loadUnlocked(): Promise<void> {
-  const page = await activeTabPage();
-  const host = page === null ? null : new URL(page).hostname;
-  tabHost = host;
-  tabPage = page;
+  const tab = await activeTabPage();
+  tabPage = tab?.page ?? null;
   const siteLabel = el("site-label");
   const siteList = el("site-list");
-  if (host) {
+  if (tab) {
+    const host = tab.host;
     siteLabel.hidden = false;
     siteList.hidden = false;
-    siteLabel.textContent = `This site — ${host}`;
-    const r = await ask({ type: "matches", host });
+    siteLabel.textContent = fillApproved(T.THIS_SITE_FOR, host);
+    const r = await ask({ type: "matches", host: tab.page });
     if (!r || r.locked) return relocked();
-    renderList(siteList, r.matches, `No login saved for ${host}.`, true);
+    renderList(siteList, r.matches, fillApproved(T.NO_LOGIN_FOR, host), true);
   } else {
     // No usable page URL (chrome://, new tab, detached popup) — nothing to match against.
     siteLabel.hidden = true;
@@ -414,8 +659,8 @@ async function loadUnlocked(): Promise<void> {
   const all = await ask({ type: "allItems" });
   if (!all || all.locked) return relocked();
   const n = all.items.length;
-  el("count").textContent = `${n} login${n === 1 ? "" : "s"} in the hoard`;
-  renderList(el("all-list"), all.items, "The hoard is empty.");
+  el("count").textContent = fillApproved(n === 1 ? T.LOGINS_IN_HOARD_ONE : T.LOGINS_IN_HOARD, String(n));
+  renderList(el("all-list"), all.items, T.HOARD_EMPTY);
   const cards = await ask({ type: "cardItems" });
   if (!cards || cards.locked) return relocked();
   // S3: may we offer in-page card fill for this tab? (popup-only query; the SW derives the
@@ -458,7 +703,7 @@ function cardFillOf(offer: Res<"cardFillOffers"> | undefined | null): typeof car
     ? offer.frames
         .filter((f) => typeof f?.frameId === "number" && typeof f?.origin === "string" && Array.isArray(f?.kinds))
         .map((f) => ({
-          frameId: f.frameId, origin: f.origin, kinds: f.kinds.filter((k): k is CardFieldKind => typeof k === "string" && k in CARD_DETAIL_NAME),
+          frameId: f.frameId, origin: f.origin, kinds: f.kinds.filter((k): k is CardFieldKind => typeof k === "string" && k in CARD_DETAIL_WORDS),
           ancestors: Array.isArray(f.ancestors) && f.ancestors.every((a) => typeof a === "string") ? f.ancestors : null,
         }))
     : [];
@@ -476,26 +721,26 @@ function cardFillOf(offer: Res<"cardFillOffers"> | undefined | null): typeof car
   };
 }
 
-/** activeTab (granted by opening the popup) exposes the page URL on http/https only. The page's origin (its host is
- *  what the list matches on). */
-async function activeTabPage(): Promise<string | null> {
+/** activeTab (granted by opening the popup) exposes the page URL on http/https only. The worker is told the page's
+ *  ORIGIN (`page`), scheme included, because a plain-http page matches only an address saved as http (spec 05
+ *  autofill (e)); `host` is what the popup shows. */
+async function activeTabPage(): Promise<{ host: string; page: string } | null> {
   try {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    const u = new URL(tabs[0]?.url ?? "");
-    return (u.protocol === "https:" || u.protocol === "http:") && u.hostname ? u.origin : null;
+    return tabPageOf(tabs[0]?.url);
   } catch {
     return null;
   }
 }
 
-/** F80 port (web Sigil.tsx, geometry verbatim): the ᛅ/ᛝ marks as inline SVG — the runic
- *  codepoints render as tofu wherever no installed font covers the Runic block, and the CSP
- *  posture (self-contained, nothing loads over the network) bars shipping one. Strokes inherit
- *  currentColor, so the existing .sigil/.glyph color tokens keep working in both themes.
- *  Duplicated from web because no build path from extension/ to web/src exists (the errors.ts
- *  UNREACHABLE idiom); popup.html carries the same geometry statically. */
+/** F80 port (web Sigil.tsx): the ᛅ/ᛝ marks as inline SVG — the runic codepoints render as tofu
+ *  wherever no installed font covers the Runic block, and the CSP posture (self-contained, nothing
+ *  loads over the network) bars shipping one. Both draw in currentColor, so the existing
+ *  .sigil/.glyph color tokens keep working in both themes. The rune is the brand's (brand.ts,
+ *  assets/brand/andvari-rune.svg); the empty-hoard diamond is drawn here, as web's EmptySigil. */
 const SVG_NS = "http://www.w3.org/2000/svg";
 function sigilSvg(mark: "brand" | "empty", size: number): SVGSVGElement {
+  if (mark === "brand") return runeSvg(size);
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("width", String(size));
   svg.setAttribute("height", String(size));
@@ -504,14 +749,12 @@ function sigilSvg(mark: "brand" | "empty", size: number): SVGSVGElement {
   svg.setAttribute("stroke", "currentColor");
   svg.setAttribute("stroke-width", "1.8");
   svg.setAttribute("stroke-linecap", "round");
-  if (mark === "empty") svg.setAttribute("stroke-linejoin", "round");
+  svg.setAttribute("stroke-linejoin", "round");
   svg.setAttribute("aria-hidden", "true");
-  // ᛅ (long-branch ár) = a stave crossed by one falling stroke; ᛝ (Ingwaz) = its enclosing diamond.
-  for (const d of mark === "brand" ? ["M12 3v18", "M5.5 8.5l13 6"] : ["M12 4.5 19 12l-7 7.5L5 12Z"]) {
-    const p = document.createElementNS(SVG_NS, "path");
-    p.setAttribute("d", d);
-    svg.append(p);
-  }
+  // ᛝ (Ingwaz), reduced to its enclosing diamond.
+  const p = document.createElementNS(SVG_NS, "path");
+  p.setAttribute("d", "M12 4.5 19 12l-7 7.5L5 12Z");
+  svg.append(p);
   return svg;
 }
 
@@ -559,13 +802,13 @@ function row(it: MatchItem): HTMLElement {
   body.className = "body";
   body.setAttribute("role", "button"); // the row's ONE named control — nothing interactive inside it
   body.tabIndex = 0;
-  body.title = "View details";
+  body.title = T.VIEW_DETAILS;
   const name = document.createElement("div");
   name.className = "name";
   name.textContent = it.name;
   const sub = document.createElement("div");
   sub.className = "sub";
-  sub.textContent = it.username ?? "no username";
+  sub.textContent = it.username ?? T.NO_USERNAME;
   body.append(name, sub);
 
   r.append(glyph, body);
@@ -573,8 +816,8 @@ function row(it: MatchItem): HTMLElement {
 
   const acts = document.createElement("span");
   acts.className = "acts";
-  if (it.username) acts.append(actBtn("user", "Copy username", (btn) => void copyUsername(it, btn)));
-  if (copiesLongLivedSecrets()) acts.append(actBtn("pass", "Copy password", (btn) => void copyPassword(it, btn)));
+  if (it.username) acts.append(actBtn(T.BTN_USER, T.COPY_USERNAME, (btn) => void copyUsername(it, btn)));
+  if (copiesLongLivedSecrets()) acts.append(actBtn(T.BTN_PASS, T.COPY_PASSWORD, (btn) => void copyPassword(it, btn)));
   r.append(acts);
 
   const open = () => openDetail(it);
@@ -631,38 +874,38 @@ async function toggleReveal(it: MatchItem, value: HTMLElement, btn: HTMLButtonEl
   if (value.dataset["shown"] === "1") {
     value.textContent = "••••••••••";
     delete value.dataset["shown"];
-    btn.textContent = "show";
+    btn.textContent = T.BTN_SHOW;
     return;
   }
-  const r = await ask({ type: "reveal", itemId: it.itemId, host: tabHost ?? "", explicit: true });
+  const r = await ask({ type: "reveal", itemId: it.itemId, host: tabPage ?? "", explicit: true });
   if (!r?.ok || r.secret?.password == null) {
     // #23: canon copy, never the SW's raw `error` debug detail (the messages.ts contract).
-    showMsg("err", r?.ok ? "No password on this item." : revealErrorCopy(r?.code));
+    showMsg("err", r?.ok ? T.NO_PASSWORD_ON_ITEM : revealErrorCopy(r?.code));
     return;
   }
   value.textContent = r.secret.password;
   value.dataset["shown"] = "1";
-  btn.textContent = "hide";
+  btn.textContent = T.BTN_HIDE;
 }
 
 function renderDetail(it: MatchItem): void {
-  el("detail-name").textContent = it.name || "Login";
+  el("detail-name").textContent = it.name || T.LOGIN_UNNAMED;
   const body = el("detail-body");
   body.replaceChildren();
 
   if (it.username) {
-    const { field, value, acts } = detailField("Username");
+    const { field, value, acts } = detailField(T.USERNAME_LABEL);
     value.textContent = it.username;
-    acts.append(actBtn("copy", "Copy username", (btn) => void copyUsername(it, btn)));
+    acts.append(actBtn(T.BTN_COPY, T.COPY_USERNAME, (btn) => void copyUsername(it, btn)));
     body.append(field);
   }
 
   {
-    const { field, value, acts } = detailField("Password");
+    const { field, value, acts } = detailField(T.PASSWORD_LABEL);
     value.classList.add("secret");
     value.textContent = "••••••••••";
-    acts.append(actBtn("show", "Reveal password", (btn) => void toggleReveal(it, value, btn)));
-    if (copiesLongLivedSecrets()) acts.append(actBtn("copy", "Copy password", (btn) => void copyPassword(it, btn)));
+    acts.append(actBtn(T.BTN_SHOW, T.REVEAL_PASSWORD, (btn) => void toggleReveal(it, value, btn)));
+    if (copiesLongLivedSecrets()) acts.append(actBtn(T.BTN_COPY, T.COPY_PASSWORD, (btn) => void copyPassword(it, btn)));
     body.append(field);
   }
 
@@ -671,7 +914,7 @@ function renderDetail(it: MatchItem): void {
     field.className = "detail-field";
     const lab = document.createElement("div");
     lab.className = "detail-label";
-    lab.textContent = "One-time code";
+    lab.textContent = T.ONE_TIME_CODE_LABEL;
     field.append(lab, totpChip(it.itemId)); // joins the list's 1 s ticker (queried by class)
     body.append(field);
   } else if (!it.readOnly) {
@@ -689,12 +932,12 @@ function renderDetail(it: MatchItem): void {
   sites.className = "detail-field";
   const sitesLabel = document.createElement("div");
   sitesLabel.className = "detail-label";
-  sitesLabel.textContent = it.uris.length > 1 ? "Sites" : "Site";
+  sitesLabel.textContent = it.uris.length > 1 ? T.SITES_LABEL : T.SITE_LABEL;
   sites.append(sitesLabel);
   if (it.uris.length === 0) {
     const none = document.createElement("div");
     none.className = "detail-value muted";
-    none.textContent = "no site saved";
+    none.textContent = T.NO_SITE_SAVED;
     sites.append(none);
   } else {
     for (const raw of it.uris) {
@@ -722,11 +965,14 @@ function renderDetail(it: MatchItem): void {
   const fill = document.createElement("button");
   fill.type = "button";
   fill.className = "primary detail-fill";
-  fill.textContent = "Fill this page";
-  fill.title = "Type this login into the current tab";
+  fill.textContent = T.FILL_THIS_PAGE;
+  fill.title = T.FILL_THIS_PAGE_TITLE;
   fill.addEventListener("click", () => void fillItem(it.itemId));
   body.append(fill);
 }
+
+/** The login detail's button that adds a one-time code, in the design's term (it said "(2FA)" before 2026-11-17). */
+const ADD_TOTP_LABEL = T.ADD_TOTP_LABEL;
 
 /** TOTP-add paste row (design 2026-08-12). The input accepts whatever the enrollment page
  *  offers — the full otpauth:// link or the bare "can't scan?" setup key — and the SW runs the
@@ -735,10 +981,10 @@ function renderDetail(it: MatchItem): void {
  *  updated (putExisting mutates in place), so re-rendering the detail immediately shows the
  *  live code chip. */
 function totpAddField(it: MatchItem): HTMLElement {
-  const { field, value, acts } = detailField("One-time code");
+  const { field, value, acts } = detailField(T.ONE_TIME_CODE_LABEL);
   value.classList.add("muted");
-  value.textContent = "none";
-  const add = actBtn("add", "Add a one-time code (2FA) to this login", () => {
+  value.textContent = T.TOTP_NONE;
+  const add = actBtn(T.BTN_ADD, ADD_TOTP_LABEL, () => {
     const row = value.parentElement;
     if (!row) return;
     const form = document.createElement("div");
@@ -746,13 +992,13 @@ function totpAddField(it: MatchItem): HTMLElement {
     const input = document.createElement("input");
     input.type = "text";
     input.className = "mono";
-    input.placeholder = "otpauth:// link or setup key";
-    input.setAttribute("aria-label", "One-time code secret — paste the otpauth:// link or the setup key");
+    input.placeholder = T.TOTP_SECRET_HINT;
+    input.setAttribute("aria-label", T.TOTP_SECRET_LABEL);
     const save = document.createElement("button");
     save.type = "button";
     save.className = "fill-btn";
-    save.textContent = "save";
-    save.title = "Add this one-time code";
+    save.textContent = T.TOTP_SAVE_BUTTON;
+    save.title = T.TOTP_ADD_TITLE;
     save.setAttribute("aria-label", save.title);
     const submit = async (): Promise<void> => {
       const raw = input.value.trim();
@@ -803,7 +1049,7 @@ function actBtn(label: string, title: string, onClick: (btn: HTMLButtonElement) 
 }
 
 function flash(btn: HTMLElement): void {
-  announce("Copied — it clears from your clipboard soon"); // a11y 2d + Cut J (v2 #10): disclose the auto-wipe
+  announce(T.COPIED_CLEARS_SOON); // a11y 2d + Cut J (v2 #10): disclose the auto-wipe
   btn.textContent = "✓";
   btn.classList.add("did");
   window.setTimeout(() => {
@@ -853,7 +1099,7 @@ async function fillItem(itemId: string, confirmedOtherSite?: string): Promise<vo
   const page = tabPage ?? undefined;
   const r = await ask(confirmedOtherSite === undefined ? { type: "fillFromPopup", itemId, page } : { type: "fillFromPopup", itemId, confirmedOtherSite, page });
   if (r?.needsConfirm) {
-    confirmOtherSite(itemId, r.needsConfirm.savedFor, r.needsConfirm.page);
+    confirmOtherSite(itemId, r.needsConfirm);
     return;
   }
   // Cut M (v2 #14): ok is now the FILL outcome (the content script's ground truth), not message
@@ -867,10 +1113,12 @@ async function fillItem(itemId: string, confirmedOtherSite?: string): Promise<vo
 }
 
 /**
- * Safari: a login saved for one site is about to be filled on another. Nothing has been filled yet; this names both
- * hosts and fills only on a second, explicit tap. Every string is textContent.
+ * Every build: a login saved for one site is about to be filled on another. Nothing has been filled yet; this names both
+ * sites as the worker named them (the schemes where the hosts are the same, a plain-http page as not secure) and, under a
+ * long host, the site the page belongs to, and fills only on a second, explicit tap. Every string is textContent; the
+ * box lets a host with no break point wrap (popup.css).
  */
-function confirmOtherSite(itemId: string, savedFor: string, page: string): void {
+function confirmOtherSite(itemId: string, q: OtherSiteQuestion): void {
   document.getElementById("other-site-confirm")?.remove();
   const box = document.createElement("div");
   box.id = "other-site-confirm";
@@ -878,21 +1126,28 @@ function confirmOtherSite(itemId: string, savedFor: string, page: string): void 
   box.style.cssText = "margin:8px 0;padding:10px;border:1px solid currentColor;border-radius:8px";
   const text = document.createElement("p");
   text.style.margin = "0 0 8px";
-  text.textContent = `This login is saved for ${savedFor}. You are on ${page}. Fill it here only if you trust this page.`;
+  text.textContent = fillApproved(T.FILL_OTHER_SITE, q.savedFor, q.page);
+  const lines: HTMLElement[] = [text];
+  if (q.domain !== null) {
+    const site = document.createElement("p");
+    site.style.margin = "0 0 8px";
+    site.textContent = fillApproved(T.FILL_OTHER_SITE_DOMAIN, q.domain);
+    lines.push(site);
+  }
   const fill = document.createElement("button");
   fill.type = "button";
   fill.className = "primary";
-  fill.textContent = `Fill on ${page}`;
+  fill.textContent = fillApproved(T.FILL_ON, q.page);
   const cancel = document.createElement("button");
   cancel.type = "button";
   cancel.className = "link dim";
-  cancel.textContent = "Cancel";
+  cancel.textContent = T.CANCEL;
   cancel.addEventListener("click", () => box.remove());
   fill.addEventListener("click", () => {
     box.remove();
-    void fillItem(itemId, page); // the confirmation is for this page, and the worker holds it to that
+    void fillItem(itemId, q.confirm); // the yes is for this login on this page, and the worker holds it to both
   });
-  box.append(text, fill, cancel);
+  box.append(...lines, fill, cancel);
   el("msg").insertAdjacentElement("afterend", box);
   cancel.focus();
 }
@@ -903,10 +1158,10 @@ async function copyUsername(it: MatchItem, btn: HTMLElement): Promise<void> {
 }
 
 async function copyPassword(it: MatchItem, btn: HTMLElement): Promise<void> {
-  const r = await ask({ type: "reveal", itemId: it.itemId, host: tabHost ?? "", explicit: true });
+  const r = await ask({ type: "reveal", itemId: it.itemId, host: tabPage ?? "", explicit: true });
   if (!r?.ok || r.secret?.password == null) {
     // #23: canon copy, never the SW's raw `error` debug detail (the messages.ts contract).
-    showMsg("err", r?.ok ? "No password on this item." : revealErrorCopy(r?.code));
+    showMsg("err", r?.ok ? T.NO_PASSWORD_ON_ITEM : revealErrorCopy(r?.code));
     return;
   }
   if (await toClipboard(r.secret.password)) flash(btn); // just the one field, straight to clipboard
@@ -919,16 +1174,16 @@ function totpChip(itemId: string): HTMLElement {
   chip.type = "button";
   chip.className = "totp-chip";
   chip.dataset["item"] = itemId;
-  chip.title = "Copy one-time code";
+  chip.title = T.COPY_TOTP;
   // a11y 3b: a STABLE name (the live 6-digit code as the name would re-announce every second).
-  chip.setAttribute("aria-label", "Copy one-time code");
+  chip.setAttribute("aria-label", T.COPY_TOTP);
   const ring = document.createElement("span");
   ring.className = "ring";
   ring.setAttribute("aria-hidden", "true"); // decorative countdown visual (5b conveys it as text)
   const code = document.createElement("span");
   code.className = "code";
   // Safari: no live code is shown (it is released only on a copy), so the chip says what a tap does.
-  code.textContent = BUILD_TARGET === "safari" ? "copy code" : "······";
+  code.textContent = BUILD_TARGET === "safari" ? T.COPY_CODE_CHIP : "······";
   code.setAttribute("aria-hidden", "true"); // a11y 3b: digits out of the accessible name
   // a11y 5b: seconds-left as a described-by description (read on focus, not per-tick) so the
   // countdown is available to AT without re-announcing and without polluting the button name.
@@ -951,8 +1206,8 @@ async function copyTotp(itemId: string, codeEl: HTMLElement): Promise<void> {
   const r = await ask({ type: "totp", itemId, forCopy: true });
   if (!r?.ok || !r.code) return;
   if (await toClipboard(r.code)) {
-    announce("One-time code copied"); // a11y 2d (the chip's "copied" text is aria-hidden)
-    codeEl.textContent = "copied";
+    announce(T.TOTP_COPIED); // a11y 2d (the chip's "copied" text is aria-hidden)
+    codeEl.textContent = T.COPIED_FLASH;
     codeEl.dataset["hold"] = String(Date.now() + FLASH_MS); // ticker restores the live code after
   }
 }
@@ -1007,7 +1262,7 @@ async function tickTotp(): Promise<void> {
       ring.style.setProperty("--p", String(((r.secondsLeft ?? 0) / TOTP_PERIOD_S) * 100));
       const secsId = chip.getAttribute("aria-describedby"); // a11y 5b: refresh seconds-left desc
       const secs = secsId ? document.getElementById(secsId) : null;
-      if (secs) secs.textContent = `${r.secondsLeft ?? 0} seconds left`;
+      if (secs) secs.textContent = fillApproved(T.SECONDS_LEFT, String(r.secondsLeft ?? 0));
     } else {
       chip.hidden = true; // locked mid-poll / item no longer carries a code
     }
@@ -1023,7 +1278,7 @@ async function tickTotp(): Promise<void> {
 
 const cardsLabel = document.createElement("div");
 cardsLabel.className = "section-label";
-cardsLabel.textContent = "Cards";
+cardsLabel.textContent = T.CARDS_LABEL;
 cardsLabel.hidden = true;
 const cardsList = document.createElement("div");
 cardsList.className = "list";
@@ -1040,7 +1295,7 @@ cardsPspNote.hidden = true;
 const cardsStartOver = document.createElement("button");
 cardsStartOver.type = "button";
 cardsStartOver.className = "link";
-cardsStartOver.textContent = "Start over";
+cardsStartOver.textContent = T.START_OVER;
 cardsStartOver.hidden = true;
 cardsStartOver.addEventListener("click", () => {
   void (async () => {
@@ -1056,7 +1311,7 @@ el("all-list").after(cardsLabel, cardsPspNote, cardsStartOver, cardsList);
 
 /** What to do instead of a fill: the copy buttons, or in the Safari build (which copies no card number or code) the app. */
 function cardCopyRemedy(): string {
-  return copiesLongLivedSecrets() ? "Use the copy buttons instead." : "Copy what you need from the andvari app.";
+  return copiesLongLivedSecrets() ? T.CARD_USE_COPY_BUTTONS : T.CARD_COPY_IN_APP;
 }
 
 /** The one line that says why the rows copy instead of filling; null while they fill. */
@@ -1091,7 +1346,7 @@ function renderCards(items: CardItem[]): void {
 function cardRow(it: CardItem): HTMLElement {
   const r = document.createElement("div");
   r.className = "item";
-  r.title = "Copy card details";
+  r.title = T.COPY_CARD_DETAILS;
 
   const glyph = document.createElement("span");
   glyph.className = "glyph";
@@ -1116,7 +1371,10 @@ function cardRow(it: CardItem): HTMLElement {
     const dest = document.createElement("div");
     dest.className = "card-fill-dest";
     // Round-13 review: and the documents a frame sits in below the top one ("js.stripe.com inside rewards.example").
-    dest.textContent = cardFill.frames.length > 0 ? `Fill → ${fillDestination(cardFill.frames)}: ${cardDetailNames(cardFill.frames.flatMap((f) => f.kinds))}` : `Fill → ${cardFill.origin}`;
+    dest.textContent =
+      cardFill.frames.length > 0
+        ? fillApproved(T.FILL_DESTINATION_DETAILS, fillDestination(cardFill.frames), cardDetailNames(cardFill.frames.flatMap((f) => f.kinds)))
+        : fillApproved(T.FILL_DESTINATION, String(cardFill.origin));
     body.append(dest);
   }
 
@@ -1125,52 +1383,54 @@ function cardRow(it: CardItem): HTMLElement {
   if (cardFill.fillable) {
     acts.append(
       actBtn(
-        "fill",
-        cardFill.frames.length > 0 ? `Fill this card's ${cardDetailNames(cardFill.frames.flatMap((f) => f.kinds))} into ${cardFill.origin ?? "the page"}` : `Fill this card into ${cardFill.origin ?? "the page"}`,
+        T.BTN_FILL,
+        cardFill.frames.length > 0
+          ? fillApproved(T.FILL_CARD_DETAILS_INTO, cardDetailNames(cardFill.frames.flatMap((f) => f.kinds)), cardFill.origin ?? T.THE_PAGE)
+          : fillApproved(T.FILL_CARD_INTO, cardFill.origin ?? T.THE_PAGE),
         (btn) => void fillCardRow(it.itemId, btn),
       ),
     );
   }
-  if (it.hasNumber && copiesLongLivedSecrets()) acts.append(actBtn("num", "Copy card number", (btn) => void copyCardField(it.itemId, "number", btn)));
-  if (it.hasExpiry) acts.append(actBtn("exp", "Copy expiry (MM/YY)", (btn) => void copyCardField(it.itemId, "expiry", btn)));
+  if (it.hasNumber && copiesLongLivedSecrets()) acts.append(actBtn(T.BTN_NUM, T.COPY_CARD_NUMBER, (btn) => void copyCardField(it.itemId, "number", btn)));
+  if (it.hasExpiry) acts.append(actBtn(T.BTN_EXP, T.COPY_CARD_EXPIRY, (btn) => void copyCardField(it.itemId, "expiry", btn)));
   // Tier 2 §6 copy parity: every surface copies number/expiry/name/CVV.
-  if (it.hasName) acts.append(actBtn("name", "Copy name on card", (btn) => void copyCardField(it.itemId, "name", btn)));
-  if (it.hasCvv && copiesLongLivedSecrets()) acts.append(actBtn("cvv", "Copy security code", (btn) => void copyCardField(it.itemId, "cvv", btn)));
+  if (it.hasName) acts.append(actBtn(T.BTN_NAME, T.COPY_CARD_NAME, (btn) => void copyCardField(it.itemId, "name", btn)));
+  if (it.hasCvv && copiesLongLivedSecrets()) acts.append(actBtn(T.BTN_CVV, T.COPY_CARD_CVV, (btn) => void copyCardField(it.itemId, "cvv", btn)));
 
   r.append(glyph, body, acts);
   return r;
 }
 
 /** The card details a fill writes, by name, for the line that says where a Fill goes (round-12 review). */
-const CARD_DETAIL_NAME: Record<CardFieldKind, string> = {
-  cardnumber: "card number",
-  cardexpiry: "expiry date",
-  cardexpmonth: "expiry date",
-  cardexpyear: "expiry date",
-  cardcvv: "security code",
-  cardname: "name on card",
-  cardtype: "card type",
-  cardpostal: "postal code",
+const CARD_DETAIL_WORDS: Record<CardFieldKind, string> = {
+  cardnumber: T.CARD_DETAIL_NUMBER,
+  cardexpiry: T.CARD_DETAIL_EXPIRY,
+  cardexpmonth: T.CARD_DETAIL_EXPIRY,
+  cardexpyear: T.CARD_DETAIL_EXPIRY,
+  cardcvv: T.CARD_DETAIL_CVV,
+  cardname: T.CARD_DETAIL_NAME,
+  cardtype: T.CARD_DETAIL_TYPE,
+  cardpostal: T.CARD_DETAIL_POSTAL,
 };
 
 /** "card number, expiry date, security code": each detail once, in that order. */
 function cardDetailNames(kinds: readonly CardFieldKind[]): string {
   const order: CardFieldKind[] = ["cardnumber", "cardexpiry", "cardexpmonth", "cardexpyear", "cardcvv", "cardname", "cardpostal", "cardtype"];
-  return [...new Set(order.filter((k) => kinds.includes(k)).map((k) => CARD_DETAIL_NAME[k]))].join(", ");
+  return [...new Set(order.filter((k) => kinds.includes(k)).map((k) => CARD_DETAIL_WORDS[k]))].join(", ");
 }
 
 /** §5 partial-outcome copy: human labels per detected kind. The three expiry kinds deliberately
  *  share ONE label — "couldn't fill expiry, expiry" would read as a stutter, and the user's
  *  remedy (the expiry copy button) is the same for all three. */
 const CARD_KIND_LABEL: Record<CardFieldKind, string> = {
-  cardnumber: "number",
-  cardexpiry: "expiry",
-  cardexpmonth: "expiry",
-  cardexpyear: "expiry",
-  cardname: "name on card",
-  cardcvv: "security code",
-  cardtype: "card type",
-  cardpostal: "postal code", // G3: a missed billing postal (no copy button — postal isn't a stored copy field)
+  cardnumber: T.CARD_KIND_NUMBER,
+  cardexpiry: T.CARD_KIND_EXPIRY,
+  cardexpmonth: T.CARD_KIND_EXPIRY,
+  cardexpyear: T.CARD_KIND_EXPIRY,
+  cardname: T.CARD_DETAIL_NAME,
+  cardcvv: T.CARD_DETAIL_CVV,
+  cardtype: T.CARD_DETAIL_TYPE,
+  cardpostal: T.CARD_DETAIL_POSTAL, // G3: a missed billing postal (no copy button — postal isn't a stored copy field)
 };
 
 function cardLabels(kinds: CardFieldKind[]): string[] {
@@ -1199,17 +1459,13 @@ async function fillCardRow(itemId: string, btn: HTMLButtonElement): Promise<void
     // "Filled expiry — couldn't fill expiry" is nonsense, so the missed side owns shared labels.
     const missed = cardLabels(r.outcome.missedKinds);
     const landed = cardLabels(r.outcome.filledKinds).filter((l) => !missed.includes(l));
-    const remedy = copiesLongLivedSecrets() ? "Copy instead:" : "Copy what's missing from the andvari app.";
+    const remedy = copiesLongLivedSecrets() ? T.CARD_COPY_INSTEAD : T.CARD_COPY_MISSING_IN_APP;
     // Round-6 review H1: a field that can't be seen is left empty, never filled; scrolling it into view and filling
     // again is the first remedy.
     const unseen = cardLabels(r.outcome.unseenKinds ?? []);
-    const why = unseen.length > 0 ? ` The ${unseen.join(", ")} field can't be seen on the page: scroll so it shows and fill again, or` : "";
-    showMsg(
-      "info",
-      landed.length > 0
-        ? `Filled ${landed.join(", ")} — couldn't fill ${missed.join(", ")}.${why} ${why ? remedy.charAt(0).toLowerCase() + remedy.slice(1) : remedy}`
-        : `Couldn't fill ${missed.join(", ")}.${why} ${why ? remedy.charAt(0).toLowerCase() + remedy.slice(1) : remedy}`,
-    );
+    const why = unseen.length > 0 ? ` ${fillApproved(T.CARD_FIELDS_UNSEEN, unseen.join(", "))}` : "";
+    const head = landed.length > 0 ? fillApproved(T.CARD_FILLED_SOME, landed.join(", "), missed.join(", ")) : fillApproved(T.CARD_FILLED_NONE, missed.join(", "));
+    showMsg("info", `${head}${why} ${why ? remedy.charAt(0).toLowerCase() + remedy.slice(1) : remedy}`);
   } else {
     const code = r?.outcome?.code ?? r?.code;
     const remedy = code === "page_form" || code === "provider_not_allowed" || code === "duplicate_fields" || code === "no_frame_origin" ? ` ${cardCopyRemedy()}` : "";
@@ -1238,7 +1494,7 @@ async function runSearch(): Promise<void> {
   const [r, c] = await Promise.all([ask({ type: "allItems", query }), ask({ type: "cardItems", query })]);
   if (seq !== searchSeq) return; // a newer query superseded this response
   if (!r || r.locked) return relocked();
-  renderList(el("all-list"), r.items, q ? `Nothing in the hoard matches “${q}”.` : "The hoard is empty.");
+  renderList(el("all-list"), r.items, q ? fillApproved(T.NOTHING_MATCHES, q) : T.HOARD_EMPTY);
   renderCards(c && !c.locked ? c.items : []);
 }
 
@@ -1268,14 +1524,14 @@ function setGeneratedPassword(pw: string): void {
   if (pw === "") return;
   const prefix = document.createElement("span");
   prefix.className = "visually-hidden";
-  prefix.textContent = "Generated password: ";
+  prefix.textContent = T.GENERATED_PASSWORD;
   btn.append(prefix, document.createTextNode(pw));
 }
 
 async function regenerate(): Promise<void> {
   const r = await ask({ type: "generate" });
   setGeneratedPassword(r?.password ?? "");
-  if (generatedPw) announce("New password generated"); // a11y 2d: Regenerate is otherwise silent
+  if (generatedPw) announce(T.NEW_PASSWORD_GENERATED); // a11y 2d: Regenerate is otherwise silent
 }
 
 el("gen-toggle").addEventListener("click", () => {
@@ -1291,7 +1547,7 @@ el("gen-again").addEventListener("click", () => void regenerate());
 el("gen-pass").addEventListener("click", async () => {
   const pw = generatedPw; // NOT textContent — that now carries the visually-hidden name prefix
   if (pw && (await toClipboard(pw))) {
-    announce("Password copied"); // a11y 2d
+    announce(T.PASSWORD_COPIED); // a11y 2d
     const f = el("gen-flash");
     f.hidden = false;
     window.setTimeout(() => {
@@ -1305,7 +1561,7 @@ el("gen-pass").addEventListener("click", async () => {
 function setUnsealing(busy: boolean): void {
   const btn = el<HTMLButtonElement>("unlock");
   btn.disabled = busy;
-  btn.textContent = busy ? "Unsealing…" : "Unlock";
+  btn.textContent = busy ? T.UNSEALING : T.UNLOCK;
   el("kdf").hidden = !busy;
 }
 
@@ -1315,12 +1571,14 @@ async function unlock(): Promise<void> {
   const pw = el<HTMLInputElement>("password");
   if (!email || !pw.value) return;
   clearMsg();
+  hideForgetEarlier();
   setUnsealing(true);
   try {
     const r = await ask({ type: "unlock", email, password: pw.value });
     if (r?.ok) {
       pw.value = ""; // (A15: the worker remembers the email itself — the popup writes no storage)
       await refresh();
+      showSignInNotice(r.notice);
     } else if (r?.code === "totp_required") {
       // 0.16.3: password verified server-side + keys derived (SW memory) — collect the code, no
       // second KDF. Clear the password field (a "start over" is a fresh full sign-in).
@@ -1339,7 +1597,9 @@ async function unlock(): Promise<void> {
       showMsg("info", unlockErrorCopy(r.code));
     } else {
       // E1-3: render the coded ladder (errors.ts), never the SW's raw `error` debug detail.
-      showMsg("err", unlockErrorCopy(r?.code));
+      showTitled("err", unlockErrorMessage(r?.code, email));
+      // Another account under a known address, and only that refusal: the offer to forget the earlier account.
+      if (r?.code === "remade_account") offerForgetEarlier(email);
       // AM5: on a 426, the copy points at the update banner — but renderUpdate() ran at popup
       // open BEFORE the SW's 426-triggered checkForUpdate(true) could land its verdict. Re-render
       // now and once more after the SW round-trip (single retry, no loop) so the banner is present
@@ -1354,6 +1614,81 @@ async function unlock(): Promise<void> {
     setUnsealing(false);
   }
 }
+
+/** What a sign-in that opened the vault could not do, said after the vault is shown (the vault is open:
+ *  said, not an error). */
+function showSignInNotice(notice: UnlockNotice | undefined): void {
+  if (notice === "session_not_saved") showMsg("info", SESSION_NOT_SAVED);
+  else if (notice === "quick_unlock_not_updated") showMsg("info", QUICK_UNLOCK_NOT_UPDATED);
+  else if (notice === "account_remembered") showMsg("info", ACCOUNT_REMEMBERED);
+}
+
+/* ---- "Forget the earlier account on this device" (decided on 2026-11-17): at the refusal, two steps ---- */
+
+/**
+ * The second step is taken only from a press (or, where no press came with the click, a click) this long after the
+ * confirmation stood on the screen: a double click, two clicks in one turn or a held key never pass both steps before the
+ * confirmation could be read, and a click from assistive technology, which comes with no press, still can.
+ */
+const FORGET_SECOND_STEP_AFTER_MS = 1000;
+/** The worker is pinged this often while the confirmation stands, so the offer, kept in its memory, is not lost while the
+ *  person reads (an idle worker is stopped after about thirty seconds); the ping is the passive `status`. */
+const FORGET_KEEPALIVE_MS = 15_000;
+
+/** The address the offer stands for; when its first step (the confirmation's text) was shown, or null before it. */
+let forgetEarlier: { email: string; armedAt: number | null } | null = null;
+/** The press under way on the offer's button: when it began (a pointer down, or a key down), `repeat` for a held key's
+ *  repeat, null for none (the click then comes with no press). Each click takes it. */
+let forgetPress: number | "repeat" | null = null;
+let forgetKeepalive: ReturnType<typeof setInterval> | undefined;
+function setForgetKeepalive(on: boolean): void {
+  if (forgetKeepalive !== undefined) clearInterval(forgetKeepalive);
+  forgetKeepalive = on ? setInterval(() => void ask({ type: "status" }), FORGET_KEEPALIVE_MS) : undefined;
+}
+function hideForgetEarlier(): void {
+  forgetEarlier = null;
+  setForgetKeepalive(false);
+  el("forget-earlier").hidden = true;
+}
+function offerForgetEarlier(email: string): void {
+  forgetEarlier = { email, armedAt: null };
+  el("forget-earlier").textContent = FORGET_EARLIER_OFFER;
+  el("forget-earlier").hidden = false;
+}
+el("forget-earlier").addEventListener("pointerdown", () => void (forgetPress = performance.now()));
+el("forget-earlier").addEventListener("keydown", (e: KeyboardEvent) => {
+  forgetPress = e.repeat ? "repeat" : performance.now();
+});
+el("forget-earlier").addEventListener("click", async () => {
+  const f = forgetEarlier;
+  const press = forgetPress;
+  forgetPress = null;
+  if (f === null) return;
+  if (f.armedAt === null) {
+    // The second confirmation: what goes, that it cannot be undone, and what it means if the account was not remade.
+    f.armedAt = performance.now();
+    showMsg("info", fillApproved(FORGET_EARLIER_CONFIRM, f.email));
+    el("forget-earlier").textContent = FORGET_EARLIER_CONFIRM_BUTTON;
+    // The worker stays awake while it is read (until the step is taken, the offer goes, or the popup closes).
+    setForgetKeepalive(true);
+    // The focus leaves the button for the confirmation, so a key still held does not press it again.
+    const msg = el("msg");
+    msg.tabIndex = -1;
+    msg.focus();
+    return;
+  }
+  // Only a press (or a click with no press) that began after the confirmation stood for a moment takes the second step;
+  // any other click is not taken, and the popup says to read the confirmation first (which stays on the screen).
+  const began = press ?? performance.now();
+  if (began === "repeat" || began < f.armedAt + FORGET_SECOND_STEP_AFTER_MS) {
+    showMsg("info", `${FORGET_EARLIER_READ_FIRST}\n${fillApproved(FORGET_EARLIER_CONFIRM, f.email)}`);
+    return;
+  }
+  hideForgetEarlier();
+  const r = await ask({ type: "forgetEarlierAccount", email: f.email });
+  if (r?.ok) showMsg("info", FORGET_EARLIER_DONE);
+  else showMsg("err", r?.code === "open" ? FORGET_EARLIER_OPEN : r?.code === "failed" ? FORGET_EARLIER_FAILED : FORGET_EARLIER_NOT_OFFERED);
+});
 
 /* ---- TOTP challenge (0.16.3): the code step after a totp_required sign-in ---- */
 
@@ -1394,7 +1729,7 @@ function exitTotpChallenge(): void {
 function setTotpVerifying(busy: boolean): void {
   const b = el<HTMLButtonElement>("totp-verify");
   b.disabled = busy; // single-flight the Verify click/Enter — a double-submit burns the login backoff
-  b.textContent = busy ? "Verifying…" : "Verify";
+  b.textContent = busy ? T.VERIFYING : T.VERIFY;
   el<HTMLButtonElement>("totp-startover").disabled = busy; // don't let "start over" race an in-flight verify
 }
 
@@ -1403,11 +1738,12 @@ async function verifyTotp(): Promise<void> {
   const code = input.value.replace(/\D/g, ""); // paste "123 456" → "123456" (maxlength would truncate first)
   if (el<HTMLButtonElement>("totp-verify").disabled) return;
   if (code.length < 6) {
-    showMsg("info", "Enter all 6 digits of the code."); // not a silent no-op (a11y: SR announces it)
+    showMsg("info", T.ENTER_ALL_DIGITS); // not a silent no-op (a11y: SR announces it)
     input.focus();
     return;
   }
   clearMsg();
+  hideForgetEarlier();
   setTotpVerifying(true);
   try {
     const r = await ask({ type: "unlockTotp", code });
@@ -1417,6 +1753,7 @@ async function verifyTotp(): Promise<void> {
       input.value = "";
       exitTotpChallenge();
       await refresh();
+      if (r?.ok) showSignInNotice(r.notice);
       return;
     }
     if (r?.code === "totp_bad_code" && ++totpBadCount < 3) {
@@ -1430,7 +1767,13 @@ async function verifyTotp(): Promise<void> {
     await ask({ type: "cancelTotp" });
     exitTotpChallenge();
     await refresh();
-    showMsg("err", capped ? "Too many wrong codes — sign in again." : unlockErrorCopy(r?.code));
+    if (capped) showMsg("err", T.TOO_MANY_WRONG_CODES);
+    else {
+      showTitled("err", unlockErrorMessage(r?.code, el<HTMLInputElement>("email").value.trim()));
+      const email = el<HTMLInputElement>("email").value.trim();
+      // The same refusal at the code step: the same offer to forget the earlier account (the worker raised it there too).
+      if (r?.code === "remade_account") offerForgetEarlier(email);
+    }
   } finally {
     setTotpVerifying(false);
   }
@@ -1453,6 +1796,7 @@ el<HTMLInputElement>("email").addEventListener("keydown", (e) => {
 el<HTMLInputElement>("password").addEventListener("keydown", (e) => {
   if (e.key === "Enter") void unlock();
 });
+el<HTMLInputElement>("email").addEventListener("input", () => renderPasswordLabel());
 el<HTMLButtonElement>("totp-verify").addEventListener("click", () => void verifyTotp());
 el<HTMLInputElement>("totp-code").addEventListener("input", (e) => {
   const t = e.target as HTMLInputElement; // keep the field digits-only as they type/paste
@@ -1479,8 +1823,8 @@ function renderQuickUnlock(qu: Res<"status">["quickUnlock"], unlocked: boolean):
   if (!unlocked) return; // showView already hid the unlocked-only offer/enroll/settings chrome
 
   el("qu-settings").hidden = false;
-  el("qu-settings-state").textContent = qu.enrolled ? "Quick unlock is on" : "Quick unlock is off";
-  el("qu-toggle").textContent = qu.enrolled ? "Turn off" : "Set up";
+  el("qu-settings-state").textContent = qu.enrolled ? T.QUICK_UNLOCK_IS_ON : T.QUICK_UNLOCK_IS_OFF;
+  el("qu-toggle").textContent = qu.enrolled ? T.TURN_OFF : T.SET_UP;
   const enrollOpen = !el("qu-enroll").hidden;
   el("qu-offer").hidden = qu.enrolled || qu.offerDismissed || enrollOpen;
   // Biometric enroll shortcuts render only where the platform supports it (bioCapable): one in the
@@ -1501,6 +1845,7 @@ async function quUnlock(): Promise<void> {
     pinEl.value = ""; // never leave the PIN in the field
     if (r?.ok) {
       await refresh();
+      if (r.notice === "quick_unlock_not_updated") showMsg("info", QUICK_UNLOCK_NOT_UPDATED); // the vault is open: said, not an error
       return;
     }
     showMsg("err", pinUnlockErrorCopy(r?.code, r?.attemptsRemaining));
@@ -1537,12 +1882,13 @@ async function quBioUnlock(): Promise<void> {
   if (btn.disabled) return;
   btn.disabled = true;
   clearMsg();
-  showMsg("info", "Opening your device’s unlock prompt…");
+  showMsg("info", T.OPENING_UNLOCK_PROMPT);
   try {
     const r = await ask({ type: "unlockWithBio" });
     if (r?.ok) {
       clearMsg();
       await refresh();
+      if (r.notice === "quick_unlock_not_updated") showMsg("info", QUICK_UNLOCK_NOT_UPDATED); // the vault is open: said, not an error
       return;
     }
     if (!r) return; // popup context surviving without a response (rare) — the connector owns the outcome
@@ -1572,12 +1918,12 @@ el("qu-bio-use-master").addEventListener("click", () => {
  *  status on the next open reflects the result. When the popup survives, we render the outcome. */
 async function quEnrollBio(): Promise<void> {
   clearMsg();
-  showMsg("info", "Opening your device’s setup prompt…");
+  showMsg("info", T.OPENING_SETUP_PROMPT);
   const r = await ask({ type: "enrollQuickUnlockBio" });
   if (!r) return; // popup closed when the connector opened — the reopened popup shows the result
   if (r.ok) {
     el("qu-enroll").hidden = true;
-    showMsg("info", "Device quick unlock is on for this browser.");
+    showMsg("info", T.DEVICE_QUICK_UNLOCK_ON);
     await refresh();
   } else {
     showMsg("err", enrollBioErrorCopy(r.code));
@@ -1608,8 +1954,14 @@ async function quEnrollSave(): Promise<void> {
     if (r?.ok) {
       pinEl.value = "";
       el("qu-enroll").hidden = true;
-      showMsg("info", "Quick unlock is on for this browser.");
+      showMsg("info", T.QUICK_UNLOCK_ON_HERE);
       await refresh();
+    } else if (r?.code === "switched_off") {
+      // Switched off in another window while this was set up: nothing is on, said plainly (not an error).
+      pinEl.value = "";
+      el("qu-enroll").hidden = true;
+      await refresh();
+      showMsg("info", enrollErrorCopy(r.code));
     } else {
       pinEl.select();
       showMsg("err", enrollErrorCopy(r?.code, r?.reason));
@@ -1633,9 +1985,9 @@ el("qu-enroll-cancel").addEventListener("click", () => {
   void refresh();
 });
 el("qu-toggle").addEventListener("click", async () => {
-  if (el("qu-settings-state").textContent === "Quick unlock is on") {
+  if (el("qu-settings-state").textContent === T.QUICK_UNLOCK_IS_ON) {
     await ask({ type: "disableQuickUnlock" }); // wipe — no auth gate (§8.1 parity)
-    showMsg("info", "Quick unlock turned off.");
+    showMsg("info", T.QUICK_UNLOCK_TURNED_OFF);
     await refresh();
   } else {
     openEnroll();
@@ -1648,35 +2000,65 @@ el("qu-toggle").addEventListener("click", async () => {
  *  dialog surface and shouldn't grow one for this, so the confirm is the house's OWN inline idiom:
  *  the options page's two-click arm, disarmed on blur, with the consequence stated in the live
  *  message region (which the SR user hears, per a11y 2a). */
-let signOutArmed = false;
-const signOutLabel = el("sign-out").textContent ?? "Sign out";
+// Design §4.4 (decided on 2026-11-17): both say first how many captured logins and cards were not saved, which they
+// delete (unsavedarm.ts), and a count that moved between the two clicks arms again with the new number.
+let signOutArmed: number | null = null;
+const signOutLabel = T.SIGN_OUT;
 function disarmSignOut(): void {
-  if (!signOutArmed) return;
-  signOutArmed = false;
+  if (signOutArmed === null) return;
+  signOutArmed = null;
   el("sign-out").textContent = signOutLabel;
 }
+/** What is at stake now: the captures not saved, and whether they can still be saved (an open vault, its session live). */
+async function unsavedNow(): Promise<{ count: number; canSave: boolean }> {
+  const st = await ask({ type: "status" });
+  return { count: st?.unsavedCaptures ?? 0, canSave: st?.unlocked === true && st.serverEnded !== true };
+}
 el("sign-out").addEventListener("click", async () => {
-  if (!signOutArmed) {
-    signOutArmed = true;
-    el("sign-out").textContent = "Sign out? Click again to confirm";
-    showMsg("info", "Signing out removes this browser's quick unlock (PIN or biometric) and its saved session. Your vault on the server is untouched.");
+  const now = await unsavedNow();
+  const step = unsavedArmStep(signOutArmed, now.count, true);
+  if (!step.act) {
+    signOutArmed = step.armed;
+    el("sign-out").textContent = T.SIGN_OUT_CONFIRM;
+    const line = unsavedCapturesLine("signout", now.count, now.canSave);
+    showMsg("info", line === null ? T.SIGN_OUT_EXPLAINED : `${T.SIGN_OUT_EXPLAINED} ${line}`);
     return;
   }
   disarmSignOut();
-  await ask({ type: "signOut" }); // full wipe: blob + co-key + tokens + session (spec 01 §8.4)
+  const out = await ask({ type: "signOut" }); // full wipe: blob + co-key + tokens + session (spec 01 §8.4)
   clearMsg();
   pinFallback = false;
   await refresh();
+  // A session of that account whose end the server could not confirm: said at this moment, with how to end it.
+  if (out?.notice === "session_not_confirmed") showMsg("info", SIGN_OUT_NOT_CONFIRMED);
 });
 el("sign-out").addEventListener("blur", disarmSignOut); // any move away cancels a half-armed confirm
 
 /* ---- footer ---- */
 
+let lockArmed: number | null = null;
+function disarmLock(): void {
+  if (lockArmed === null) return;
+  lockArmed = null;
+  el("lock").textContent = T.LOCK;
+}
+// The button's word is the LOCK line's, filled at load: popup.html carries the same word only until this runs.
+el("lock").textContent = T.LOCK;
 el("lock").addEventListener("click", async () => {
+  const now = await unsavedNow();
+  const step = unsavedArmStep(lockArmed, now.count, false);
+  if (!step.act) {
+    lockArmed = step.armed;
+    el("lock").textContent = T.LOCK_CONFIRM;
+    showMsg("info", unsavedCapturesLine("lock", now.count, now.canSave) ?? "");
+    return;
+  }
+  disarmLock();
   await ask({ type: "lock" });
   clearMsg();
   await refresh();
 });
+el("lock").addEventListener("blur", disarmLock);
 
 /** Open a page on the configured server (design §5.1 — the origin is asked of the worker on
  *  every click, never cached in the popup). window.close() only
@@ -1685,7 +2067,7 @@ async function openServerPage(path = ""): Promise<void> {
   const base = await currentServer();
   if (base === null) {
     // A15 review S3 / F1: no answer from the worker, or a server pending — open nothing (never a guessed default).
-    showMsg("err", "andvari can’t tell which server to open right now — close this window and try again.");
+    showMsg("err", T.CANT_TELL_SERVER);
     return;
   }
   try {
@@ -1699,42 +2081,17 @@ async function openServerPage(path = ""): Promise<void> {
 
 el("open-vault").addEventListener("click", () => void openServerPage());
 
-// Cut H (v2 #6): forgotten master password — the self-recovery flow lives in the web app
-// (#recover deep link); the locked popup was a dead end.
-el("forgot").addEventListener("click", () => void openServerPage("/#recover"));
-
-// E1-6: the rescue-nudge strip IS the affordance — the extension can't change the master
-// password itself, so clicking anywhere on it opens the web vault (same action as open-vault).
-el("must-change").addEventListener("click", () => void openServerPage());
-/** A6 fix round (A5b LOW-1/LOW-2 parity): "Use new" is offered only once the co-holders of the NEW vault loaded,
- *  shown as reported by the server; a failed lookup leaves only the keep-current guidance. */
-async function renderPersonalChangeChoice(): Promise<void> {
-  const d = await ask({ type: "personalDescribeChange" });
-  el("personal-change-accept").hidden = !(d?.ok === true);
-  const line = el("personal-change-coholders");
-  line.hidden = false;
-  line.textContent = d?.ok
-    ? d.coHoldersLine ?? ""
-    : "Can't check who else holds that vault right now, so switching to it isn't offered. Try again later.";
-}
-
-el("personal-change-accept").addEventListener("click", async () => {
-  const r = await ask({ type: "personalAcceptChange" });
-  // A5b LOW-4 (A6): the staged record is re-authenticated under the UVK, which a session woken from an eviction
-  // does not hold; and a record that no longer opens is refused rather than trusted.
-  if (r?.code === "need_full_unlock") showMsg("err", "To switch the personal vault, lock and unlock with your master password first.");
-  else if (r?.code === "coholders_not_loaded") showMsg("err", "Couldn't confirm who else holds the new vault, so nothing changed.");
-  else if (r?.code === "unverified") showMsg("err", "The new personal-vault record could not be verified, so nothing changed. Tell your admin.");
-  else if (!r?.ok) showMsg("err", "Couldn't switch the personal vault. Lock and unlock, then try again.");
-  await refresh();
-});
+// Cut H (v2 #6): a forgotten master password — the locked popup is not a dead end. The
+// extension recovers nothing (design §12.2, §10: recovery runs in a full client), so the link says where to go instead
+// of opening the web app's old recovery route.
+el("forgot").addEventListener("click", () => showMsg("info", RECOVER_IN_APP));
 
 el("ping").addEventListener("click", async () => {
   showMsg("info", "…");
   const r = await ask({ type: "ping" });
   setConn(r?.ok === true, r?.code === "confirm_server");
   // #23: the conn-status twin's sentence — the old line leaked a raw epoch (`t=1752…`).
-  if (r?.ok) showMsg("info", "Server reachable.");
+  if (r?.ok) showMsg("info", T.SERVER_REACHABLE_DONE);
   else if (r?.code === "confirm_server") showMsg("err", CONFIRM_SERVER_FIRST); // A15 review F1: nothing was dialed
   // E1-3/extux-05: the one canonical unreachable sentence — never the raw exception text. (A
   // mid-restart SW → undefined shares this copy, mildly conflating SW death with the network;
@@ -1761,7 +2118,12 @@ async function renderServerOrigin(): Promise<void> {
   // an anti-phishing display.
   const origin = info && typeof info.url === "string" && info.url && !info.block ? info.url : null;
   if (origin === null) {
-    const why = BUILD_TARGET === "safari" ? "No server yet" : info?.block?.kind === "confirm" ? "No server confirmed yet" : "Server unknown";
+    const why =
+      BUILD_TARGET === "safari" || info?.block?.kind === "no_server"
+        ? T.NO_SERVER_YET
+        : info?.block?.kind === "fork" || info?.block?.kind === "pin_damaged"
+          ? T.SERVER_STOPPED
+          : T.SERVER_UNKNOWN;
     node.textContent = why;
     node.title = why;
     node.setAttribute("role", "note");
@@ -1780,7 +2142,7 @@ async function renderServerOrigin(): Promise<void> {
   // untruncated origin to a screen-reader user on an anti-phishing display. `note` is a labelable
   // role that says what this is (an aside about the current state), so the name lands.
   node.setAttribute("role", "note");
-  node.setAttribute("aria-label", `Connected server: ${origin}`);
+  node.setAttribute("aria-label", fillApproved(T.CONNECTED_SERVER, origin));
 }
 
 /**
@@ -1799,7 +2161,7 @@ async function renderServerDetails(after: HTMLElement, serverInfoSilent: boolean
   box.dataset["silent"] = String(serverInfoSilent);
   box.style.cssText = "font-size:11px;margin-top:4px;word-break:break-word";
   const summary = document.createElement("summary");
-  summary.textContent = "Details";
+  summary.textContent = T.DETAILS;
   const body = document.createElement("div");
   body.style.whiteSpace = "pre-wrap";
   box.append(summary, body);
@@ -1895,8 +2257,8 @@ async function detectMissingHostGrant(): Promise<void> {
   if (shouldRouteToOptions(granted)) el("host-grant-cta").hidden = false;
 }
 
-// A15 review F1: the confirm route. Confirming is the Trust Gate's job, in Options (Connect is the only commit);
-// "Not mine" drops the pending server, and the default (named on the button) is then the server.
+// §12.2: "Your own server" — typed in Options, behind the Trust Gate (Connect is the only commit); "Forget this server"
+// (§12.3) is the way out of a fork or a damaged record.
 el("confirm-server-open").addEventListener("click", () => {
   try {
     chrome.runtime.openOptionsPage();
@@ -1906,8 +2268,12 @@ el("confirm-server-open").addEventListener("click", () => {
   window.close();
 });
 el("confirm-server-not-mine").addEventListener("click", async () => {
-  const r = await ask({ type: "forgetLegacyServer" });
-  if (!r?.ok) showMsg("err", "Couldn’t change the server — close this window and try again.");
+  const b = el<HTMLButtonElement>("confirm-server-not-mine");
+  if (b.textContent === T.FORGET_THIS_SERVER || b.textContent === T.FORGET_CONFIRM) {
+    if (!(await forgetSecondClick(b))) return;
+  }
+  const r = await ask({ type: "forgetServer" });
+  if (!r?.ok) showMsg("err", T.FORGET_FAILED);
   await renderServerOrigin();
   await refresh();
 });
@@ -1977,7 +2343,7 @@ async function appUnlock(): Promise<void> {
   appUnlockPending = true;
   const button = el<HTMLButtonElement>("app-unlock");
   button.disabled = true;
-  button.textContent = "Waiting for Face ID…";
+  button.textContent = T.WAITING_FOR_FACE_ID;
   clearMsg();
   let poll: number | undefined;
   let onVisible: (() => void) | undefined;
@@ -1994,15 +2360,15 @@ async function appUnlock(): Promise<void> {
     const gaveUp = new Promise<"timeout">((resolve) => window.setTimeout(() => resolve("timeout"), 70_000));
     const r = await Promise.race([answered, seenUnlocked, gaveUp]);
     if (r !== "unlocked" && r !== "timeout") {
-      if (r?.state === "openApp") showMsg("info", r.message ?? "Open andvari and unlock it, then try again.");
-      else if (r?.state === "unavailable" || r === undefined) showMsg("err", "Couldn’t reach the andvari app. Open it once, then try again.");
+      if (r?.state === "openApp") showMsg("info", r.message ?? T.OPEN_APP_AND_UNLOCK);
+      else if (r?.state === "unavailable" || r === undefined) showMsg("err", T.APP_NOT_REACHED);
     }
   } finally {
     if (poll !== undefined) window.clearInterval(poll);
     if (onVisible) document.removeEventListener("visibilitychange", onVisible);
     appUnlockPending = false;
     button.disabled = false;
-    button.textContent = "Unlock with Face ID";
+    button.textContent = T.UNLOCK_WITH_FACE_ID;
   }
   await refresh();
 }
@@ -2035,7 +2401,7 @@ if (BUILD_TARGET === "safari") {
     try {
       el("locked").hidden = false;
       el("app-locked").hidden = false;
-      showMsg("err", `andvari hit a problem: ${String(what instanceof Error ? `${what.name}: ${what.message}` : what).slice(0, 300)}`);
+      showMsg("err", fillApproved(T.UNEXPECTED_PROBLEM, String(what instanceof Error ? `${what.name}: ${what.message}` : what).slice(0, 300)));
     } catch {
       /* the page is too broken to say so */
     }
@@ -2049,9 +2415,8 @@ if (BUILD_TARGET === "safari") {
   // popup, ends it at once.
 }
 
-/** Safari on iOS: the server comes from the andvari app. */
-const APP_SERVER_NONE = "Choose your server in the andvari app. This extension uses the same one.";
-const APP_SERVER_UNKNOWN = "andvari couldn’t ask the andvari app which server you use. Open the app once, then open this again.";
+/** Safari on iOS: the server comes from the andvari app (copy.ts APP_SERVER_NONE / APP_SERVER_UNKNOWN). */
+const APP_SERVER_NONE = T.APP_SERVER_NONE;
 
 /** Safari: what the app said about its server at this open (the worker's ask, else the popup's own). */
 let appAnswered: "set" | "none" | "unavailable" | null = null;
@@ -2059,9 +2424,7 @@ let appAnswered: "set" | "none" | "unavailable" | null = null;
 /**
  * Safari: have the worker adopt the app's server before anything shows a server; whether the app has none. The worker
  * asks the app itself; when that ask got no answer (on a device it timed out while this page's, a moment later,
- * resolved), this page asks the app and relays what it said, which the worker adopts the same way. That the app has no
- * server is relayed too: the worker then forgets one it still keeps from the app (an account deleted in the app leaves
- * the device with none).
+ * resolved), this page asks the app and relays what it said, which the worker adopts the same way.
  */
 async function adoptAppServer(): Promise<boolean> {
   if (BUILD_TARGET !== "safari") return false;
@@ -2074,6 +2437,8 @@ async function adoptAppServer(): Promise<boolean> {
       const relayed = await ask({ type: "appServerAnswer", url: own.answer.url, nativeSave: own.nativeSave, askedAt });
       appAnswered = relayed?.app ?? "unavailable";
     } else if (own.answer.kind === "none") {
+      // Relayed too: the worker then forgets a server it still keeps from the app (an account deleted in the app leaves
+      // the device with none).
       await ask({ type: "appServerAnswer", url: null, nativeSave: own.nativeSave, askedAt });
       appAnswered = "none"; // the app said so itself, whatever the worker made of it
     }
@@ -2081,6 +2446,7 @@ async function adoptAppServer(): Promise<boolean> {
   return appAnswered === "none";
 }
 
+drawWordmarks(document); // the drawn name in the header and the lock screen (brand.ts)
 void adoptAppServer().then((appHasNone) => {
   void renderServerOrigin();
   // Probe biometric capability BEFORE the first status render so the bio enroll shortcuts appear on the

@@ -23,6 +23,6 @@ test("the check builds every target as it ships and applies the cap, without the
   const skip = pkg.indexOf("if (check) {");
   assert.ok(cap > -1 && skip > cap, "the cap is applied to every checked build before it moves on");
   assert.ok(pkg.indexOf('execFileSync("zip"') > skip, "and nothing is zipped");
-  // The A15 release check (releasegate.test.ts) and the test run stay the packaging's own.
-  assert.match(pkg, /if \(!check\) \{\s*const a15 = a15ReleaseProblem\(version\);/);
+  // The public-instance release check (serverchoice.test.ts) and the test run stay the packaging's own.
+  assert.match(pkg, /if \(!check\) \{\s*const baked = publicInstanceReleaseProblem\(\);/);
 });

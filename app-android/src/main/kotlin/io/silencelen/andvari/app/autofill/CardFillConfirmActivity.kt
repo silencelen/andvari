@@ -11,6 +11,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -32,7 +33,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.silencelen.andvari.app.AndvariTheme
-import io.silencelen.andvari.app.VaultSession
+import io.silencelen.andvari.app.trust.Placeholder
+import io.silencelen.andvari.app.trust.UiText
 import io.silencelen.andvari.core.client.CardDisplay
 import io.silencelen.andvari.core.client.VaultItem
 import io.silencelen.andvari.core.client.autofill.AppFillGate
@@ -68,12 +70,12 @@ class CardFillConfirmActivity : ComponentActivity() {
             finish(); return
         }
         if (!AppFillGate.unchangedSince(bake.identity, AppIdentityLookup.lookup(applicationContext, bake.identity.pkg))) {
-            Toast.makeText(applicationContext, "That app changed since you tapped — tap the field again.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(applicationContext, UiText.ph(Placeholder.FILL_CONFIRM_APP_CHANGED_BEFORE).shown(), Toast.LENGTH_SHORT).show()
             finish(); return
         }
         val item = cardItem(bake)
         if (item == null) {
-            Toast.makeText(applicationContext, "Couldn't fill that card — open andvari and try again.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(applicationContext, UiText.ph(Placeholder.FILL_CONFIRM_CARD_NOT_FILLED).shown(), Toast.LENGTH_SHORT).show()
             finish(); return
         }
         val line = CardLine(name = item.doc.name, masked = CardDisplay.subtitle(item.doc))
@@ -84,23 +86,24 @@ class CardFillConfirmActivity : ComponentActivity() {
         }
     }
 
-    /** The card the confirm would release: only while the vault is unlocked (after the idle lock had its say). */
+    /** The card the confirm would release: only while the app's own session is open, only from the working set. */
     private fun cardItem(bake: AppFillBinding.Bake): VaultItem? =
-        VaultSession.getIfFresh()?.engine?.items()?.firstOrNull { it.itemId == bake.itemId && it.doc.type == "card" }
+        (ContentFillSession.access(applicationContext) as? ContentFillSession.Access.Open)
+            ?.let { ContentFill.cardById(it.content, bake.itemId) }
 
     private fun confirmAndFill(form: ParsedForm, bake: AppFillBinding.Bake) {
         if (!armed.value) return // the state layer refuses an unarmed tap, not only the disabled button
         if (!AppFillGate.unchangedSince(bake.identity, AppIdentityLookup.lookup(applicationContext, bake.identity.pkg))) {
-            Toast.makeText(applicationContext, "That app changed while this was open — nothing was filled.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(applicationContext, UiText.ph(Placeholder.FILL_CONFIRM_APP_CHANGED).shown(), Toast.LENGTH_SHORT).show()
             finish(); return
         }
         val dataset = cardItem(bake)?.let { runCatching { DatasetBuilder.cardResultDataset(it, form) }.getOrNull() }
         if (dataset != null) {
             // Nothing is remembered: the next card fill in this app asks again.
-            AutofillHardLock.arm()
+            ContentFillSession.HardLock.arm(applicationContext)
             setResult(RESULT_OK, Intent().putExtra(AutofillManager.EXTRA_AUTHENTICATION_RESULT, dataset))
         } else {
-            Toast.makeText(applicationContext, "Couldn't fill that card — open andvari and try again.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(applicationContext, UiText.ph(Placeholder.FILL_CONFIRM_CARD_NOT_FILLED).shown(), Toast.LENGTH_SHORT).show()
         }
         finish()
     }
@@ -115,19 +118,26 @@ class CardFillConfirmActivity : ComponentActivity() {
         handler.removeCallbacks(arm)
         super.onDestroy()
     }
+
+    private val obscuredTold = BooleanArray(1)
+
+    /** On Android 10 and 11 a touch while the window is partly covered is dropped ([FillWindow]). */
+    override fun dispatchTouchEvent(ev: android.view.MotionEvent): Boolean = FillWindow.dispatch(this, ev, obscuredTold) { super.dispatchTouchEvent(it) }
 }
 
 /** The card a confirm would release, as shown: its name and "Brand ••1234". Never the number, the date or the code. */
-private data class CardLine(val name: String, val masked: String)
+internal data class CardLine(val name: String, val masked: String)
 
+/** Also shown by andvari's own chooser ([FillChooserActivity]) once the person picked a card there. */
 @Composable
-private fun CardConfirmCard(bake: AppFillBinding.Bake, card: CardLine, armed: Boolean, onFill: () -> Unit, onCancel: () -> Unit) {
+internal fun CardConfirmCard(bake: AppFillBinding.Bake, card: CardLine, armed: Boolean, onFill: () -> Unit, onCancel: () -> Unit) {
     val view = LocalView.current
     SideEffect { view.filterTouchesWhenObscured = true }
     val id = bake.identity
     val app = AppFillGate.oneLine(id.label) ?: id.pkg
     Column(
-        Modifier.fillMaxSize().padding(24.dp),
+        // It scrolls, as the unlock card does: at the largest font Fill and Cancel were below the screen's edge.
+        Modifier.fillMaxSize().verticalScroll(androidx.compose.foundation.rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {

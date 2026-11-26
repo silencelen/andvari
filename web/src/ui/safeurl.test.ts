@@ -62,9 +62,9 @@ describe("the rule is applied where it was skipped", () => {
     expect(devices).toContain("safeHttpHref(v)");
   });
 
-  it("Welcome imports the shared one instead of keeping a private copy", () => {
+  it("Welcome keeps no private copy (it renders no server-supplied link at all now)", () => {
     const welcome = readFileSync(here("./Welcome.tsx"), "utf8");
-    expect(welcome).toContain('import { safeHttpUrl } from "./safeurl"');
     expect(welcome).not.toContain("function safeHttpUrl(");
+    expect(welcome).not.toContain("href={");
   });
 });

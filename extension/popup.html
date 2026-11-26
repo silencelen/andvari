@@ -12,10 +12,10 @@
   <body>
     <header class="pop-head">
       <div class="pop-head-top">
-        <!-- The ᛅ marks are inline SVG (web Sigil.tsx geometry) — the raw runic codepoint renders
-             as tofu wherever no installed font covers the Runic block. Kept in lockstep with
-             popup.ts sigilSvg(). No whitespace between the brand spans (inline flow). -->
-        <span class="brand"><span class="sigil-sm"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 3v18"/><path d="M5.5 8.5l13 6"/></svg></span><span class="a-mark">and</span>vari</span>
+        <!-- The brand is inline SVG (src/brand.ts): the rune ᛅ (assets/brand/andvari-rune.svg) and the
+             drawn name, whose outline popup.ts fills into the empty shell; the shell is named "andvari"
+             for a screen reader from the start. No whitespace between the brand's parts (inline flow). -->
+        <span class="brand"><span class="sigil-sm"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M4.85 6.768 L19.15 13.368 L19.15 16.232 L4.85 9.632 Z"/><path d="M10.7 2.35 L13.3 3.55 L13.3 21.25 L10.7 20.05 Z"/></svg></span><svg class="wordmark" role="img" aria-label="andvari" viewBox="0 -740 3017 980"><path data-wordmark="" fill="currentColor"/></svg></span>
         <!-- a11y 5a: the coloured dot is decorative; the visually-hidden twin carries the state
              to AT (a title on a non-interactive span is unreliable + unfocusable). -->
         <span id="conn" class="dot off" title="server" aria-hidden="true"></span>
@@ -57,58 +57,48 @@
          gold update banner and NOT an error strip: a sig-stripping server must not get a scary lever. -->
     <p id="update-quiet" class="update-quiet" role="status" hidden></p>
 
-    <!-- E1-6 recovery-password nudge: a rescued member re-logged in with the admin-known
-         temporary password. Persistent + non-dismissable for the whole unlocked session (the
-         mustChange banner idiom, not the dismissable-notice one); shown only when unlocked AND
-         the login response carried mustChangePassword. The extension can't change the password
-         itself, so the whole strip is a button to the web vault. Cleared only by a fresh unlock
-         whose response no longer carries the flag. -->
-    <button id="must-change" class="must-change-strip" type="button" hidden>
-      Recovery sign-in — set a new master password in the web vault.
-    </button>
-
-    <!-- A5b (security review 2026-10, root cause A): the server sent a personal-vault record naming another
-         vault than this browser's (a change on another device, or an older record replayed). This browser
-         keeps saving to the vault it had until the user confirms here; keeping the current one is a
-         re-designation in the web vault or an app. Unlocked-only chrome, re-derived by refresh(). -->
-    <!-- A5b review LOW-3 (A6): the text names both vaults; it is set by popup.ts from status.personalChangeText
-         (textContent only). The static copy below is the fallback when no names could be decrypted. -->
-    <div id="personal-change" class="must-change-strip personal-change" role="alert" hidden>
-      <span id="personal-change-text">This browser keeps saving to the personal vault it had. To keep it, choose it
-      again in the web vault (Settings, Personal vault). The server says your personal vault was changed on another
-      device, or it sent an older record.</span>
-      <!-- A6 fix round (A5b LOW-1/LOW-2 parity): who else holds the NEW vault, as reported by the server; "Use new"
-           stays hidden until that lookup succeeded (the SW enforces the same gate). Keep-current guidance is first. -->
-      <span id="personal-change-coholders" class="personal-change-coholders" hidden></span>
-      <button id="personal-change-accept" class="ghost" type="button" hidden>Use the new personal vault</button>
+    <!-- Design 2026-11-15 §4.4: what the pinned card says beside a working server — an older card served, the public
+         instance saying it changed (never followed: "Update andvari"), or a move or kind change of the person's own
+         server awaiting their one tap. Text is set by popup.ts (textContent); names always beside their origin. -->
+    <div id="card-notice" class="must-change-strip grants-waiting" role="status" hidden>
+      <strong id="card-notice-title" class="card-notice-title" hidden></strong>
+      <span id="card-notice-text"></span>
+      <span class="card-notice-acts">
+        <button id="card-notice-follow" class="ghost" type="button" hidden></button>
+        <button id="card-notice-later" class="link dim" type="button" hidden>Not now</button>
+      </span>
     </div>
-    <!-- Root cause A §1.7 (A6, owner decision Q8): the extension never opens a grant seal; shared vaults whose
-         grant has no wrap yet wait for a full client to verify them. Unlocked-only chrome, re-derived by refresh(). -->
+    <!-- §12.2 rule 1: shared vaults the extension does not open yet (no wrap, or no accept decision in the account
+         state) wait for a full client. Unlocked-only chrome, re-derived by refresh(). -->
     <div id="grants-waiting" class="must-change-strip grants-waiting" role="status" hidden></div>
     <!-- Root cause A §5.1 INV-HOME (A1b): the server sent an item under the wrong vault; it was not applied. -->
     <div id="wrong-vault" class="must-change-strip grants-waiting" role="status" hidden></div>
+    <!-- Shown when the browser refused an alarm (the auto-lock's first); the deadline still locks on time. -->
+    <div id="timer-notice" class="must-change-strip grants-waiting" role="status" hidden></div>
+    <!-- Design §4.4: logins and cards a lock nobody was asked about (the idle lock, or the sign-out after the server
+         ended the session for good) deleted unsaved; said once, while locked. Text is set by popup.ts. -->
+    <div id="captures-lost" class="must-change-strip grants-waiting" role="status" hidden></div>
 
-    <!-- A15 review F1 (security review 2026-10): a server is pending, so the worker signs in NOWHERE — not even to the
-         default server — until the user decides. Shown INSTEAD of the sign-in form. `confirm`: the server this browser
-         used before the update (its old setting sat where a web page could have written it, so it is not reconnected
-         silently): confirming goes through Options and the Trust Gate; "Not mine" is the clear second choice and names
-         the server it switches to. When this browser cannot keep a server choice (Firefox "Never remember history")
-         the copy says so. `unsettled`: the worker could not read its settings. Text is set by popup.ts (textContent). -->
+    <!-- Design 2026-11-15 §12.2, §12.3: no usable server, so the worker signs in NOWHERE. Shown INSTEAD of the sign-in
+         form. `no_server`: the first popup — "andvari" (the public instance, from its baked card) or "Your own server"
+         (Options, behind the Trust Gate). `fork` / `pin_damaged`: the stop, whose only way on is "Forget this server".
+         `no_store` / `unsettled`: andvari cannot keep or read its settings here. Text is set by popup.ts. -->
     <section id="confirm-server" class="locked confirm-server" aria-labelledby="confirm-server-h" hidden>
-      <h2 id="confirm-server-h" class="confirm-server-h">Confirm your server</h2>
-      <p id="confirm-server-lead" class="confirm-server-body">Before this update, andvari was set to use:</p>
+      <h2 id="confirm-server-h" class="confirm-server-h">Choose your server</h2>
+      <p id="confirm-server-lead" class="confirm-server-body"></p>
       <code id="confirm-server-origin" class="confirm-server-origin"></code>
-      <p id="confirm-server-body" class="confirm-server-body"></p>
-      <button id="confirm-server-open" class="primary" type="button">Confirm in Options</button>
+      <div id="confirm-server-body" class="confirm-server-body"></div>
+      <button id="confirm-server-public" class="primary" type="button">andvari</button>
+      <button id="confirm-server-open" class="primary" type="button">Your own server</button>
       <p style="margin: 10px 0 0; text-align: center;">
-        <button id="confirm-server-not-mine" class="link dim" type="button">Not mine</button>
+        <button id="confirm-server-not-mine" class="ghost confirm-server-forget" type="button">Forget this server</button>
       </p>
     </section>
 
     <section id="locked" class="locked" hidden>
       <div class="hero">
-        <div class="sigil"><svg width="38" height="38" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M12 3v18"/><path d="M5.5 8.5l13 6"/></svg></div>
-        <span class="brand"><span class="a-mark">and</span>vari</span>
+        <div class="sigil"><svg width="38" height="38" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M4.85 6.768 L19.15 13.368 L19.15 16.232 L4.85 9.632 Z"/><path d="M10.7 2.35 L13.3 3.55 L13.3 21.25 L10.7 20.05 Z"/></svg></div>
+        <span class="brand"><svg class="wordmark" role="img" aria-label="andvari" viewBox="0 -740 3017 980"><path data-wordmark="" fill="currentColor"/></svg></span>
         <p>the keeper of the hoard</p>
       </div>
 
@@ -153,10 +143,11 @@
           <input id="email" type="email" autocomplete="off" autocapitalize="off" spellcheck="false" />
         </div>
         <div class="field">
-          <label for="password">Master password</label>
+          <label id="password-label" for="password">Master password</label>
           <input id="password" type="password" autocomplete="off" />
         </div>
         <button id="unlock" class="primary">Unlock</button>
+        <button id="forget-earlier" class="link" type="button" hidden></button>
         <div id="kdf" class="kdf" hidden>
           <div class="bar"></div>
           <div class="cap">about 6 seconds</div>
@@ -192,7 +183,9 @@
       <!-- Quick-unlock one-time offer card (spec 01 §8.4; dismissed-once via storage.local — breaker B7).
            Shown after unlock only when NOT enrolled and NOT previously dismissed. -->
       <div id="qu-offer" class="qu-offer" role="note" hidden>
-        <p>Skip the master password <em>and</em> your one-time code next time — set a quick-unlock PIN for this browser (works for about a day, then a full sign-in).</p>
+        <!-- PLACEHOLDER (the product's owner approves the words): the offer said "and your
+             one-time code" to every account, and an account may have no second factor. One sentence true for both. -->
+        <p>Skip the master password next time, and your one-time code if you use one — set a quick-unlock PIN for this browser (works for about a day, then a full sign-in).</p>
         <div class="qu-acts">
           <button id="qu-offer-setup" class="ghost sm">Set up quick unlock</button>
           <button id="qu-offer-dismiss" class="link dim">Not now</button>

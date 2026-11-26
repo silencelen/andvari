@@ -1,0 +1,2410 @@
+{
+  "_about": [
+    "The server's access rules for POST /api/v1/vaults/{vaultId}/log (design 2026-11-15-onboarding-trust \u00a73.7, FC-1; spec 03 \u00a710.3 and \u00a710.4). Server-only: the JVM suite grades it, no client does.",
+    "Hand-authored from the independent oracle in tools/vector-gen/oracle (Node WebCrypto and @noble; no andvari code). Regenerate with `npm run generate` there; `npm run check` fails on any difference.",
+    "A row: the vault `vaultId` holds the chain `chains[stored]` (frames in order; `none` is a vault id nobody has used); the server's grant table is `chains[stored].grants`; `chains[stored].purged` says whether the vault's grace period has ended and the server purged it (the log is kept with the tombstone); the account `caller` posts `frameB64` as `entry`; `expect` is the wire answer. `entry`, where present, is the parsed statement, for reading.",
+    "expect: { status, error } for a refusal. A log_head_moved answer carries the stored head as seq, hash and at; NO other answer carries a head, and no_grant in particular never does. { status: 200, appended } for a success: appended true means the entry was stored at the head plus one, and `grantsAfter` is then the grant table after its effect; appended false is the retry answer, a 200 that changes nothing.",
+    "grants: one row per account that has ever held a grant: { userId, role, revokedBy }. revokedBy is null for an active grant, or the kind of the entry that revoked it: \"delete\" (the revocation the design calls reason vault_delete), \"leave\" or \"remove\". The server's own reason names are not graded. A harness that builds the state by posting the chain's frames in order, each as its actor, can assert this table.",
+    "The checks, in the design's order. Step 3: the strict parse and purpose 0x03 (bad_frame, also for unknown_format; non_canonical; bad_statement), then the frame's vaultId against the path (wrong_vault). Step 4: the actor is the caller and the signer maps to the caller's stored identity key (bad_signer), then the signature (bad_signature). Step 5: a frame byte-identical to a stored one answers 200 before any grant check; a genesis needs an unused vault id (409 vault_id_taken); every other kind needs the caller's grant (403 no_grant, also for an unknown vault), where a grant revoked by the vault's delete counts for restore and delete by the owner and for leave, a grant revoked for any other reason never counts, and after the purge no grant counts at all (every append but a genesis is 403 no_grant, the owner's restore included; the retry of a stored frame is still 200); then the role must allow the kind (403 not_vault_owner: add, role, remove, offer, delete and restore need owner). Step 6: seq and prev are the stored head plus one (409 log_head_moved). Step 7: the shared verifier, whose not_authorized is 403 not_vault_owner and whose precondition is 400 precondition.",
+    "Outside this file: the session and the body caps with the side data a kind takes (the harness sends well-formed metaBlob, wrappedVk and grant where the kind needs them), the rate buckets, and step 8. Every row is built to pass step 8: the server's clock is `now`, every stored `at` is before it, every posted `at` is at it or earlier, the stored offer expires after it, and every account of the cast is active, connected to the owner and under its limits."
+  ],
+  "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "otherVaultId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "now": 1763172000000,
+  "accounts": {
+    "alice": {
+      "userId": "11111111-1111-4111-8111-111111111111",
+      "seedB64": "DRQbIikwNz5FTFNaYWhvdn2Ei5KZoKeutbzDytHY3-Y",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "signPubB64": "nHq6JH1Lmot5tW6rGCV05fjNlUAomh-JWgaeAFtYs8o"
+    },
+    "bob": {
+      "userId": "22222222-2222-4222-8222-222222222222",
+      "seedB64": "oKOmqayvsrW4u77BxMfKzdDT1tnc3-Ll6Ovu8fT3-v0",
+      "identityPubB64": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM",
+      "signPubB64": "s6JVnClZbikPKKTc0Db3imvaLINlV0pXZiJiA_TrMQI"
+    },
+    "carol": {
+      "userId": "33333333-3333-4333-8333-333333333333",
+      "seedB64": "8-Y_Ot4gdxwTpqxkvkFy1zpMKs1R5t4Il73QMCTuB1I",
+      "identityPubB64": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk",
+      "signPubB64": "yOc1tSI8aPFJ1ft9jxNRkWYr7t5uspJpB2Y02m5vNyI"
+    },
+    "dave": {
+      "userId": "44444444-4444-4444-8444-444444444444",
+      "seedB64": "V4YYhvHxR4arkSEENssMWtbGkONPUOqZcvRkrZMY1SI",
+      "identityPubB64": "Wd8NgIFBR0r_DaXgoiTIpzh-IrIoM2zfTGlAZUGc2FU",
+      "signPubB64": "aQmXs0tW79l9HDabZWf3hpVtAL9AFiPzPVi1dR2GOhs"
+    },
+    "eve": {
+      "userId": "55555555-5555-4555-8555-555555555555",
+      "seedB64": "UtTp3GrhNe0Xpy9i57cv10iPIX73bF2H6JGX6KQWAiE",
+      "identityPubB64": "idcWup4jpVd3IG-tizczj0Ynp5ZcLkT0zu190dJ3L30",
+      "signPubB64": "Zo1sjc1bsyu_OT36OfdNF0gVDiwd9ajyvw3y6ENWRJA"
+    }
+  },
+  "chains": {
+    "none": {
+      "why": "No vault has this id: nothing is stored.",
+      "purged": false,
+      "frames": [],
+      "entries": [],
+      "head": null,
+      "grants": []
+    },
+    "live": {
+      "why": "alice created the vault and added bob as writer and carol as reader.",
+      "purged": false,
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izymgN1_JWtBgSvAcgnuiWxCAZJs8Rq1A9v6pqMaNmN2mt2bs2h1Sutu-Tr8zTL-BSvmaJHxfm4F0B2Q_gRFUf8wp7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiI1OGIxMmYyZDA2ZTE0N2RkNDg4ZmU2NThmNzdjNzY3NTIzYTZjMTZlMDUxMjg1NDcxZThhYTQwMDhmYTZkMDY0In0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izypCnw-7-moHnWZNiJLPN-XBHnDGyNMapwoUkgqQWqkTLzM22MlspzOgAvvhic32fwUs7HkoG-zlZtlUcH1IpxA57InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiN2NmMDA5ZDRlMTc4Nzk5YmE1Y2E3YTgyYWI0NTk4ODE3MWQwZjU5ZmYyMTlkNGI0ODY5YTY4NTJmZmZlOWEyMCIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiI2Vm5lTHNKU0d6clBzVXl3RTB3X2hnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyna2pj3a5CEtv9OPi7ilrckm713-kwLbcTTmdqkSGEvL_qKM5x2-sZv4VX-UIXS8mCycv3tyYjuehY0cqdVTEAJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiZTgzNmRjMzc1ZjI5NTVmMGY3NTA1MjVlZTU5ODJjYmM5YmJlNmUyYjNhNmY5MDZhZWU1NGIxMGEyODE1ODIyNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTIwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJZN1E0LXZrZkgxTjVTWjVsZGUtX0JnIn0"
+      ],
+      "entries": [
+        {
+          "seq": 0,
+          "kind": "genesis",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164800000,
+          "hash": "7cf009d4e178799ba5ca7a82ab45988171d0f59ff219d4b4869a6852fffe9a20"
+        },
+        {
+          "seq": 1,
+          "kind": "add",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164860000,
+          "hash": "e836dc375f2955f0f750525ee5982cbc9bbe6e2b3a6f906aee54b10a28158227"
+        },
+        {
+          "seq": 2,
+          "kind": "add",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164920000,
+          "hash": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3"
+        }
+      ],
+      "head": {
+        "seq": 2,
+        "hash": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "at": 1763164920000
+      },
+      "grants": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "owner",
+          "revokedBy": null
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "writer",
+          "revokedBy": null
+        },
+        {
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "role": "reader",
+          "revokedBy": null
+        }
+      ]
+    },
+    "deleted": {
+      "why": "live, then the owner deleted the vault: every grant is revoked by the delete, and the vault is in its grace period.",
+      "purged": false,
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izymgN1_JWtBgSvAcgnuiWxCAZJs8Rq1A9v6pqMaNmN2mt2bs2h1Sutu-Tr8zTL-BSvmaJHxfm4F0B2Q_gRFUf8wp7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiI1OGIxMmYyZDA2ZTE0N2RkNDg4ZmU2NThmNzdjNzY3NTIzYTZjMTZlMDUxMjg1NDcxZThhYTQwMDhmYTZkMDY0In0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izypCnw-7-moHnWZNiJLPN-XBHnDGyNMapwoUkgqQWqkTLzM22MlspzOgAvvhic32fwUs7HkoG-zlZtlUcH1IpxA57InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiN2NmMDA5ZDRlMTc4Nzk5YmE1Y2E3YTgyYWI0NTk4ODE3MWQwZjU5ZmYyMTlkNGI0ODY5YTY4NTJmZmZlOWEyMCIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiI2Vm5lTHNKU0d6clBzVXl3RTB3X2hnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyna2pj3a5CEtv9OPi7ilrckm713-kwLbcTTmdqkSGEvL_qKM5x2-sZv4VX-UIXS8mCycv3tyYjuehY0cqdVTEAJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiZTgzNmRjMzc1ZjI5NTVmMGY3NTA1MjVlZTU5ODJjYmM5YmJlNmUyYjNhNmY5MDZhZWU1NGIxMGEyODE1ODIyNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTIwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJZN1E0LXZrZkgxTjVTWjVsZGUtX0JnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyhdfE6hsA7FEF6oEgDQlP3fidQLn1xocuA8ZSjUd_rZ821ZPJMokj8COAuTkgBMcJSxOm5D246au8qV-ZBgxJg17InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJkZWxldGUiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTgwMDAwLCJkZWxldGVJZCI6IlpxRm9Fc0Z5TC1pY3BaeEdRVzBEOUEifQ"
+      ],
+      "entries": [
+        {
+          "seq": 0,
+          "kind": "genesis",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164800000,
+          "hash": "7cf009d4e178799ba5ca7a82ab45988171d0f59ff219d4b4869a6852fffe9a20"
+        },
+        {
+          "seq": 1,
+          "kind": "add",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164860000,
+          "hash": "e836dc375f2955f0f750525ee5982cbc9bbe6e2b3a6f906aee54b10a28158227"
+        },
+        {
+          "seq": 2,
+          "kind": "add",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164920000,
+          "hash": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3"
+        },
+        {
+          "seq": 3,
+          "kind": "delete",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164980000,
+          "hash": "3934af5d3a7b0a4e2ffc4400af5c2ddf81ab3c7240553553d90aab96549ec4ca"
+        }
+      ],
+      "head": {
+        "seq": 3,
+        "hash": "3934af5d3a7b0a4e2ffc4400af5c2ddf81ab3c7240553553d90aab96549ec4ca",
+        "at": 1763164980000
+      },
+      "grants": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "owner",
+          "revokedBy": "delete"
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "writer",
+          "revokedBy": "delete"
+        },
+        {
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "role": "reader",
+          "revokedBy": "delete"
+        }
+      ]
+    },
+    "purged": {
+      "why": "deleted, and the grace period has ended: the server purged the vault and keeps its row as a tombstone with the log. The chain is the same four entries.",
+      "purged": true,
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izymgN1_JWtBgSvAcgnuiWxCAZJs8Rq1A9v6pqMaNmN2mt2bs2h1Sutu-Tr8zTL-BSvmaJHxfm4F0B2Q_gRFUf8wp7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiI1OGIxMmYyZDA2ZTE0N2RkNDg4ZmU2NThmNzdjNzY3NTIzYTZjMTZlMDUxMjg1NDcxZThhYTQwMDhmYTZkMDY0In0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izypCnw-7-moHnWZNiJLPN-XBHnDGyNMapwoUkgqQWqkTLzM22MlspzOgAvvhic32fwUs7HkoG-zlZtlUcH1IpxA57InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiN2NmMDA5ZDRlMTc4Nzk5YmE1Y2E3YTgyYWI0NTk4ODE3MWQwZjU5ZmYyMTlkNGI0ODY5YTY4NTJmZmZlOWEyMCIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiI2Vm5lTHNKU0d6clBzVXl3RTB3X2hnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyna2pj3a5CEtv9OPi7ilrckm713-kwLbcTTmdqkSGEvL_qKM5x2-sZv4VX-UIXS8mCycv3tyYjuehY0cqdVTEAJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiZTgzNmRjMzc1ZjI5NTVmMGY3NTA1MjVlZTU5ODJjYmM5YmJlNmUyYjNhNmY5MDZhZWU1NGIxMGEyODE1ODIyNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTIwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJZN1E0LXZrZkgxTjVTWjVsZGUtX0JnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyhdfE6hsA7FEF6oEgDQlP3fidQLn1xocuA8ZSjUd_rZ821ZPJMokj8COAuTkgBMcJSxOm5D246au8qV-ZBgxJg17InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJkZWxldGUiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTgwMDAwLCJkZWxldGVJZCI6IlpxRm9Fc0Z5TC1pY3BaeEdRVzBEOUEifQ"
+      ],
+      "entries": [
+        {
+          "seq": 0,
+          "kind": "genesis",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164800000,
+          "hash": "7cf009d4e178799ba5ca7a82ab45988171d0f59ff219d4b4869a6852fffe9a20"
+        },
+        {
+          "seq": 1,
+          "kind": "add",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164860000,
+          "hash": "e836dc375f2955f0f750525ee5982cbc9bbe6e2b3a6f906aee54b10a28158227"
+        },
+        {
+          "seq": 2,
+          "kind": "add",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164920000,
+          "hash": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3"
+        },
+        {
+          "seq": 3,
+          "kind": "delete",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164980000,
+          "hash": "3934af5d3a7b0a4e2ffc4400af5c2ddf81ab3c7240553553d90aab96549ec4ca"
+        }
+      ],
+      "head": {
+        "seq": 3,
+        "hash": "3934af5d3a7b0a4e2ffc4400af5c2ddf81ab3c7240553553d90aab96549ec4ca",
+        "at": 1763164980000
+      },
+      "grants": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "owner",
+          "revokedBy": "delete"
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "writer",
+          "revokedBy": "delete"
+        },
+        {
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "role": "reader",
+          "revokedBy": "delete"
+        }
+      ]
+    },
+    "left": {
+      "why": "live, then bob left: his own entry revoked his grant.",
+      "purged": false,
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izymgN1_JWtBgSvAcgnuiWxCAZJs8Rq1A9v6pqMaNmN2mt2bs2h1Sutu-Tr8zTL-BSvmaJHxfm4F0B2Q_gRFUf8wp7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiI1OGIxMmYyZDA2ZTE0N2RkNDg4ZmU2NThmNzdjNzY3NTIzYTZjMTZlMDUxMjg1NDcxZThhYTQwMDhmYTZkMDY0In0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izypCnw-7-moHnWZNiJLPN-XBHnDGyNMapwoUkgqQWqkTLzM22MlspzOgAvvhic32fwUs7HkoG-zlZtlUcH1IpxA57InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiN2NmMDA5ZDRlMTc4Nzk5YmE1Y2E3YTgyYWI0NTk4ODE3MWQwZjU5ZmYyMTlkNGI0ODY5YTY4NTJmZmZlOWEyMCIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiI2Vm5lTHNKU0d6clBzVXl3RTB3X2hnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyna2pj3a5CEtv9OPi7ilrckm713-kwLbcTTmdqkSGEvL_qKM5x2-sZv4VX-UIXS8mCycv3tyYjuehY0cqdVTEAJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiZTgzNmRjMzc1ZjI5NTVmMGY3NTA1MjVlZTU5ODJjYmM5YmJlNmUyYjNhNmY5MDZhZWU1NGIxMGEyODE1ODIyNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTIwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJZN1E0LXZrZkgxTjVTWjVsZGUtX0JnIn0",
+        "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAk2AaC5p-5xf0phf6Qm4hn4Iie93Ba8usvQ3s3P0SOu7TizZmzqIeTc1GoR8EQei4DPGX493rPDp5tO2fFtvtwR7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwiYXQiOjE3NjMxNjQ5ODAwMDB9"
+      ],
+      "entries": [
+        {
+          "seq": 0,
+          "kind": "genesis",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164800000,
+          "hash": "7cf009d4e178799ba5ca7a82ab45988171d0f59ff219d4b4869a6852fffe9a20"
+        },
+        {
+          "seq": 1,
+          "kind": "add",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164860000,
+          "hash": "e836dc375f2955f0f750525ee5982cbc9bbe6e2b3a6f906aee54b10a28158227"
+        },
+        {
+          "seq": 2,
+          "kind": "add",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164920000,
+          "hash": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3"
+        },
+        {
+          "seq": 3,
+          "kind": "leave",
+          "actor": "22222222-2222-4222-8222-222222222222",
+          "at": 1763164980000,
+          "hash": "9273ea24a51d326c9cbb9a54243aedfdb1a918f25b1abcc84947918beb1f34c9"
+        }
+      ],
+      "head": {
+        "seq": 3,
+        "hash": "9273ea24a51d326c9cbb9a54243aedfdb1a918f25b1abcc84947918beb1f34c9",
+        "at": 1763164980000
+      },
+      "grants": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "owner",
+          "revokedBy": null
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "writer",
+          "revokedBy": "leave"
+        },
+        {
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "role": "reader",
+          "revokedBy": null
+        }
+      ]
+    },
+    "declined": {
+      "why": "alice created the vault and added bob; bob declined, which signs a leave.",
+      "purged": false,
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izymgN1_JWtBgSvAcgnuiWxCAZJs8Rq1A9v6pqMaNmN2mt2bs2h1Sutu-Tr8zTL-BSvmaJHxfm4F0B2Q_gRFUf8wp7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiI1OGIxMmYyZDA2ZTE0N2RkNDg4ZmU2NThmNzdjNzY3NTIzYTZjMTZlMDUxMjg1NDcxZThhYTQwMDhmYTZkMDY0In0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izypCnw-7-moHnWZNiJLPN-XBHnDGyNMapwoUkgqQWqkTLzM22MlspzOgAvvhic32fwUs7HkoG-zlZtlUcH1IpxA57InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiN2NmMDA5ZDRlMTc4Nzk5YmE1Y2E3YTgyYWI0NTk4ODE3MWQwZjU5ZmYyMTlkNGI0ODY5YTY4NTJmZmZlOWEyMCIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiI2Vm5lTHNKU0d6clBzVXl3RTB3X2hnIn0",
+        "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAlmF3xGDWNuwPuzXwPpb4HzR6U4tR-ZHKqEb9lDV1x-ADsCBgFc1rf3mYVhW7jbvq3y9O5C-o4nzy88k5qYGZwF7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiZTgzNmRjMzc1ZjI5NTVmMGY3NTA1MjVlZTU5ODJjYmM5YmJlNmUyYjNhNmY5MDZhZWU1NGIxMGEyODE1ODIyNyIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwiYXQiOjE3NjMxNjQ5MjAwMDB9"
+      ],
+      "entries": [
+        {
+          "seq": 0,
+          "kind": "genesis",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164800000,
+          "hash": "7cf009d4e178799ba5ca7a82ab45988171d0f59ff219d4b4869a6852fffe9a20"
+        },
+        {
+          "seq": 1,
+          "kind": "add",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164860000,
+          "hash": "e836dc375f2955f0f750525ee5982cbc9bbe6e2b3a6f906aee54b10a28158227"
+        },
+        {
+          "seq": 2,
+          "kind": "leave",
+          "actor": "22222222-2222-4222-8222-222222222222",
+          "at": 1763164920000,
+          "hash": "ee3d10efffb0ee7fd7da07793d0c10a01c918df32a82fedf54f201d573b12b98"
+        }
+      ],
+      "head": {
+        "seq": 2,
+        "hash": "ee3d10efffb0ee7fd7da07793d0c10a01c918df32a82fedf54f201d573b12b98",
+        "at": 1763164920000
+      },
+      "grants": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "owner",
+          "revokedBy": null
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "writer",
+          "revokedBy": "leave"
+        }
+      ]
+    },
+    "removed": {
+      "why": "live, then the owner removed bob.",
+      "purged": false,
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izymgN1_JWtBgSvAcgnuiWxCAZJs8Rq1A9v6pqMaNmN2mt2bs2h1Sutu-Tr8zTL-BSvmaJHxfm4F0B2Q_gRFUf8wp7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiI1OGIxMmYyZDA2ZTE0N2RkNDg4ZmU2NThmNzdjNzY3NTIzYTZjMTZlMDUxMjg1NDcxZThhYTQwMDhmYTZkMDY0In0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izypCnw-7-moHnWZNiJLPN-XBHnDGyNMapwoUkgqQWqkTLzM22MlspzOgAvvhic32fwUs7HkoG-zlZtlUcH1IpxA57InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiN2NmMDA5ZDRlMTc4Nzk5YmE1Y2E3YTgyYWI0NTk4ODE3MWQwZjU5ZmYyMTlkNGI0ODY5YTY4NTJmZmZlOWEyMCIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiI2Vm5lTHNKU0d6clBzVXl3RTB3X2hnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyna2pj3a5CEtv9OPi7ilrckm713-kwLbcTTmdqkSGEvL_qKM5x2-sZv4VX-UIXS8mCycv3tyYjuehY0cqdVTEAJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiZTgzNmRjMzc1ZjI5NTVmMGY3NTA1MjVlZTU5ODJjYmM5YmJlNmUyYjNhNmY5MDZhZWU1NGIxMGEyODE1ODIyNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTIwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJZN1E0LXZrZkgxTjVTWjVsZGUtX0JnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izygeTfOlaAbHkZSaQrv-qJ3-7yFMvcqRWCdGsjuvtSMchlYWV6FVjRQCwF03jRKfAz9BqCB3p3lmqvqohz6KsHgx7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJyZW1vdmUiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTgwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIifQ"
+      ],
+      "entries": [
+        {
+          "seq": 0,
+          "kind": "genesis",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164800000,
+          "hash": "7cf009d4e178799ba5ca7a82ab45988171d0f59ff219d4b4869a6852fffe9a20"
+        },
+        {
+          "seq": 1,
+          "kind": "add",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164860000,
+          "hash": "e836dc375f2955f0f750525ee5982cbc9bbe6e2b3a6f906aee54b10a28158227"
+        },
+        {
+          "seq": 2,
+          "kind": "add",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164920000,
+          "hash": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3"
+        },
+        {
+          "seq": 3,
+          "kind": "remove",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164980000,
+          "hash": "fc179b7e3f317a759da9ebd0fc4e5a4eaa57c93af347030a01dc31b17ac0e8bd"
+        }
+      ],
+      "head": {
+        "seq": 3,
+        "hash": "fc179b7e3f317a759da9ebd0fc4e5a4eaa57c93af347030a01dc31b17ac0e8bd",
+        "at": 1763164980000
+      },
+      "grants": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "owner",
+          "revokedBy": null
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "writer",
+          "revokedBy": "remove"
+        },
+        {
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "role": "reader",
+          "revokedBy": null
+        }
+      ]
+    },
+    "readded": {
+      "why": "removed, then the owner added bob again.",
+      "purged": false,
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izymgN1_JWtBgSvAcgnuiWxCAZJs8Rq1A9v6pqMaNmN2mt2bs2h1Sutu-Tr8zTL-BSvmaJHxfm4F0B2Q_gRFUf8wp7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiI1OGIxMmYyZDA2ZTE0N2RkNDg4ZmU2NThmNzdjNzY3NTIzYTZjMTZlMDUxMjg1NDcxZThhYTQwMDhmYTZkMDY0In0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izypCnw-7-moHnWZNiJLPN-XBHnDGyNMapwoUkgqQWqkTLzM22MlspzOgAvvhic32fwUs7HkoG-zlZtlUcH1IpxA57InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiN2NmMDA5ZDRlMTc4Nzk5YmE1Y2E3YTgyYWI0NTk4ODE3MWQwZjU5ZmYyMTlkNGI0ODY5YTY4NTJmZmZlOWEyMCIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiI2Vm5lTHNKU0d6clBzVXl3RTB3X2hnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyna2pj3a5CEtv9OPi7ilrckm713-kwLbcTTmdqkSGEvL_qKM5x2-sZv4VX-UIXS8mCycv3tyYjuehY0cqdVTEAJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiZTgzNmRjMzc1ZjI5NTVmMGY3NTA1MjVlZTU5ODJjYmM5YmJlNmUyYjNhNmY5MDZhZWU1NGIxMGEyODE1ODIyNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTIwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJZN1E0LXZrZkgxTjVTWjVsZGUtX0JnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izygeTfOlaAbHkZSaQrv-qJ3-7yFMvcqRWCdGsjuvtSMchlYWV6FVjRQCwF03jRKfAz9BqCB3p3lmqvqohz6KsHgx7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJyZW1vdmUiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTgwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIifQ",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izytiwyqzcZNH3tq59bcT7Dy-YwaaJmOTo7IVM8fsphC2PGsFX_DtPZ5tmVfiyAX3b2Xcl1dMoiYVy0o0003zYtAl7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiZmMxNzliN2UzZjMxN2E3NTlkYTllYmQwZmM0ZTVhNGVhYTU3YzkzYWYzNDcwMzBhMDFkYzMxYjE3YWMwZThiZCIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY1MDQwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJ1Nk1pSjFVWTJ2aHJsbFBuLVdSMk5RIn0"
+      ],
+      "entries": [
+        {
+          "seq": 0,
+          "kind": "genesis",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164800000,
+          "hash": "7cf009d4e178799ba5ca7a82ab45988171d0f59ff219d4b4869a6852fffe9a20"
+        },
+        {
+          "seq": 1,
+          "kind": "add",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164860000,
+          "hash": "e836dc375f2955f0f750525ee5982cbc9bbe6e2b3a6f906aee54b10a28158227"
+        },
+        {
+          "seq": 2,
+          "kind": "add",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164920000,
+          "hash": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3"
+        },
+        {
+          "seq": 3,
+          "kind": "remove",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164980000,
+          "hash": "fc179b7e3f317a759da9ebd0fc4e5a4eaa57c93af347030a01dc31b17ac0e8bd"
+        },
+        {
+          "seq": 4,
+          "kind": "add",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763165040000,
+          "hash": "115c0ed0f4ce12d6985cf7a616d6c3d0ff276a941c763bd13e7678a963aeacfc"
+        }
+      ],
+      "head": {
+        "seq": 4,
+        "hash": "115c0ed0f4ce12d6985cf7a616d6c3d0ff276a941c763bd13e7678a963aeacfc",
+        "at": 1763165040000
+      },
+      "grants": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "owner",
+          "revokedBy": null
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "writer",
+          "revokedBy": null
+        },
+        {
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "role": "reader",
+          "revokedBy": null
+        }
+      ]
+    },
+    "left-in-grace": {
+      "why": "deleted, then bob left during the grace period: his revocation is no longer the delete's.",
+      "purged": false,
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izymgN1_JWtBgSvAcgnuiWxCAZJs8Rq1A9v6pqMaNmN2mt2bs2h1Sutu-Tr8zTL-BSvmaJHxfm4F0B2Q_gRFUf8wp7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiI1OGIxMmYyZDA2ZTE0N2RkNDg4ZmU2NThmNzdjNzY3NTIzYTZjMTZlMDUxMjg1NDcxZThhYTQwMDhmYTZkMDY0In0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izypCnw-7-moHnWZNiJLPN-XBHnDGyNMapwoUkgqQWqkTLzM22MlspzOgAvvhic32fwUs7HkoG-zlZtlUcH1IpxA57InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiN2NmMDA5ZDRlMTc4Nzk5YmE1Y2E3YTgyYWI0NTk4ODE3MWQwZjU5ZmYyMTlkNGI0ODY5YTY4NTJmZmZlOWEyMCIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiI2Vm5lTHNKU0d6clBzVXl3RTB3X2hnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyna2pj3a5CEtv9OPi7ilrckm713-kwLbcTTmdqkSGEvL_qKM5x2-sZv4VX-UIXS8mCycv3tyYjuehY0cqdVTEAJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiZTgzNmRjMzc1ZjI5NTVmMGY3NTA1MjVlZTU5ODJjYmM5YmJlNmUyYjNhNmY5MDZhZWU1NGIxMGEyODE1ODIyNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTIwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJZN1E0LXZrZkgxTjVTWjVsZGUtX0JnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyhdfE6hsA7FEF6oEgDQlP3fidQLn1xocuA8ZSjUd_rZ821ZPJMokj8COAuTkgBMcJSxOm5D246au8qV-ZBgxJg17InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJkZWxldGUiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTgwMDAwLCJkZWxldGVJZCI6IlpxRm9Fc0Z5TC1pY3BaeEdRVzBEOUEifQ",
+        "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxArnp8-5PLLIN0onwiHbOSJW___MZvygv6qhYkOQ1WawSeP6nYCbLDP50e-ti2lL3RPHlc-MvlD8BiGc2uYoKEwJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiMzkzNGFmNWQzYTdiMGE0ZTJmZmM0NDAwYWY1YzJkZGY4MWFiM2M3MjQwNTUzNTUzZDkwYWFiOTY1NDllYzRjYSIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwiYXQiOjE3NjMxNjUwNDAwMDB9"
+      ],
+      "entries": [
+        {
+          "seq": 0,
+          "kind": "genesis",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164800000,
+          "hash": "7cf009d4e178799ba5ca7a82ab45988171d0f59ff219d4b4869a6852fffe9a20"
+        },
+        {
+          "seq": 1,
+          "kind": "add",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164860000,
+          "hash": "e836dc375f2955f0f750525ee5982cbc9bbe6e2b3a6f906aee54b10a28158227"
+        },
+        {
+          "seq": 2,
+          "kind": "add",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164920000,
+          "hash": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3"
+        },
+        {
+          "seq": 3,
+          "kind": "delete",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164980000,
+          "hash": "3934af5d3a7b0a4e2ffc4400af5c2ddf81ab3c7240553553d90aab96549ec4ca"
+        },
+        {
+          "seq": 4,
+          "kind": "leave",
+          "actor": "22222222-2222-4222-8222-222222222222",
+          "at": 1763165040000,
+          "hash": "b8c495a9350de0353eb973404f455588ebc74d4811f5cf18c7ba7ab4ab4967fc"
+        }
+      ],
+      "head": {
+        "seq": 4,
+        "hash": "b8c495a9350de0353eb973404f455588ebc74d4811f5cf18c7ba7ab4ab4967fc",
+        "at": 1763165040000
+      },
+      "grants": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "owner",
+          "revokedBy": "delete"
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "writer",
+          "revokedBy": "leave"
+        },
+        {
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "role": "reader",
+          "revokedBy": "delete"
+        }
+      ]
+    },
+    "restored-after-a-leave": {
+      "why": "left-in-grace, then the owner restored the vault: the restore re-granted carol and skipped bob.",
+      "purged": false,
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izymgN1_JWtBgSvAcgnuiWxCAZJs8Rq1A9v6pqMaNmN2mt2bs2h1Sutu-Tr8zTL-BSvmaJHxfm4F0B2Q_gRFUf8wp7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiI1OGIxMmYyZDA2ZTE0N2RkNDg4ZmU2NThmNzdjNzY3NTIzYTZjMTZlMDUxMjg1NDcxZThhYTQwMDhmYTZkMDY0In0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izypCnw-7-moHnWZNiJLPN-XBHnDGyNMapwoUkgqQWqkTLzM22MlspzOgAvvhic32fwUs7HkoG-zlZtlUcH1IpxA57InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiN2NmMDA5ZDRlMTc4Nzk5YmE1Y2E3YTgyYWI0NTk4ODE3MWQwZjU5ZmYyMTlkNGI0ODY5YTY4NTJmZmZlOWEyMCIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiI2Vm5lTHNKU0d6clBzVXl3RTB3X2hnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyna2pj3a5CEtv9OPi7ilrckm713-kwLbcTTmdqkSGEvL_qKM5x2-sZv4VX-UIXS8mCycv3tyYjuehY0cqdVTEAJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiZTgzNmRjMzc1ZjI5NTVmMGY3NTA1MjVlZTU5ODJjYmM5YmJlNmUyYjNhNmY5MDZhZWU1NGIxMGEyODE1ODIyNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTIwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJZN1E0LXZrZkgxTjVTWjVsZGUtX0JnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyhdfE6hsA7FEF6oEgDQlP3fidQLn1xocuA8ZSjUd_rZ821ZPJMokj8COAuTkgBMcJSxOm5D246au8qV-ZBgxJg17InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJkZWxldGUiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTgwMDAwLCJkZWxldGVJZCI6IlpxRm9Fc0Z5TC1pY3BaeEdRVzBEOUEifQ",
+        "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxArnp8-5PLLIN0onwiHbOSJW___MZvygv6qhYkOQ1WawSeP6nYCbLDP50e-ti2lL3RPHlc-MvlD8BiGc2uYoKEwJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiMzkzNGFmNWQzYTdiMGE0ZTJmZmM0NDAwYWY1YzJkZGY4MWFiM2M3MjQwNTUzNTUzZDkwYWFiOTY1NDllYzRjYSIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwiYXQiOjE3NjMxNjUwNDAwMDB9",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyv9kDFoih45wGBV8gHKfjT1KW-2eGpiMH8gn46e5SLMGYCRwH98XtvAx1jScpG4EVG6U0pmQOwCl3MLS25PufwN7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo1LCJwcmV2IjoiYjhjNDk1YTkzNTBkZTAzNTNlYjk3MzQwNGY0NTU1ODhlYmM3NGQ0ODExZjVjZjE4YzdiYTdhYjRhYjQ5NjdmYyIsImtpbmQiOiJyZXN0b3JlIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NTEwMDAwMCwiZGVsZXRlSWQiOiJacUZvRXNGeUwtaWNwWnhHUVcwRDlBIn0"
+      ],
+      "entries": [
+        {
+          "seq": 0,
+          "kind": "genesis",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164800000,
+          "hash": "7cf009d4e178799ba5ca7a82ab45988171d0f59ff219d4b4869a6852fffe9a20"
+        },
+        {
+          "seq": 1,
+          "kind": "add",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164860000,
+          "hash": "e836dc375f2955f0f750525ee5982cbc9bbe6e2b3a6f906aee54b10a28158227"
+        },
+        {
+          "seq": 2,
+          "kind": "add",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164920000,
+          "hash": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3"
+        },
+        {
+          "seq": 3,
+          "kind": "delete",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164980000,
+          "hash": "3934af5d3a7b0a4e2ffc4400af5c2ddf81ab3c7240553553d90aab96549ec4ca"
+        },
+        {
+          "seq": 4,
+          "kind": "leave",
+          "actor": "22222222-2222-4222-8222-222222222222",
+          "at": 1763165040000,
+          "hash": "b8c495a9350de0353eb973404f455588ebc74d4811f5cf18c7ba7ab4ab4967fc"
+        },
+        {
+          "seq": 5,
+          "kind": "restore",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763165100000,
+          "hash": "c9aae9ea04fe78638a4825d06874e12f8b6e2e5621ae460b5e17bb0fd50ff92a"
+        }
+      ],
+      "head": {
+        "seq": 5,
+        "hash": "c9aae9ea04fe78638a4825d06874e12f8b6e2e5621ae460b5e17bb0fd50ff92a",
+        "at": 1763165100000
+      },
+      "grants": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "owner",
+          "revokedBy": null
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "writer",
+          "revokedBy": "leave"
+        },
+        {
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "role": "reader",
+          "revokedBy": null
+        }
+      ]
+    },
+    "offered": {
+      "why": "live, then the owner offered the vault to bob for 7 days.",
+      "purged": false,
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izymgN1_JWtBgSvAcgnuiWxCAZJs8Rq1A9v6pqMaNmN2mt2bs2h1Sutu-Tr8zTL-BSvmaJHxfm4F0B2Q_gRFUf8wp7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiI1OGIxMmYyZDA2ZTE0N2RkNDg4ZmU2NThmNzdjNzY3NTIzYTZjMTZlMDUxMjg1NDcxZThhYTQwMDhmYTZkMDY0In0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izypCnw-7-moHnWZNiJLPN-XBHnDGyNMapwoUkgqQWqkTLzM22MlspzOgAvvhic32fwUs7HkoG-zlZtlUcH1IpxA57InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiN2NmMDA5ZDRlMTc4Nzk5YmE1Y2E3YTgyYWI0NTk4ODE3MWQwZjU5ZmYyMTlkNGI0ODY5YTY4NTJmZmZlOWEyMCIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiI2Vm5lTHNKU0d6clBzVXl3RTB3X2hnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyna2pj3a5CEtv9OPi7ilrckm713-kwLbcTTmdqkSGEvL_qKM5x2-sZv4VX-UIXS8mCycv3tyYjuehY0cqdVTEAJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiZTgzNmRjMzc1ZjI5NTVmMGY3NTA1MjVlZTU5ODJjYmM5YmJlNmUyYjNhNmY5MDZhZWU1NGIxMGEyODE1ODIyNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTIwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJZN1E0LXZrZkgxTjVTWjVsZGUtX0JnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyqoa28ODJcU_8kVMg_uNFsfnRFDtxqMriwIVRGgMQ8pCLaHINCs9X3T92GMt4MOJsR3uAYNV6p8Yz7OTs9a2-QR7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJvZmZlciIsImFjdG9yIjoiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIiwiYXQiOjE3NjMxNjQ5ODAwMDAsInRvIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwidG9LZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwib2ZmZXJJZCI6IkMxYTVfb2M3ZUJoNlNZS3M5cXNjblEiLCJleHBpcmVzQXQiOjE3NjM3Njk3ODAwMDB9"
+      ],
+      "entries": [
+        {
+          "seq": 0,
+          "kind": "genesis",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164800000,
+          "hash": "7cf009d4e178799ba5ca7a82ab45988171d0f59ff219d4b4869a6852fffe9a20"
+        },
+        {
+          "seq": 1,
+          "kind": "add",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164860000,
+          "hash": "e836dc375f2955f0f750525ee5982cbc9bbe6e2b3a6f906aee54b10a28158227"
+        },
+        {
+          "seq": 2,
+          "kind": "add",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164920000,
+          "hash": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3"
+        },
+        {
+          "seq": 3,
+          "kind": "offer",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164980000,
+          "hash": "799c558850ae67d5abee43732eaaf5c485b75adfe2ce72adbef056f9f08c4cde"
+        }
+      ],
+      "head": {
+        "seq": 3,
+        "hash": "799c558850ae67d5abee43732eaaf5c485b75adfe2ce72adbef056f9f08c4cde",
+        "at": 1763164980000
+      },
+      "grants": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "owner",
+          "revokedBy": null
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "writer",
+          "revokedBy": null
+        },
+        {
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "role": "reader",
+          "revokedBy": null
+        }
+      ]
+    },
+    "transferred": {
+      "why": "offered, then bob accepted: bob is the owner and alice a writer.",
+      "purged": false,
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izymgN1_JWtBgSvAcgnuiWxCAZJs8Rq1A9v6pqMaNmN2mt2bs2h1Sutu-Tr8zTL-BSvmaJHxfm4F0B2Q_gRFUf8wp7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiI1OGIxMmYyZDA2ZTE0N2RkNDg4ZmU2NThmNzdjNzY3NTIzYTZjMTZlMDUxMjg1NDcxZThhYTQwMDhmYTZkMDY0In0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izypCnw-7-moHnWZNiJLPN-XBHnDGyNMapwoUkgqQWqkTLzM22MlspzOgAvvhic32fwUs7HkoG-zlZtlUcH1IpxA57InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiN2NmMDA5ZDRlMTc4Nzk5YmE1Y2E3YTgyYWI0NTk4ODE3MWQwZjU5ZmYyMTlkNGI0ODY5YTY4NTJmZmZlOWEyMCIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiI2Vm5lTHNKU0d6clBzVXl3RTB3X2hnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyna2pj3a5CEtv9OPi7ilrckm713-kwLbcTTmdqkSGEvL_qKM5x2-sZv4VX-UIXS8mCycv3tyYjuehY0cqdVTEAJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiZTgzNmRjMzc1ZjI5NTVmMGY3NTA1MjVlZTU5ODJjYmM5YmJlNmUyYjNhNmY5MDZhZWU1NGIxMGEyODE1ODIyNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTIwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJZN1E0LXZrZkgxTjVTWjVsZGUtX0JnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyqoa28ODJcU_8kVMg_uNFsfnRFDtxqMriwIVRGgMQ8pCLaHINCs9X3T92GMt4MOJsR3uAYNV6p8Yz7OTs9a2-QR7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJvZmZlciIsImFjdG9yIjoiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIiwiYXQiOjE3NjMxNjQ5ODAwMDAsInRvIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwidG9LZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwib2ZmZXJJZCI6IkMxYTVfb2M3ZUJoNlNZS3M5cXNjblEiLCJleHBpcmVzQXQiOjE3NjM3Njk3ODAwMDB9",
+        "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAnCQ_otL4Xe-R-T3LnnY2UbMvr_H-mckBc9a4kRsWPa2ffGW24Hqg9MBeuigXzBqVAtioZFQ-i9LOg8p35FaoAF7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiNzk5YzU1ODg1MGFlNjdkNWFiZWU0MzczMmVhYWY1YzQ4NWI3NWFkZmUyY2U3MmFkYmVmMDU2ZjlmMDhjNGNkZSIsImtpbmQiOiJhY2NlcHQiLCJhY3RvciI6IjIyMjIyMjIyLTIyMjItNDIyMi04MjIyLTIyMjIyMjIyMjIyMiIsImF0IjoxNzYzMTY1MDQwMDAwLCJvZmZlcklkIjoiQzFhNV9vYzdlQmg2U1lLczlxc2NuUSJ9"
+      ],
+      "entries": [
+        {
+          "seq": 0,
+          "kind": "genesis",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164800000,
+          "hash": "7cf009d4e178799ba5ca7a82ab45988171d0f59ff219d4b4869a6852fffe9a20"
+        },
+        {
+          "seq": 1,
+          "kind": "add",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164860000,
+          "hash": "e836dc375f2955f0f750525ee5982cbc9bbe6e2b3a6f906aee54b10a28158227"
+        },
+        {
+          "seq": 2,
+          "kind": "add",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164920000,
+          "hash": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3"
+        },
+        {
+          "seq": 3,
+          "kind": "offer",
+          "actor": "11111111-1111-4111-8111-111111111111",
+          "at": 1763164980000,
+          "hash": "799c558850ae67d5abee43732eaaf5c485b75adfe2ce72adbef056f9f08c4cde"
+        },
+        {
+          "seq": 4,
+          "kind": "accept",
+          "actor": "22222222-2222-4222-8222-222222222222",
+          "at": 1763165040000,
+          "hash": "c023a40e034b9d66149babcc6e7ef6095507bb9aed9f838797c5db9dcfe3d160"
+        }
+      ],
+      "head": {
+        "seq": 4,
+        "hash": "c023a40e034b9d66149babcc6e7ef6095507bb9aed9f838797c5db9dcfe3d160",
+        "at": 1763165040000
+      },
+      "grants": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "writer",
+          "revokedBy": null
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "owner",
+          "revokedBy": null
+        },
+        {
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "role": "reader",
+          "revokedBy": null
+        }
+      ]
+    }
+  },
+  "rows": [
+    {
+      "name": "owner-adds-a-member",
+      "why": "The owner appends an add at the stored head plus one.",
+      "stored": "live",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "add",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "member": "44444444-4444-4444-8444-444444444444",
+        "memberKey": "Wd8NgIFBR0r_DaXgoiTIpzh-IrIoM2zfTGlAZUGc2FU",
+        "role": "reader",
+        "grantId": "sjNsfAde3v70hrOToXwGvA"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyt_1g1erU6zL5HhOc2kcNk6gEm7bKaHejzXyzZyrc7Eoa_D-gQMYyq8EqlO6VuJ8NO6YAxyKTqbO67WMk27DKQR7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTcyMDAwMDAwLCJtZW1iZXIiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJtZW1iZXJLZXkiOiJXZDhOZ0lGQlIwcl9EYVhnb2lUSXB6aC1JcklvTTJ6ZlRHbEFaVUdjMkZVIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJzak5zZkFkZTN2NzBock9Ub1h3R3ZBIn0",
+      "expect": {
+        "status": 200,
+        "appended": true
+      },
+      "grantsAfter": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "owner",
+          "revokedBy": null
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "writer",
+          "revokedBy": null
+        },
+        {
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "role": "reader",
+          "revokedBy": null
+        },
+        {
+          "userId": "44444444-4444-4444-8444-444444444444",
+          "role": "reader",
+          "revokedBy": null
+        }
+      ]
+    },
+    {
+      "name": "member-leaves",
+      "why": "A member appends its own leave: any member may. The entry's effect revokes its grant.",
+      "stored": "live",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "leave",
+        "actor": "22222222-2222-4222-8222-222222222222",
+        "at": 1763172000000
+      },
+      "frameB64": "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAj00MGPhrSupEXTrBep0wczGNqeHp0PEVnC3J3MLbMFp_HBKrgtgR-kJZqezYhJPvonBNyKUueBRQZSdF1IKdw97InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwiYXQiOjE3NjMxNzIwMDAwMDB9",
+      "expect": {
+        "status": 200,
+        "appended": true
+      },
+      "grantsAfter": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "owner",
+          "revokedBy": null
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "writer",
+          "revokedBy": "leave"
+        },
+        {
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "role": "reader",
+          "revokedBy": null
+        }
+      ]
+    },
+    {
+      "name": "genesis-creates-the-vault",
+      "why": "A genesis for an unused vault id: there is no vault and no grant to resolve.",
+      "stored": "none",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 0,
+        "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "genesis",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "ownerKey": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "vkCommit": "58b12f2d06e147dd488fe658f77c767523a6c16e051285471e8aa4008fa6d064"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyktgH47suBC7ugs9b0N7wurSJ2HTUEnUmBWijYguEv_Hls16--v3MVBbImq5pwT1wd7wt3-H4rDLDANQdKgjfgt7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE3MjAwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiI1OGIxMmYyZDA2ZTE0N2RkNDg4ZmU2NThmNzdjNzY3NTIzYTZjMTZlMDUxMjg1NDcxZThhYTQwMDhmYTZkMDY0In0",
+      "expect": {
+        "status": 200,
+        "appended": true
+      },
+      "grantsAfter": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "owner",
+          "revokedBy": null
+        }
+      ]
+    },
+    {
+      "name": "retried-add",
+      "why": "A frame byte-identical to one already stored, posted again by its actor: 200, and nothing changes. The stored frame need not be the head.",
+      "stored": "live",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 1,
+        "prev": "7cf009d4e178799ba5ca7a82ab45988171d0f59ff219d4b4869a6852fffe9a20",
+        "kind": "add",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763164860000,
+        "member": "22222222-2222-4222-8222-222222222222",
+        "memberKey": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM",
+        "role": "writer",
+        "grantId": "6VneLsJSGzrPsUywE0w_hg"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izypCnw-7-moHnWZNiJLPN-XBHnDGyNMapwoUkgqQWqkTLzM22MlspzOgAvvhic32fwUs7HkoG-zlZtlUcH1IpxA57InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiN2NmMDA5ZDRlMTc4Nzk5YmE1Y2E3YTgyYWI0NTk4ODE3MWQwZjU5ZmYyMTlkNGI0ODY5YTY4NTJmZmZlOWEyMCIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiI2Vm5lTHNKU0d6clBzVXl3RTB3X2hnIn0",
+      "expect": {
+        "status": 200,
+        "appended": false
+      }
+    },
+    {
+      "name": "retried-genesis",
+      "why": "The stored genesis posted again by its creator: the retry rule comes before the genesis rule, so this is 200, not vault_id_taken.",
+      "stored": "live",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 0,
+        "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "genesis",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763164800000,
+        "ownerKey": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "vkCommit": "58b12f2d06e147dd488fe658f77c767523a6c16e051285471e8aa4008fa6d064"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izymgN1_JWtBgSvAcgnuiWxCAZJs8Rq1A9v6pqMaNmN2mt2bs2h1Sutu-Tr8zTL-BSvmaJHxfm4F0B2Q_gRFUf8wp7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiI1OGIxMmYyZDA2ZTE0N2RkNDg4ZmU2NThmNzdjNzY3NTIzYTZjMTZlMDUxMjg1NDcxZThhYTQwMDhmYTZkMDY0In0",
+      "expect": {
+        "status": 200,
+        "appended": false
+      }
+    },
+    {
+      "name": "retried-delete",
+      "why": "A retried byte-identical delete: 200, although the delete revoked the owner's own grant.",
+      "stored": "deleted",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "delete",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763164980000,
+        "deleteId": "ZqFoEsFyL-icpZxGQW0D9A"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyhdfE6hsA7FEF6oEgDQlP3fidQLn1xocuA8ZSjUd_rZ821ZPJMokj8COAuTkgBMcJSxOm5D246au8qV-ZBgxJg17InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJkZWxldGUiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTgwMDAwLCJkZWxldGVJZCI6IlpxRm9Fc0Z5TC1pY3BaeEdRVzBEOUEifQ",
+      "expect": {
+        "status": 200,
+        "appended": false
+      }
+    },
+    {
+      "name": "retried-leave",
+      "why": "A retried leave whose own effect revoked the caller's grant: 200, before any grant check.",
+      "stored": "left",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "leave",
+        "actor": "22222222-2222-4222-8222-222222222222",
+        "at": 1763164980000
+      },
+      "frameB64": "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAk2AaC5p-5xf0phf6Qm4hn4Iie93Ba8usvQ3s3P0SOu7TizZmzqIeTc1GoR8EQei4DPGX493rPDp5tO2fFtvtwR7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwiYXQiOjE3NjMxNjQ5ODAwMDB9",
+      "expect": {
+        "status": 200,
+        "appended": false
+      }
+    },
+    {
+      "name": "retried-decline",
+      "why": "A decline is a leave. Its retry gets the same 200.",
+      "stored": "declined",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 2,
+        "prev": "e836dc375f2955f0f750525ee5982cbc9bbe6e2b3a6f906aee54b10a28158227",
+        "kind": "leave",
+        "actor": "22222222-2222-4222-8222-222222222222",
+        "at": 1763164920000
+      },
+      "frameB64": "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAlmF3xGDWNuwPuzXwPpb4HzR6U4tR-ZHKqEb9lDV1x-ADsCBgFc1rf3mYVhW7jbvq3y9O5C-o4nzy88k5qYGZwF7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiZTgzNmRjMzc1ZjI5NTVmMGY3NTA1MjVlZTU5ODJjYmM5YmJlNmUyYjNhNmY5MDZhZWU1NGIxMGEyODE1ODIyNyIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwiYXQiOjE3NjMxNjQ5MjAwMDB9",
+      "expect": {
+        "status": 200,
+        "appended": false
+      }
+    },
+    {
+      "name": "retried-leave-in-grace",
+      "why": "The retry of a leave that was appended during the grace period.",
+      "stored": "left-in-grace",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "3934af5d3a7b0a4e2ffc4400af5c2ddf81ab3c7240553553d90aab96549ec4ca",
+        "kind": "leave",
+        "actor": "22222222-2222-4222-8222-222222222222",
+        "at": 1763165040000
+      },
+      "frameB64": "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxArnp8-5PLLIN0onwiHbOSJW___MZvygv6qhYkOQ1WawSeP6nYCbLDP50e-ti2lL3RPHlc-MvlD8BiGc2uYoKEwJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiMzkzNGFmNWQzYTdiMGE0ZTJmZmM0NDAwYWY1YzJkZGY4MWFiM2M3MjQwNTUzNTUzZDkwYWFiOTY1NDllYzRjYSIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwiYXQiOjE3NjMxNjUwNDAwMDB9",
+      "expect": {
+        "status": 200,
+        "appended": false
+      }
+    },
+    {
+      "name": "retried-leave-after-the-restore",
+      "why": "The same stored leave posted again after the owner restored the vault: still a byte-identical stored frame from its actor.",
+      "stored": "restored-after-a-leave",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "3934af5d3a7b0a4e2ffc4400af5c2ddf81ab3c7240553553d90aab96549ec4ca",
+        "kind": "leave",
+        "actor": "22222222-2222-4222-8222-222222222222",
+        "at": 1763165040000
+      },
+      "frameB64": "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxArnp8-5PLLIN0onwiHbOSJW___MZvygv6qhYkOQ1WawSeP6nYCbLDP50e-ti2lL3RPHlc-MvlD8BiGc2uYoKEwJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiMzkzNGFmNWQzYTdiMGE0ZTJmZmM0NDAwYWY1YzJkZGY4MWFiM2M3MjQwNTUzNTUzZDkwYWFiOTY1NDllYzRjYSIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwiYXQiOjE3NjMxNjUwNDAwMDB9",
+      "expect": {
+        "status": 200,
+        "appended": false
+      }
+    },
+    {
+      "name": "stored-frame-posted-by-another-account",
+      "why": "A stored frame posted by an account that is not its actor. The retry rule needs actor = the caller, which step 4 checks first: bad_signer, and a non-member learns nothing.",
+      "stored": "live",
+      "caller": "dave",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 1,
+        "prev": "7cf009d4e178799ba5ca7a82ab45988171d0f59ff219d4b4869a6852fffe9a20",
+        "kind": "add",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763164860000,
+        "member": "22222222-2222-4222-8222-222222222222",
+        "memberKey": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM",
+        "role": "writer",
+        "grantId": "6VneLsJSGzrPsUywE0w_hg"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izypCnw-7-moHnWZNiJLPN-XBHnDGyNMapwoUkgqQWqkTLzM22MlspzOgAvvhic32fwUs7HkoG-zlZtlUcH1IpxA57InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiN2NmMDA5ZDRlMTc4Nzk5YmE1Y2E3YTgyYWI0NTk4ODE3MWQwZjU5ZmYyMTlkNGI0ODY5YTY4NTJmZmZlOWEyMCIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiI2Vm5lTHNKU0d6clBzVXl3RTB3X2hnIn0",
+      "expect": {
+        "status": 400,
+        "error": "bad_signer"
+      }
+    },
+    {
+      "name": "non-member-post",
+      "why": "A non-member posts an entry at the right position: no_grant, with no head in the answer. (The verifier would say precondition; it is never reached.)",
+      "stored": "live",
+      "caller": "dave",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "leave",
+        "actor": "44444444-4444-4444-8444-444444444444",
+        "at": 1763172000000
+      },
+      "frameB64": "YXZzAgNpCZezS1bv2X0cNptlZ_eGlW0Av0AWI_M9WLV1HYY6G_kFHF2bU06y1ZHOwMPaLiyXIiaAGILMckTLcxEgo_9cdxxDO53aARFQP7Y5TfaL7Ja-KyNcvNqOCYxzhM-BmQp7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiNDQ0NDQ0NDQtNDQ0NC00NDQ0LTg0NDQtNDQ0NDQ0NDQ0NDQ0IiwiYXQiOjE3NjMxNzIwMDAwMDB9",
+      "expect": {
+        "status": 403,
+        "error": "no_grant"
+      }
+    },
+    {
+      "name": "non-member-post-at-a-stale-position",
+      "why": "A non-member posts at a position that is not the head plus one. Access (step 5) comes before position (step 6), so the answer is no_grant and carries no head: a non-member never learns it.",
+      "stored": "live",
+      "caller": "dave",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 1,
+        "prev": "7cf009d4e178799ba5ca7a82ab45988171d0f59ff219d4b4869a6852fffe9a20",
+        "kind": "leave",
+        "actor": "44444444-4444-4444-8444-444444444444",
+        "at": 1763172000000
+      },
+      "frameB64": "YXZzAgNpCZezS1bv2X0cNptlZ_eGlW0Av0AWI_M9WLV1HYY6G6SY_sSSTP02G1FtBzjDEVHhfbW4iIJi2-XaXPrzmBHT9-WZw2Ke7ExktzyTd815or33sr39thZnvWzWi0eQ4gh7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiN2NmMDA5ZDRlMTc4Nzk5YmE1Y2E3YTgyYWI0NTk4ODE3MWQwZjU5ZmYyMTlkNGI0ODY5YTY4NTJmZmZlOWEyMCIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiNDQ0NDQ0NDQtNDQ0NC00NDQ0LTg0NDQtNDQ0NDQ0NDQ0NDQ0IiwiYXQiOjE3NjMxNzIwMDAwMDB9",
+      "expect": {
+        "status": 403,
+        "error": "no_grant"
+      }
+    },
+    {
+      "name": "non-member-posts-an-owner-kind",
+      "why": "A non-member posts an add as itself: the grant is resolved before the role, so no_grant, not not_vault_owner.",
+      "stored": "live",
+      "caller": "dave",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "add",
+        "actor": "44444444-4444-4444-8444-444444444444",
+        "at": 1763172000000,
+        "member": "55555555-5555-4555-8555-555555555555",
+        "memberKey": "idcWup4jpVd3IG-tizczj0Ynp5ZcLkT0zu190dJ3L30",
+        "role": "reader",
+        "grantId": "RbrsllprkEiP030DHhiRfg"
+      },
+      "frameB64": "YXZzAgNpCZezS1bv2X0cNptlZ_eGlW0Av0AWI_M9WLV1HYY6G8D9RxOP9DkdvfoGCEAveuXITc9QTfjINWKWDU7tbLyn44vTcxoPhQ0_cmHS0K0X8WshMk2Ic06a0j2AdR0OFQB7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjQ0NDQ0NDQ0LTQ0NDQtNDQ0NC04NDQ0LTQ0NDQ0NDQ0NDQ0NCIsImF0IjoxNzYzMTcyMDAwMDAwLCJtZW1iZXIiOiI1NTU1NTU1NS01NTU1LTQ1NTUtODU1NS01NTU1NTU1NTU1NTUiLCJtZW1iZXJLZXkiOiJpZGNXdXA0anBWZDNJRy10aXpjemowWW5wNVpjTGtUMHp1MTkwZEozTDMwIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJSYnJzbGxwcmtFaVAwMzBESGhpUmZnIn0",
+      "expect": {
+        "status": 403,
+        "error": "no_grant"
+      }
+    },
+    {
+      "name": "unknown-vault",
+      "why": "An entry other than a genesis for a vault id that does not exist: no_grant, the same answer a non-member gets.",
+      "stored": "none",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "add",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "member": "44444444-4444-4444-8444-444444444444",
+        "memberKey": "Wd8NgIFBR0r_DaXgoiTIpzh-IrIoM2zfTGlAZUGc2FU",
+        "role": "reader",
+        "grantId": "sjNsfAde3v70hrOToXwGvA"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyt_1g1erU6zL5HhOc2kcNk6gEm7bKaHejzXyzZyrc7Eoa_D-gQMYyq8EqlO6VuJ8NO6YAxyKTqbO67WMk27DKQR7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTcyMDAwMDAwLCJtZW1iZXIiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJtZW1iZXJLZXkiOiJXZDhOZ0lGQlIwcl9EYVhnb2lUSXB6aC1JcklvTTJ6ZlRHbEFaVUdjMkZVIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJzak5zZkFkZTN2NzBock9Ub1h3R3ZBIn0",
+      "expect": {
+        "status": 403,
+        "error": "no_grant"
+      }
+    },
+    {
+      "name": "removed-member-posts",
+      "why": "bob was removed. A grant revoked for any reason but the vault's delete never counts.",
+      "stored": "removed",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "fc179b7e3f317a759da9ebd0fc4e5a4eaa57c93af347030a01dc31b17ac0e8bd",
+        "kind": "leave",
+        "actor": "22222222-2222-4222-8222-222222222222",
+        "at": 1763172000000
+      },
+      "frameB64": "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxArjcmduzBPQuP0hE3KbyViABWUdEKQGjZHMNzmu2fZ2kbiLX-JkrfVhdutYvpfsRdt1EDBgPuB2qSFISKYzeAQh7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiZmMxNzliN2UzZjMxN2E3NTlkYTllYmQwZmM0ZTVhNGVhYTU3YzkzYWYzNDcwMzBhMDFkYzMxYjE3YWMwZThiZCIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwiYXQiOjE3NjMxNzIwMDAwMDB9",
+      "expect": {
+        "status": 403,
+        "error": "no_grant"
+      }
+    },
+    {
+      "name": "removed-member-posts-at-a-stale-position",
+      "why": "The removed member at a stale position: still no_grant, and no head.",
+      "stored": "removed",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "e836dc375f2955f0f750525ee5982cbc9bbe6e2b3a6f906aee54b10a28158227",
+        "kind": "leave",
+        "actor": "22222222-2222-4222-8222-222222222222",
+        "at": 1763172000000
+      },
+      "frameB64": "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAiWQNU1fAXWcEg0hVRcQ3XXwhXpn1BVaFoXYkItED9V2EIUlISjBLbg7AQOMP-q43uVXI5ly5ruNEPwLTAYR_Ap7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZTgzNmRjMzc1ZjI5NTVmMGY3NTA1MjVlZTU5ODJjYmM5YmJlNmUyYjNhNmY5MDZhZWU1NGIxMGEyODE1ODIyNyIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwiYXQiOjE3NjMxNzIwMDAwMDB9",
+      "expect": {
+        "status": 403,
+        "error": "no_grant"
+      }
+    },
+    {
+      "name": "resigned-leave",
+      "why": "bob's leave is stored. He signs ANOTHER leave (a new `at`) instead of re-posting the same bytes: it is not a retry, and his grant is revoked by his own leave.",
+      "stored": "left",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "9273ea24a51d326c9cbb9a54243aedfdb1a918f25b1abcc84947918beb1f34c9",
+        "kind": "leave",
+        "actor": "22222222-2222-4222-8222-222222222222",
+        "at": 1763172000000
+      },
+      "frameB64": "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAh3ygQZqXyCPeF2WNqaSO435o1s0YdojK2tuHpMmS5au8mdQczyWnw0fAq1NjXrrvCvc3spQ_Pyg64sLg46lcQF7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiOTI3M2VhMjRhNTFkMzI2YzljYmI5YTU0MjQzYWVkZmRiMWE5MThmMjViMWFiY2M4NDk0NzkxOGJlYjFmMzRjOSIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwiYXQiOjE3NjMxNzIwMDAwMDB9",
+      "expect": {
+        "status": 403,
+        "error": "no_grant"
+      }
+    },
+    {
+      "name": "readded-member-leaves",
+      "why": "bob was removed and added again: the add re-activated his grant.",
+      "stored": "readded",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 5,
+        "prev": "115c0ed0f4ce12d6985cf7a616d6c3d0ff276a941c763bd13e7678a963aeacfc",
+        "kind": "leave",
+        "actor": "22222222-2222-4222-8222-222222222222",
+        "at": 1763172000000
+      },
+      "frameB64": "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAhE8WIsXZ9vufFBUWn9MmaWVlEVUISVclEkQa8ZgbhcYz2gmYE30DR8moPh_7QOsgAMuF5cssTxo8Tyt5VHKLAx7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo1LCJwcmV2IjoiMTE1YzBlZDBmNGNlMTJkNjk4NWNmN2E2MTZkNmMzZDBmZjI3NmE5NDFjNzYzYmQxM2U3Njc4YTk2M2FlYWNmYyIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwiYXQiOjE3NjMxNzIwMDAwMDB9",
+      "expect": {
+        "status": 200,
+        "appended": true
+      },
+      "grantsAfter": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "owner",
+          "revokedBy": null
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "writer",
+          "revokedBy": "leave"
+        },
+        {
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "role": "reader",
+          "revokedBy": null
+        }
+      ]
+    },
+    {
+      "name": "writer-adds",
+      "why": "A writer posts an add: the caller has a grant, but its role does not allow the kind.",
+      "stored": "live",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "add",
+        "actor": "22222222-2222-4222-8222-222222222222",
+        "at": 1763172000000,
+        "member": "44444444-4444-4444-8444-444444444444",
+        "memberKey": "Wd8NgIFBR0r_DaXgoiTIpzh-IrIoM2zfTGlAZUGc2FU",
+        "role": "reader",
+        "grantId": "sjNsfAde3v70hrOToXwGvA"
+      },
+      "frameB64": "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAspoeTJZFWemqVG6QVQw9FvVjtMolF5ENJDcNCGVVfw5cNfhypsTALBOGyJ5qqQetXakg1nzEGwmBZV3kItw2gd7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjIyMjIyMjIyLTIyMjItNDIyMi04MjIyLTIyMjIyMjIyMjIyMiIsImF0IjoxNzYzMTcyMDAwMDAwLCJtZW1iZXIiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJtZW1iZXJLZXkiOiJXZDhOZ0lGQlIwcl9EYVhnb2lUSXB6aC1JcklvTTJ6ZlRHbEFaVUdjMkZVIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJzak5zZkFkZTN2NzBock9Ub1h3R3ZBIn0",
+      "expect": {
+        "status": 403,
+        "error": "not_vault_owner"
+      }
+    },
+    {
+      "name": "reader-deletes",
+      "why": "A reader posts a delete.",
+      "stored": "live",
+      "caller": "carol",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "delete",
+        "actor": "33333333-3333-4333-8333-333333333333",
+        "at": 1763172000000,
+        "deleteId": "SdpW6hirCz_wuzlpwcZZSg"
+      },
+      "frameB64": "YXZzAgPI5zW1Ijxo8UnV-32PE1GRZivu3m6ykmkHZjTabm83Ihgd4NoKDG1Bk_WV2AluQtsGN1uGc9tBcYjZbecxNtyhkX5YdE6344csY7MESDslpWFgUPf1IjRRfo1Hv1ptsQd7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJkZWxldGUiLCJhY3RvciI6IjMzMzMzMzMzLTMzMzMtNDMzMy04MzMzLTMzMzMzMzMzMzMzMyIsImF0IjoxNzYzMTcyMDAwMDAwLCJkZWxldGVJZCI6IlNkcFc2aGlyQ3pfd3V6bHB3Y1paU2cifQ",
+      "expect": {
+        "status": 403,
+        "error": "not_vault_owner"
+      }
+    },
+    {
+      "name": "writer-restores-a-live-vault",
+      "why": "A writer posts a restore on a vault that is not deleted: its grant is active, so the role decides. Compare non-owner-restores-while-deleted.",
+      "stored": "live",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "restore",
+        "actor": "22222222-2222-4222-8222-222222222222",
+        "at": 1763172000000,
+        "deleteId": "ZqFoEsFyL-icpZxGQW0D9A"
+      },
+      "frameB64": "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAsRvO2Zp1N7lQ36zXAKvwvx8alvyoUU_dTa9tPxgvYoFlbcS4z8lxF1l_5YeqS4euZjsYvUKGwW4H1B-JkdtbwB7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJyZXN0b3JlIiwiYWN0b3IiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJhdCI6MTc2MzE3MjAwMDAwMCwiZGVsZXRlSWQiOiJacUZvRXNGeUwtaWNwWnhHUVcwRDlBIn0",
+      "expect": {
+        "status": 403,
+        "error": "not_vault_owner"
+      }
+    },
+    {
+      "name": "owner-restores-a-deleted-vault",
+      "why": "The owner's grant is revoked by the delete; it counts for restore. The restore re-grants every grant still revoked by the delete.",
+      "stored": "deleted",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "3934af5d3a7b0a4e2ffc4400af5c2ddf81ab3c7240553553d90aab96549ec4ca",
+        "kind": "restore",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "deleteId": "ZqFoEsFyL-icpZxGQW0D9A"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyhdm0rIwg5Yk4nmL3iiFOJp5vW2ooxNhc5oCM6YcmYosi2XtWa-OdHvk9F56bcQWCReFbjPYc5gGUUizOWsVZQF7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiMzkzNGFmNWQzYTdiMGE0ZTJmZmM0NDAwYWY1YzJkZGY4MWFiM2M3MjQwNTUzNTUzZDkwYWFiOTY1NDllYzRjYSIsImtpbmQiOiJyZXN0b3JlIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE3MjAwMDAwMCwiZGVsZXRlSWQiOiJacUZvRXNGeUwtaWNwWnhHUVcwRDlBIn0",
+      "expect": {
+        "status": 200,
+        "appended": true
+      },
+      "grantsAfter": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "owner",
+          "revokedBy": null
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "writer",
+          "revokedBy": null
+        },
+        {
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "role": "reader",
+          "revokedBy": null
+        }
+      ]
+    },
+    {
+      "name": "second-different-delete",
+      "why": "A second delete with another deleteId, at the head plus one. The owner's revoked grant counts for delete, the position is right, and the shared verifier refuses it: the vault is already deleted.",
+      "stored": "deleted",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "3934af5d3a7b0a4e2ffc4400af5c2ddf81ab3c7240553553d90aab96549ec4ca",
+        "kind": "delete",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "deleteId": "RjBiDl1GlByerPP0aACzrg"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izykRa_WwX_do0Zc0tddLvcA5Qi5f5S9h_qJGZVI1SZfjKAs6I6XCN74Hew0e4L5en0BjUPEQstYZW7PrGFsTk8Ql7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiMzkzNGFmNWQzYTdiMGE0ZTJmZmM0NDAwYWY1YzJkZGY4MWFiM2M3MjQwNTUzNTUzZDkwYWFiOTY1NDllYzRjYSIsImtpbmQiOiJkZWxldGUiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTcyMDAwMDAwLCJkZWxldGVJZCI6IlJqQmlEbDFHbEJ5ZXJQUDBhQUN6cmcifQ",
+      "expect": {
+        "status": 400,
+        "error": "precondition"
+      }
+    },
+    {
+      "name": "resigned-delete-at-the-stored-position",
+      "why": "The owner re-signs its delete with a new `at` for the position the stored delete holds: not a retry (other bytes), and another entry at a stored position is log_head_moved, with the stored head.",
+      "stored": "deleted",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "delete",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "deleteId": "ZqFoEsFyL-icpZxGQW0D9A"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izylcArNzJeUiL7LdWyHuZhVIjvLPZBNl_y2BlxKOyj94DKmKQhv2X8QOrLAdX39pOuriHRcSjFPiciFA6PHVywQ17InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJkZWxldGUiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTcyMDAwMDAwLCJkZWxldGVJZCI6IlpxRm9Fc0Z5TC1pY3BaeEdRVzBEOUEifQ",
+      "expect": {
+        "status": 409,
+        "error": "log_head_moved",
+        "seq": 3,
+        "hash": "3934af5d3a7b0a4e2ffc4400af5c2ddf81ab3c7240553553d90aab96549ec4ca",
+        "at": 1763164980000
+      }
+    },
+    {
+      "name": "member-leaves-in-the-grace-period",
+      "why": "A member's grant revoked by the delete counts for leave. Appending it rewrites the revocation, so a later restore skips this member (FI-R7).",
+      "stored": "deleted",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "3934af5d3a7b0a4e2ffc4400af5c2ddf81ab3c7240553553d90aab96549ec4ca",
+        "kind": "leave",
+        "actor": "22222222-2222-4222-8222-222222222222",
+        "at": 1763172000000
+      },
+      "frameB64": "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAsWTDvoWtuqjLgL66AmFd60w4iW8XzgEvpX1-cth2VsGZ2QSmZ-qUZ5vwlOgcNMIA4E3l-uqfzbQxQqxUTaWCAt7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiMzkzNGFmNWQzYTdiMGE0ZTJmZmM0NDAwYWY1YzJkZGY4MWFiM2M3MjQwNTUzNTUzZDkwYWFiOTY1NDllYzRjYSIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwiYXQiOjE3NjMxNzIwMDAwMDB9",
+      "expect": {
+        "status": 200,
+        "appended": true
+      },
+      "grantsAfter": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "owner",
+          "revokedBy": "delete"
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "writer",
+          "revokedBy": "leave"
+        },
+        {
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "role": "reader",
+          "revokedBy": "delete"
+        }
+      ]
+    },
+    {
+      "name": "reader-leaves-in-the-grace-period",
+      "why": "The same for the reader.",
+      "stored": "deleted",
+      "caller": "carol",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "3934af5d3a7b0a4e2ffc4400af5c2ddf81ab3c7240553553d90aab96549ec4ca",
+        "kind": "leave",
+        "actor": "33333333-3333-4333-8333-333333333333",
+        "at": 1763172000000
+      },
+      "frameB64": "YXZzAgPI5zW1Ijxo8UnV-32PE1GRZivu3m6ykmkHZjTabm83IgYM2I-fO_nC3qFFfMog8EfplrdD-4tWm8pAJZ8QekdQaHusLHGjjQdmxoLb0OFZm6AajhCpn-GRnM-Q_thbHQV7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiMzkzNGFmNWQzYTdiMGE0ZTJmZmM0NDAwYWY1YzJkZGY4MWFiM2M3MjQwNTUzNTUzZDkwYWFiOTY1NDllYzRjYSIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiMzMzMzMzMzMtMzMzMy00MzMzLTgzMzMtMzMzMzMzMzMzMzMzIiwiYXQiOjE3NjMxNzIwMDAwMDB9",
+      "expect": {
+        "status": 200,
+        "appended": true
+      },
+      "grantsAfter": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "owner",
+          "revokedBy": "delete"
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "writer",
+          "revokedBy": "delete"
+        },
+        {
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "role": "reader",
+          "revokedBy": "leave"
+        }
+      ]
+    },
+    {
+      "name": "non-owner-restores-while-deleted",
+      "why": "A grant revoked by the delete counts for restore only when it is the owner's. A writer's does not count: no_grant, not not_vault_owner.",
+      "stored": "deleted",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "3934af5d3a7b0a4e2ffc4400af5c2ddf81ab3c7240553553d90aab96549ec4ca",
+        "kind": "restore",
+        "actor": "22222222-2222-4222-8222-222222222222",
+        "at": 1763172000000,
+        "deleteId": "ZqFoEsFyL-icpZxGQW0D9A"
+      },
+      "frameB64": "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAq4rFxq0FPQCCqDLDEOXVSs6FdVuryqK1nzXNYBSvpUr-z2bsNZB9wOG5wMsZhc9woDlIHnnGIYDNbBsTenzdw57InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiMzkzNGFmNWQzYTdiMGE0ZTJmZmM0NDAwYWY1YzJkZGY4MWFiM2M3MjQwNTUzNTUzZDkwYWFiOTY1NDllYzRjYSIsImtpbmQiOiJyZXN0b3JlIiwiYWN0b3IiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJhdCI6MTc2MzE3MjAwMDAwMCwiZGVsZXRlSWQiOiJacUZvRXNGeUwtaWNwWnhHUVcwRDlBIn0",
+      "expect": {
+        "status": 403,
+        "error": "no_grant"
+      }
+    },
+    {
+      "name": "non-owner-deletes-while-deleted",
+      "why": "The same for a delete by a non-owner.",
+      "stored": "deleted",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "3934af5d3a7b0a4e2ffc4400af5c2ddf81ab3c7240553553d90aab96549ec4ca",
+        "kind": "delete",
+        "actor": "22222222-2222-4222-8222-222222222222",
+        "at": 1763172000000,
+        "deleteId": "RjBiDl1GlByerPP0aACzrg"
+      },
+      "frameB64": "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAoou8_jluLo1PPMUx7yhLKoVuOv3pxfVD_H_7vXHTGspBilNH7ZBdvDi6CMnvr3UQsQoH9U1Ka6GXTnENCIqdQd7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiMzkzNGFmNWQzYTdiMGE0ZTJmZmM0NDAwYWY1YzJkZGY4MWFiM2M3MjQwNTUzNTUzZDkwYWFiOTY1NDllYzRjYSIsImtpbmQiOiJkZWxldGUiLCJhY3RvciI6IjIyMjIyMjIyLTIyMjItNDIyMi04MjIyLTIyMjIyMjIyMjIyMiIsImF0IjoxNzYzMTcyMDAwMDAwLCJkZWxldGVJZCI6IlJqQmlEbDFHbEJ5ZXJQUDBhQUN6cmcifQ",
+      "expect": {
+        "status": 403,
+        "error": "no_grant"
+      }
+    },
+    {
+      "name": "owner-adds-while-deleted",
+      "why": "The owner's revoked grant counts for restore and delete, and for no other owner kind: an add on a deleted vault is no_grant. (The verifier would say precondition; access comes first.)",
+      "stored": "deleted",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "3934af5d3a7b0a4e2ffc4400af5c2ddf81ab3c7240553553d90aab96549ec4ca",
+        "kind": "add",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "member": "44444444-4444-4444-8444-444444444444",
+        "memberKey": "Wd8NgIFBR0r_DaXgoiTIpzh-IrIoM2zfTGlAZUGc2FU",
+        "role": "reader",
+        "grantId": "sjNsfAde3v70hrOToXwGvA"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyo4SR2zwX4hePmzg8EbyeJXzsCPJ0hiQEPmbQSVVcvd5RMftmL0mSNkQ9D4NEfacU4Bu8L2w_5JMKhQjn6kqoQJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiMzkzNGFmNWQzYTdiMGE0ZTJmZmM0NDAwYWY1YzJkZGY4MWFiM2M3MjQwNTUzNTUzZDkwYWFiOTY1NDllYzRjYSIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTcyMDAwMDAwLCJtZW1iZXIiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJtZW1iZXJLZXkiOiJXZDhOZ0lGQlIwcl9EYVhnb2lUSXB6aC1JcklvTTJ6ZlRHbEFaVUdjMkZVIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJzak5zZkFkZTN2NzBock9Ub1h3R3ZBIn0",
+      "expect": {
+        "status": 403,
+        "error": "no_grant"
+      }
+    },
+    {
+      "name": "owner-restores-with-another-delete-id",
+      "why": "A restore that names another deleteId than the stored delete: the grant counts, the verifier refuses.",
+      "stored": "deleted",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "3934af5d3a7b0a4e2ffc4400af5c2ddf81ab3c7240553553d90aab96549ec4ca",
+        "kind": "restore",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "deleteId": "RjBiDl1GlByerPP0aACzrg"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izymwb2jlLmEB7ifzY8ImZT00lj5bnjBfNhw_4YH6zppYqICIm3DoC6Ai0b9jy0QXl4c9M9eNIUZpEy-7FuBDP-wt7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiMzkzNGFmNWQzYTdiMGE0ZTJmZmM0NDAwYWY1YzJkZGY4MWFiM2M3MjQwNTUzNTUzZDkwYWFiOTY1NDllYzRjYSIsImtpbmQiOiJyZXN0b3JlIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE3MjAwMDAwMCwiZGVsZXRlSWQiOiJSakJpRGwxR2xCeWVyUFAwYUFDenJnIn0",
+      "expect": {
+        "status": 400,
+        "error": "precondition"
+      }
+    },
+    {
+      "name": "non-member-post-on-a-deleted-vault",
+      "why": "A non-member's post on a deleted vault.",
+      "stored": "deleted",
+      "caller": "dave",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "3934af5d3a7b0a4e2ffc4400af5c2ddf81ab3c7240553553d90aab96549ec4ca",
+        "kind": "leave",
+        "actor": "44444444-4444-4444-8444-444444444444",
+        "at": 1763172000000
+      },
+      "frameB64": "YXZzAgNpCZezS1bv2X0cNptlZ_eGlW0Av0AWI_M9WLV1HYY6Gx5Ykq32WOf5_kyDJ3neDB5TojPlCUw5q4l_H-NuPw1RHkbHwuxZLabHw9wfN8VNvqtr6iAG_PifEiwPNLifbgF7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiMzkzNGFmNWQzYTdiMGE0ZTJmZmM0NDAwYWY1YzJkZGY4MWFiM2M3MjQwNTUzNTUzZDkwYWFiOTY1NDllYzRjYSIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiNDQ0NDQ0NDQtNDQ0NC00NDQ0LTg0NDQtNDQ0NDQ0NDQ0NDQ0IiwiYXQiOjE3NjMxNzIwMDAwMDB9",
+      "expect": {
+        "status": 403,
+        "error": "no_grant"
+      }
+    },
+    {
+      "name": "owner-restores-after-a-leave-in-grace",
+      "why": "bob left during the grace period. The restore re-grants carol and the owner; bob stays out.",
+      "stored": "left-in-grace",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 5,
+        "prev": "b8c495a9350de0353eb973404f455588ebc74d4811f5cf18c7ba7ab4ab4967fc",
+        "kind": "restore",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "deleteId": "ZqFoEsFyL-icpZxGQW0D9A"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyroUaMRcDaqxSQNqB4vEH6jBdIfoJQKQELSTV4SY5Mr40jC8uuEPkNxFFzMPaQR8VSka-Cg14i0VqK37MOrfTwJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo1LCJwcmV2IjoiYjhjNDk1YTkzNTBkZTAzNTNlYjk3MzQwNGY0NTU1ODhlYmM3NGQ0ODExZjVjZjE4YzdiYTdhYjRhYjQ5NjdmYyIsImtpbmQiOiJyZXN0b3JlIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE3MjAwMDAwMCwiZGVsZXRlSWQiOiJacUZvRXNGeUwtaWNwWnhHUVcwRDlBIn0",
+      "expect": {
+        "status": 200,
+        "appended": true
+      },
+      "grantsAfter": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "owner",
+          "revokedBy": null
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "writer",
+          "revokedBy": "leave"
+        },
+        {
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "role": "reader",
+          "revokedBy": null
+        }
+      ]
+    },
+    {
+      "name": "leaver-stays-out-after-the-restore",
+      "why": "After the restore, the member who left in the grace period has no grant.",
+      "stored": "restored-after-a-leave",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 6,
+        "prev": "c9aae9ea04fe78638a4825d06874e12f8b6e2e5621ae460b5e17bb0fd50ff92a",
+        "kind": "leave",
+        "actor": "22222222-2222-4222-8222-222222222222",
+        "at": 1763172000000
+      },
+      "frameB64": "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAvtLFIVFs9BJZ0WhkYBVzZftp9flQ73AGJCxPu5k4oDOIRkhvU2kevlyx3tuKALfINBFw9w251Ni2-0J0swNfwd7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo2LCJwcmV2IjoiYzlhYWU5ZWEwNGZlNzg2MzhhNDgyNWQwNjg3NGUxMmY4YjZlMmU1NjIxYWU0NjBiNWUxN2JiMGZkNTBmZjkyYSIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwiYXQiOjE3NjMxNzIwMDAwMDB9",
+      "expect": {
+        "status": 403,
+        "error": "no_grant"
+      }
+    },
+    {
+      "name": "other-member-is-back-after-the-restore",
+      "why": "carol, whose grant the restore re-activated, posts as a member again.",
+      "stored": "restored-after-a-leave",
+      "caller": "carol",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 6,
+        "prev": "c9aae9ea04fe78638a4825d06874e12f8b6e2e5621ae460b5e17bb0fd50ff92a",
+        "kind": "leave",
+        "actor": "33333333-3333-4333-8333-333333333333",
+        "at": 1763172000000
+      },
+      "frameB64": "YXZzAgPI5zW1Ijxo8UnV-32PE1GRZivu3m6ykmkHZjTabm83Igw-Z6sGeiL28qY8oR2l_cH0SiZiK46VhNcRkbvLDji1u1XFG0hOkx4fvyOUDeX78vfNoK-RSdvpfL1J5CDq5wJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo2LCJwcmV2IjoiYzlhYWU5ZWEwNGZlNzg2MzhhNDgyNWQwNjg3NGUxMmY4YjZlMmU1NjIxYWU0NjBiNWUxN2JiMGZkNTBmZjkyYSIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiMzMzMzMzMzMtMzMzMy00MzMzLTgzMzMtMzMzMzMzMzMzMzMzIiwiYXQiOjE3NjMxNzIwMDAwMDB9",
+      "expect": {
+        "status": 200,
+        "appended": true
+      },
+      "grantsAfter": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "owner",
+          "revokedBy": null
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "writer",
+          "revokedBy": "leave"
+        },
+        {
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "role": "reader",
+          "revokedBy": "leave"
+        }
+      ]
+    },
+    {
+      "name": "owner-restores-after-the-purge",
+      "why": "The grace period has ended and the vault is purged. Every append other than a genesis is refused with no_grant, the owner's restore included: the exception for a grant revoked by the delete holds only before the purge. Compare owner-restores-a-deleted-vault.",
+      "stored": "purged",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "3934af5d3a7b0a4e2ffc4400af5c2ddf81ab3c7240553553d90aab96549ec4ca",
+        "kind": "restore",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "deleteId": "ZqFoEsFyL-icpZxGQW0D9A"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyhdm0rIwg5Yk4nmL3iiFOJp5vW2ooxNhc5oCM6YcmYosi2XtWa-OdHvk9F56bcQWCReFbjPYc5gGUUizOWsVZQF7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiMzkzNGFmNWQzYTdiMGE0ZTJmZmM0NDAwYWY1YzJkZGY4MWFiM2M3MjQwNTUzNTUzZDkwYWFiOTY1NDllYzRjYSIsImtpbmQiOiJyZXN0b3JlIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE3MjAwMDAwMCwiZGVsZXRlSWQiOiJacUZvRXNGeUwtaWNwWnhHUVcwRDlBIn0",
+      "expect": {
+        "status": 403,
+        "error": "no_grant"
+      }
+    },
+    {
+      "name": "member-leaves-after-the-purge",
+      "why": "A member's leave after the purge: no_grant. Compare member-leaves-in-the-grace-period.",
+      "stored": "purged",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "3934af5d3a7b0a4e2ffc4400af5c2ddf81ab3c7240553553d90aab96549ec4ca",
+        "kind": "leave",
+        "actor": "22222222-2222-4222-8222-222222222222",
+        "at": 1763172000000
+      },
+      "frameB64": "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAsWTDvoWtuqjLgL66AmFd60w4iW8XzgEvpX1-cth2VsGZ2QSmZ-qUZ5vwlOgcNMIA4E3l-uqfzbQxQqxUTaWCAt7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiMzkzNGFmNWQzYTdiMGE0ZTJmZmM0NDAwYWY1YzJkZGY4MWFiM2M3MjQwNTUzNTUzZDkwYWFiOTY1NDllYzRjYSIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwiYXQiOjE3NjMxNzIwMDAwMDB9",
+      "expect": {
+        "status": 403,
+        "error": "no_grant"
+      }
+    },
+    {
+      "name": "owner-deletes-after-the-purge",
+      "why": "A second delete after the purge: no_grant, where before the purge it was precondition.",
+      "stored": "purged",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "3934af5d3a7b0a4e2ffc4400af5c2ddf81ab3c7240553553d90aab96549ec4ca",
+        "kind": "delete",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "deleteId": "RjBiDl1GlByerPP0aACzrg"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izykRa_WwX_do0Zc0tddLvcA5Qi5f5S9h_qJGZVI1SZfjKAs6I6XCN74Hew0e4L5en0BjUPEQstYZW7PrGFsTk8Ql7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiMzkzNGFmNWQzYTdiMGE0ZTJmZmM0NDAwYWY1YzJkZGY4MWFiM2M3MjQwNTUzNTUzZDkwYWFiOTY1NDllYzRjYSIsImtpbmQiOiJkZWxldGUiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTcyMDAwMDAwLCJkZWxldGVJZCI6IlJqQmlEbDFHbEJ5ZXJQUDBhQUN6cmcifQ",
+      "expect": {
+        "status": 403,
+        "error": "no_grant"
+      }
+    },
+    {
+      "name": "non-member-post-after-the-purge",
+      "why": "A non-member's post on a purged vault: the same no_grant.",
+      "stored": "purged",
+      "caller": "dave",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "3934af5d3a7b0a4e2ffc4400af5c2ddf81ab3c7240553553d90aab96549ec4ca",
+        "kind": "leave",
+        "actor": "44444444-4444-4444-8444-444444444444",
+        "at": 1763172000000
+      },
+      "frameB64": "YXZzAgNpCZezS1bv2X0cNptlZ_eGlW0Av0AWI_M9WLV1HYY6Gx5Ykq32WOf5_kyDJ3neDB5TojPlCUw5q4l_H-NuPw1RHkbHwuxZLabHw9wfN8VNvqtr6iAG_PifEiwPNLifbgF7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiMzkzNGFmNWQzYTdiMGE0ZTJmZmM0NDAwYWY1YzJkZGY4MWFiM2M3MjQwNTUzNTUzZDkwYWFiOTY1NDllYzRjYSIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiNDQ0NDQ0NDQtNDQ0NC00NDQ0LTg0NDQtNDQ0NDQ0NDQ0NDQ0IiwiYXQiOjE3NjMxNzIwMDAwMDB9",
+      "expect": {
+        "status": 403,
+        "error": "no_grant"
+      }
+    },
+    {
+      "name": "retried-delete-after-the-purge",
+      "why": "A byte-identical retry of a stored frame after the purge: the retry rule comes first and changes nothing, so it is still 200.",
+      "stored": "purged",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "delete",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763164980000,
+        "deleteId": "ZqFoEsFyL-icpZxGQW0D9A"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyhdfE6hsA7FEF6oEgDQlP3fidQLn1xocuA8ZSjUd_rZ821ZPJMokj8COAuTkgBMcJSxOm5D246au8qV-ZBgxJg17InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJkZWxldGUiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTgwMDAwLCJkZWxldGVJZCI6IlpxRm9Fc0Z5TC1pY3BaeEdRVzBEOUEifQ",
+      "expect": {
+        "status": 200,
+        "appended": false
+      }
+    },
+    {
+      "name": "genesis-for-a-purged-vault-id",
+      "why": "A vault id is never reused: a genesis for the id of a purged vault is vault_id_taken, as for a live one.",
+      "stored": "purged",
+      "caller": "dave",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 0,
+        "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "genesis",
+        "actor": "44444444-4444-4444-8444-444444444444",
+        "at": 1763172000000,
+        "ownerKey": "Wd8NgIFBR0r_DaXgoiTIpzh-IrIoM2zfTGlAZUGc2FU",
+        "vkCommit": "58b12f2d06e147dd488fe658f77c767523a6c16e051285471e8aa4008fa6d064"
+      },
+      "frameB64": "YXZzAgNpCZezS1bv2X0cNptlZ_eGlW0Av0AWI_M9WLV1HYY6G5CB_p3deCjLHu2lLMN2Tq133tNKbxezQrSC9vdPgiKugNduWU8S9M2vIijAfv-Ou-LgMQ4IMcLrQMVNGzOqUAx7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJhdCI6MTc2MzE3MjAwMDAwMCwib3duZXJLZXkiOiJXZDhOZ0lGQlIwcl9EYVhnb2lUSXB6aC1JcklvTTJ6ZlRHbEFaVUdjMkZVIiwidmtDb21taXQiOiI1OGIxMmYyZDA2ZTE0N2RkNDg4ZmU2NThmNzdjNzY3NTIzYTZjMTZlMDUxMjg1NDcxZThhYTQwMDhmYTZkMDY0In0",
+      "expect": {
+        "status": 409,
+        "error": "vault_id_taken"
+      }
+    },
+    {
+      "name": "genesis-for-a-vault-id-in-use",
+      "why": "Another account posts a genesis for a vault id that exists.",
+      "stored": "live",
+      "caller": "dave",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 0,
+        "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "genesis",
+        "actor": "44444444-4444-4444-8444-444444444444",
+        "at": 1763172000000,
+        "ownerKey": "Wd8NgIFBR0r_DaXgoiTIpzh-IrIoM2zfTGlAZUGc2FU",
+        "vkCommit": "58b12f2d06e147dd488fe658f77c767523a6c16e051285471e8aa4008fa6d064"
+      },
+      "frameB64": "YXZzAgNpCZezS1bv2X0cNptlZ_eGlW0Av0AWI_M9WLV1HYY6G5CB_p3deCjLHu2lLMN2Tq133tNKbxezQrSC9vdPgiKugNduWU8S9M2vIijAfv-Ou-LgMQ4IMcLrQMVNGzOqUAx7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJhdCI6MTc2MzE3MjAwMDAwMCwib3duZXJLZXkiOiJXZDhOZ0lGQlIwcl9EYVhnb2lUSXB6aC1JcklvTTJ6ZlRHbEFaVUdjMkZVIiwidmtDb21taXQiOiI1OGIxMmYyZDA2ZTE0N2RkNDg4ZmU2NThmNzdjNzY3NTIzYTZjMTZlMDUxMjg1NDcxZThhYTQwMDhmYTZkMDY0In0",
+      "expect": {
+        "status": 409,
+        "error": "vault_id_taken"
+      }
+    },
+    {
+      "name": "resigned-genesis",
+      "why": "The creator signs a NEW genesis (another `at`) for its own vault id: other bytes, so not a retry.",
+      "stored": "live",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 0,
+        "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "genesis",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "ownerKey": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "vkCommit": "58b12f2d06e147dd488fe658f77c767523a6c16e051285471e8aa4008fa6d064"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyktgH47suBC7ugs9b0N7wurSJ2HTUEnUmBWijYguEv_Hls16--v3MVBbImq5pwT1wd7wt3-H4rDLDANQdKgjfgt7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE3MjAwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiI1OGIxMmYyZDA2ZTE0N2RkNDg4ZmU2NThmNzdjNzY3NTIzYTZjMTZlMDUxMjg1NDcxZThhYTQwMDhmYTZkMDY0In0",
+      "expect": {
+        "status": 409,
+        "error": "vault_id_taken"
+      }
+    },
+    {
+      "name": "member-at-a-stale-position",
+      "why": "The owner posts at the position the stored head already holds: log_head_moved with the stored head {seq, hash, at}. Compare non-member-post-at-a-stale-position.",
+      "stored": "live",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 2,
+        "prev": "e836dc375f2955f0f750525ee5982cbc9bbe6e2b3a6f906aee54b10a28158227",
+        "kind": "add",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "member": "44444444-4444-4444-8444-444444444444",
+        "memberKey": "Wd8NgIFBR0r_DaXgoiTIpzh-IrIoM2zfTGlAZUGc2FU",
+        "role": "reader",
+        "grantId": "sjNsfAde3v70hrOToXwGvA"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyvq9T5r7iaFHxYGf2xfjr4GTXY56g_R9FQlyKZYJfgh7aWMComTFlJ631pn0z9Ip3MhgqLGuZCZrmg4cCI01igh7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiZTgzNmRjMzc1ZjI5NTVmMGY3NTA1MjVlZTU5ODJjYmM5YmJlNmUyYjNhNmY5MDZhZWU1NGIxMGEyODE1ODIyNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTcyMDAwMDAwLCJtZW1iZXIiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJtZW1iZXJLZXkiOiJXZDhOZ0lGQlIwcl9EYVhnb2lUSXB6aC1JcklvTTJ6ZlRHbEFaVUdjMkZVIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJzak5zZkFkZTN2NzBock9Ub1h3R3ZBIn0",
+      "expect": {
+        "status": 409,
+        "error": "log_head_moved",
+        "seq": 2,
+        "hash": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "at": 1763164920000
+      }
+    },
+    {
+      "name": "member-ahead-of-the-head",
+      "why": "seq is the head plus two.",
+      "stored": "live",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "add",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "member": "44444444-4444-4444-8444-444444444444",
+        "memberKey": "Wd8NgIFBR0r_DaXgoiTIpzh-IrIoM2zfTGlAZUGc2FU",
+        "role": "reader",
+        "grantId": "sjNsfAde3v70hrOToXwGvA"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyhvCS2w_ng0__3BbOwHR-GnU5yZhDyon4K_zV5A7-gWKwlEUexDnkbn1Ub46b3yxop6bWG8imbmHz4k969vBuAZ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTcyMDAwMDAwLCJtZW1iZXIiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJtZW1iZXJLZXkiOiJXZDhOZ0lGQlIwcl9EYVhnb2lUSXB6aC1JcklvTTJ6ZlRHbEFaVUdjMkZVIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJzak5zZkFkZTN2NzBock9Ub1h3R3ZBIn0",
+      "expect": {
+        "status": 409,
+        "error": "log_head_moved",
+        "seq": 2,
+        "hash": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "at": 1763164920000
+      }
+    },
+    {
+      "name": "member-with-another-prev",
+      "why": "seq is the head plus one, but prev is not the stored head's hash.",
+      "stored": "live",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "e836dc375f2955f0f750525ee5982cbc9bbe6e2b3a6f906aee54b10a28158227",
+        "kind": "add",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "member": "44444444-4444-4444-8444-444444444444",
+        "memberKey": "Wd8NgIFBR0r_DaXgoiTIpzh-IrIoM2zfTGlAZUGc2FU",
+        "role": "reader",
+        "grantId": "sjNsfAde3v70hrOToXwGvA"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izys0h3HARePke5wNg-HMK07NjZQKy-jhuFjdIV_7MXzHWm5guzPvPBk8NlnLfxJyaMYgsyt7CQDKbookWGfF-SAd7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZTgzNmRjMzc1ZjI5NTVmMGY3NTA1MjVlZTU5ODJjYmM5YmJlNmUyYjNhNmY5MDZhZWU1NGIxMGEyODE1ODIyNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTcyMDAwMDAwLCJtZW1iZXIiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJtZW1iZXJLZXkiOiJXZDhOZ0lGQlIwcl9EYVhnb2lUSXB6aC1JcklvTTJ6ZlRHbEFaVUdjMkZVIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJzak5zZkFkZTN2NzBock9Ub1h3R3ZBIn0",
+      "expect": {
+        "status": 409,
+        "error": "log_head_moved",
+        "seq": 2,
+        "hash": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "at": 1763164920000
+      }
+    },
+    {
+      "name": "add-of-a-member",
+      "why": "The owner adds an account that is already a member: the verifier's precondition.",
+      "stored": "live",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "add",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "member": "22222222-2222-4222-8222-222222222222",
+        "memberKey": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM",
+        "role": "reader",
+        "grantId": "E90kNglXWrYTA0A3N1ESRw"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyq2wDMQdrJ0AHhRfN1Op_I1vTxbpp-yx1-j4VOpcKNiw43HfC5U-DzgAJxogGIJCP38hcEUC7RAOFfe6UGLbrgx7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTcyMDAwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJFOTBrTmdsWFdyWVRBMEEzTjFFU1J3In0",
+      "expect": {
+        "status": 400,
+        "error": "precondition"
+      }
+    },
+    {
+      "name": "accept-without-an-offer",
+      "why": "A member posts an accept while no offer is pending.",
+      "stored": "live",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "accept",
+        "actor": "22222222-2222-4222-8222-222222222222",
+        "at": 1763172000000,
+        "offerId": "C1a5_oc7eBh6SYKs9qscnQ"
+      },
+      "frameB64": "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAqjD3NcZ4_0JsHJiU9n_QhiUMgHju55W_UMi_4xdVuDAcZnjPh7q5Q1wk3zUwsfwLKOyy11wKvTpflezg44iuwF7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJhY2NlcHQiLCJhY3RvciI6IjIyMjIyMjIyLTIyMjItNDIyMi04MjIyLTIyMjIyMjIyMjIyMiIsImF0IjoxNzYzMTcyMDAwMDAwLCJvZmZlcklkIjoiQzFhNV9vYzdlQmg2U1lLczlxc2NuUSJ9",
+      "expect": {
+        "status": 400,
+        "error": "precondition"
+      }
+    },
+    {
+      "name": "at-before-the-head",
+      "why": "`at` is earlier than the stored head's: `at` never decreases along a log.",
+      "stored": "live",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "add",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763164860000,
+        "member": "44444444-4444-4444-8444-444444444444",
+        "memberKey": "Wd8NgIFBR0r_DaXgoiTIpzh-IrIoM2zfTGlAZUGc2FU",
+        "role": "reader",
+        "grantId": "sjNsfAde3v70hrOToXwGvA"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izysSXrlQHdqhr9CVOYe4ynwEkvO76B8_HFafpV1BWJEUk-2p0aGxpM_TyM-Dsw9e9_FzoZhISzPI5vWgBN0UuJg97InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJtZW1iZXJLZXkiOiJXZDhOZ0lGQlIwcl9EYVhnb2lUSXB6aC1JcklvTTJ6ZlRHbEFaVUdjMkZVIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJzak5zZkFkZTN2NzBock9Ub1h3R3ZBIn0",
+      "expect": {
+        "status": 400,
+        "error": "precondition"
+      }
+    },
+    {
+      "name": "owner-leaves",
+      "why": "The owner posts a leave: any member may post the kind, and the verifier refuses the owner's.",
+      "stored": "live",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "leave",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izylP1YKK90Nv9f_SF-MES86yWGcO_q_zv62ak9x7icOrsrS7QG_anzx100ZIgvIaUougjG0qsA48R5TV5hqzevg17InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIiwiYXQiOjE3NjMxNzIwMDAwMDB9",
+      "expect": {
+        "status": 400,
+        "error": "precondition"
+      }
+    },
+    {
+      "name": "target-accepts",
+      "why": "The offer's target accepts: the old owner's grant becomes writer and the target's becomes owner.",
+      "stored": "offered",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "799c558850ae67d5abee43732eaaf5c485b75adfe2ce72adbef056f9f08c4cde",
+        "kind": "accept",
+        "actor": "22222222-2222-4222-8222-222222222222",
+        "at": 1763172000000,
+        "offerId": "C1a5_oc7eBh6SYKs9qscnQ"
+      },
+      "frameB64": "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAuOJZ3W0z5_OolfUflYtFk3z6tbGUb-DhXc2MEcg4S91X3VCMKlkJmz0vOS43FD1GAcjDya0-8K31T2tWmD6qg57InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiNzk5YzU1ODg1MGFlNjdkNWFiZWU0MzczMmVhYWY1YzQ4NWI3NWFkZmUyY2U3MmFkYmVmMDU2ZjlmMDhjNGNkZSIsImtpbmQiOiJhY2NlcHQiLCJhY3RvciI6IjIyMjIyMjIyLTIyMjItNDIyMi04MjIyLTIyMjIyMjIyMjIyMiIsImF0IjoxNzYzMTcyMDAwMDAwLCJvZmZlcklkIjoiQzFhNV9vYzdlQmg2U1lLczlxc2NuUSJ9",
+      "expect": {
+        "status": 200,
+        "appended": true
+      },
+      "grantsAfter": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "writer",
+          "revokedBy": null
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "owner",
+          "revokedBy": null
+        },
+        {
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "role": "reader",
+          "revokedBy": null
+        }
+      ]
+    },
+    {
+      "name": "target-cancels",
+      "why": "The offer's target cancels it.",
+      "stored": "offered",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "799c558850ae67d5abee43732eaaf5c485b75adfe2ce72adbef056f9f08c4cde",
+        "kind": "cancel",
+        "actor": "22222222-2222-4222-8222-222222222222",
+        "at": 1763172000000,
+        "offerId": "C1a5_oc7eBh6SYKs9qscnQ"
+      },
+      "frameB64": "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxArSSbC_XsAa_gnOp-QnR7XyReICi3Mhye3iIKszd434jk1qsmMhPkBB7UEzZ5v8uzNerUP74Dw46_rBuFl3Z6Ax7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiNzk5YzU1ODg1MGFlNjdkNWFiZWU0MzczMmVhYWY1YzQ4NWI3NWFkZmUyY2U3MmFkYmVmMDU2ZjlmMDhjNGNkZSIsImtpbmQiOiJjYW5jZWwiLCJhY3RvciI6IjIyMjIyMjIyLTIyMjItNDIyMi04MjIyLTIyMjIyMjIyMjIyMiIsImF0IjoxNzYzMTcyMDAwMDAwLCJvZmZlcklkIjoiQzFhNV9vYzdlQmg2U1lLczlxc2NuUSJ9",
+      "expect": {
+        "status": 200,
+        "appended": true
+      },
+      "grantsAfter": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "owner",
+          "revokedBy": null
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "writer",
+          "revokedBy": null
+        },
+        {
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "role": "reader",
+          "revokedBy": null
+        }
+      ]
+    },
+    {
+      "name": "owner-cancels",
+      "why": "The owner cancels its offer.",
+      "stored": "offered",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "799c558850ae67d5abee43732eaaf5c485b75adfe2ce72adbef056f9f08c4cde",
+        "kind": "cancel",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "offerId": "C1a5_oc7eBh6SYKs9qscnQ"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyudyvET8ZRWueC1hI02B9XTT-3p-ksNznVFAidOm_iAIl32qkYkkIdgh7gaCs7OmCfFd4GjMUnIgqKR6PZTyYAd7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiNzk5YzU1ODg1MGFlNjdkNWFiZWU0MzczMmVhYWY1YzQ4NWI3NWFkZmUyY2U3MmFkYmVmMDU2ZjlmMDhjNGNkZSIsImtpbmQiOiJjYW5jZWwiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTcyMDAwMDAwLCJvZmZlcklkIjoiQzFhNV9vYzdlQmg2U1lLczlxc2NuUSJ9",
+      "expect": {
+        "status": 200,
+        "appended": true
+      },
+      "grantsAfter": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "owner",
+          "revokedBy": null
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "writer",
+          "revokedBy": null
+        },
+        {
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "role": "reader",
+          "revokedBy": null
+        }
+      ]
+    },
+    {
+      "name": "bystander-cancels",
+      "why": "A member who is neither the owner nor the target posts a cancel. Any member may post the kind, so step 5 passes; the verifier says not_authorized, which reaches the wire as not_vault_owner.",
+      "stored": "offered",
+      "caller": "carol",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "799c558850ae67d5abee43732eaaf5c485b75adfe2ce72adbef056f9f08c4cde",
+        "kind": "cancel",
+        "actor": "33333333-3333-4333-8333-333333333333",
+        "at": 1763172000000,
+        "offerId": "C1a5_oc7eBh6SYKs9qscnQ"
+      },
+      "frameB64": "YXZzAgPI5zW1Ijxo8UnV-32PE1GRZivu3m6ykmkHZjTabm83Igoy2vRRGbDW5srwIBFqJtTKHqYO36IbTeRUezmXEhaaCA5bJBLYPoDH6VNX55NLySLMMRY4D-ZYdLvA-sfB2wN7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiNzk5YzU1ODg1MGFlNjdkNWFiZWU0MzczMmVhYWY1YzQ4NWI3NWFkZmUyY2U3MmFkYmVmMDU2ZjlmMDhjNGNkZSIsImtpbmQiOiJjYW5jZWwiLCJhY3RvciI6IjMzMzMzMzMzLTMzMzMtNDMzMy04MzMzLTMzMzMzMzMzMzMzMyIsImF0IjoxNzYzMTcyMDAwMDAwLCJvZmZlcklkIjoiQzFhNV9vYzdlQmg2U1lLczlxc2NuUSJ9",
+      "expect": {
+        "status": 403,
+        "error": "not_vault_owner"
+      }
+    },
+    {
+      "name": "bystander-accepts",
+      "why": "A member who is not the target posts an accept: the verifier's not_authorized, as not_vault_owner.",
+      "stored": "offered",
+      "caller": "carol",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 4,
+        "prev": "799c558850ae67d5abee43732eaaf5c485b75adfe2ce72adbef056f9f08c4cde",
+        "kind": "accept",
+        "actor": "33333333-3333-4333-8333-333333333333",
+        "at": 1763172000000,
+        "offerId": "C1a5_oc7eBh6SYKs9qscnQ"
+      },
+      "frameB64": "YXZzAgPI5zW1Ijxo8UnV-32PE1GRZivu3m6ykmkHZjTabm83IvQvKesALQ6Q1qcsPHNYwUaWQzmfZ9LafFgago8TvIbGQl3snYb4KJiFW9oXxlGkT2yC3QgT-4AuvrWk8-vCZgJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiNzk5YzU1ODg1MGFlNjdkNWFiZWU0MzczMmVhYWY1YzQ4NWI3NWFkZmUyY2U3MmFkYmVmMDU2ZjlmMDhjNGNkZSIsImtpbmQiOiJhY2NlcHQiLCJhY3RvciI6IjMzMzMzMzMzLTMzMzMtNDMzMy04MzMzLTMzMzMzMzMzMzMzMyIsImF0IjoxNzYzMTcyMDAwMDAwLCJvZmZlcklkIjoiQzFhNV9vYzdlQmg2U1lLczlxc2NuUSJ9",
+      "expect": {
+        "status": 403,
+        "error": "not_vault_owner"
+      }
+    },
+    {
+      "name": "old-owner-adds-after-the-transfer",
+      "why": "alice handed the vault to bob: her server-side role is writer now.",
+      "stored": "transferred",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 5,
+        "prev": "c023a40e034b9d66149babcc6e7ef6095507bb9aed9f838797c5db9dcfe3d160",
+        "kind": "add",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "member": "44444444-4444-4444-8444-444444444444",
+        "memberKey": "Wd8NgIFBR0r_DaXgoiTIpzh-IrIoM2zfTGlAZUGc2FU",
+        "role": "reader",
+        "grantId": "sjNsfAde3v70hrOToXwGvA"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyl7raLtKbaltWJgj1xDj7qqWdJ39VhUfWreUZXXSAgQrDgMJSWrwDYRaiqBxjznQ2im2c2LN7LU0Sr7Eh6ZyYAN7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo1LCJwcmV2IjoiYzAyM2E0MGUwMzRiOWQ2NjE0OWJhYmNjNmU3ZWY2MDk1NTA3YmI5YWVkOWY4Mzg3OTdjNWRiOWRjZmUzZDE2MCIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTcyMDAwMDAwLCJtZW1iZXIiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJtZW1iZXJLZXkiOiJXZDhOZ0lGQlIwcl9EYVhnb2lUSXB6aC1JcklvTTJ6ZlRHbEFaVUdjMkZVIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJzak5zZkFkZTN2NzBock9Ub1h3R3ZBIn0",
+      "expect": {
+        "status": 403,
+        "error": "not_vault_owner"
+      }
+    },
+    {
+      "name": "new-owner-adds-after-the-transfer",
+      "why": "The new owner adds a member.",
+      "stored": "transferred",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 5,
+        "prev": "c023a40e034b9d66149babcc6e7ef6095507bb9aed9f838797c5db9dcfe3d160",
+        "kind": "add",
+        "actor": "22222222-2222-4222-8222-222222222222",
+        "at": 1763172000000,
+        "member": "44444444-4444-4444-8444-444444444444",
+        "memberKey": "Wd8NgIFBR0r_DaXgoiTIpzh-IrIoM2zfTGlAZUGc2FU",
+        "role": "reader",
+        "grantId": "sjNsfAde3v70hrOToXwGvA"
+      },
+      "frameB64": "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAh4ungLd7d_RTzyp4fdeJ00XxpozZW-I5zwZ5z0B_9Qpo6lowLh3Sbchrwrzzp0L4MhZMaF9fXl2CXmOU4YMGAd7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo1LCJwcmV2IjoiYzAyM2E0MGUwMzRiOWQ2NjE0OWJhYmNjNmU3ZWY2MDk1NTA3YmI5YWVkOWY4Mzg3OTdjNWRiOWRjZmUzZDE2MCIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjIyMjIyMjIyLTIyMjItNDIyMi04MjIyLTIyMjIyMjIyMjIyMiIsImF0IjoxNzYzMTcyMDAwMDAwLCJtZW1iZXIiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJtZW1iZXJLZXkiOiJXZDhOZ0lGQlIwcl9EYVhnb2lUSXB6aC1JcklvTTJ6ZlRHbEFaVUdjMkZVIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJzak5zZkFkZTN2NzBock9Ub1h3R3ZBIn0",
+      "expect": {
+        "status": 200,
+        "appended": true
+      },
+      "grantsAfter": [
+        {
+          "userId": "11111111-1111-4111-8111-111111111111",
+          "role": "writer",
+          "revokedBy": null
+        },
+        {
+          "userId": "22222222-2222-4222-8222-222222222222",
+          "role": "owner",
+          "revokedBy": null
+        },
+        {
+          "userId": "33333333-3333-4333-8333-333333333333",
+          "role": "reader",
+          "revokedBy": null
+        },
+        {
+          "userId": "44444444-4444-4444-8444-444444444444",
+          "role": "reader",
+          "revokedBy": null
+        }
+      ]
+    },
+    {
+      "name": "genesis-naming-another-owner-key",
+      "why": "A genesis signed by the caller that names another account's key as ownerKey. Steps 4 to 6 pass; the verifier wants the genesis signed by its own ownerKey: not_authorized, as not_vault_owner.",
+      "stored": "none",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 0,
+        "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "genesis",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "ownerKey": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM",
+        "vkCommit": "58b12f2d06e147dd488fe658f77c767523a6c16e051285471e8aa4008fa6d064"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izypNqRZxdZEg8hwlJhi5IKrO_0zYNFCG7A1qKx47bFpoVAN3iDnGxRPI4j3rHzp_GhBcLfpv6VCEXobOc9wIcMAx7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE3MjAwMDAwMCwib3duZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwidmtDb21taXQiOiI1OGIxMmYyZDA2ZTE0N2RkNDg4ZmU2NThmNzdjNzY3NTIzYTZjMTZlMDUxMjg1NDcxZThhYTQwMDhmYTZkMDY0In0",
+      "expect": {
+        "status": 403,
+        "error": "not_vault_owner"
+      }
+    },
+    {
+      "name": "frame-of-another-purpose",
+      "why": "A frame of another purpose than 0x03.",
+      "stored": "live",
+      "caller": "alice",
+      "entryNote": "the vault-log statement framed and signed under purpose 0x04",
+      "frameB64": "YXZzAgScerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izytBBiAzcFeURBQrDY6cExcqJ-Nj06foX_E1eDbYs72dDMs-xmBUxezIf6hpy96AqVlNE1HxMYuDbxr5KvqFNsQ97InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTcyMDAwMDAwLCJtZW1iZXIiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJtZW1iZXJLZXkiOiJXZDhOZ0lGQlIwcl9EYVhnb2lUSXB6aC1JcklvTTJ6ZlRHbEFaVUdjMkZVIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJzak5zZkFkZTN2NzBock9Ub1h3R3ZBIn0",
+      "expect": {
+        "status": 400,
+        "error": "bad_frame"
+      }
+    },
+    {
+      "name": "frame-with-another-magic",
+      "why": "unknown_format reaches the wire as bad_frame.",
+      "stored": "live",
+      "caller": "alice",
+      "entryNote": "the entry with format byte 0x03 in its magic",
+      "frameB64": "YXZzAwOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyt_1g1erU6zL5HhOc2kcNk6gEm7bKaHejzXyzZyrc7Eoa_D-gQMYyq8EqlO6VuJ8NO6YAxyKTqbO67WMk27DKQR7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTcyMDAwMDAwLCJtZW1iZXIiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJtZW1iZXJLZXkiOiJXZDhOZ0lGQlIwcl9EYVhnb2lUSXB6aC1JcklvTTJ6ZlRHbEFaVUdjMkZVIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJzak5zZkFkZTN2NzBock9Ub1h3R3ZBIn0",
+      "expect": {
+        "status": 400,
+        "error": "bad_frame"
+      }
+    },
+    {
+      "name": "frame-truncated",
+      "why": "A frame shorter than the shortest frame.",
+      "stored": "live",
+      "caller": "alice",
+      "entryNote": "the first 60 bytes of the entry",
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyt_1g1erU6zL5HhOc2kcNk6gEm7bKaHe",
+      "expect": {
+        "status": 400,
+        "error": "bad_frame"
+      }
+    },
+    {
+      "name": "statement-not-canonical",
+      "why": "A statement that is not canonical.",
+      "stored": "live",
+      "caller": "alice",
+      "entryNote": "the entry signed with a space after a colon",
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyleX6VkReDuGEAq0v5YZQ3qVURyCkh1l1mJNeBDCVisikUQUvH9eLa-U30LV9G3kHNXdI9Kq0EPG_IcNgoZI8QJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjogMywicHJldiI6ImViNmNiZDczMzg0ZDljNjExZGM0YzJiYmU5NjZjNTViYmU4ZGY5MzgzYWUxZWMxNzdlMDYzOGYyMGYxMjllYzMiLCJraW5kIjoiYWRkIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE3MjAwMDAwMCwibWVtYmVyIjoiNDQ0NDQ0NDQtNDQ0NC00NDQ0LTg0NDQtNDQ0NDQ0NDQ0NDQ0IiwibWVtYmVyS2V5IjoiV2Q4TmdJRkJSMHJfRGFYZ29pVElwemgtSXJJb00yemZUR2xBWlVHYzJGVSIsInJvbGUiOiJyZWFkZXIiLCJncmFudElkIjoic2pOc2ZBZGUzdjcwaHJPVG9Yd0d2QSJ9",
+      "expect": {
+        "status": 400,
+        "error": "non_canonical"
+      }
+    },
+    {
+      "name": "statement-version-3",
+      "why": "A canonical statement with another v.",
+      "stored": "live",
+      "caller": "alice",
+      "entryNote": "the entry signed with \"v\":3",
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izylOJ4idoQLUI_sGCa2IGFyZr_SEjjFE6rsJNglSTiNN9ZQV4VkeBY3hWLfoUbZILPSB9wmOpML5LvVkUqjQPvAF7InYiOjMsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTcyMDAwMDAwLCJtZW1iZXIiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJtZW1iZXJLZXkiOiJXZDhOZ0lGQlIwcl9EYVhnb2lUSXB6aC1JcklvTTJ6ZlRHbEFaVUdjMkZVIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJzak5zZkFkZTN2NzBock9Ub1h3R3ZBIn0",
+      "expect": {
+        "status": 400,
+        "error": "bad_statement"
+      }
+    },
+    {
+      "name": "entry-for-another-vault",
+      "why": "The frame names another vault than the path.",
+      "stored": "live",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "add",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "member": "44444444-4444-4444-8444-444444444444",
+        "memberKey": "Wd8NgIFBR0r_DaXgoiTIpzh-IrIoM2zfTGlAZUGc2FU",
+        "role": "reader",
+        "grantId": "sjNsfAde3v70hrOToXwGvA"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izynBgXumXm_Si-vvDLwNv63I9o3u9wyaPD9Y49rlCPaJ3_Xj2dwfU01LcbWmREckMloZ739OAdEh0S2SdaVJLFQF7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYmJiYmJiYmItYmJiYi00YmJiLThiYmItYmJiYmJiYmJiYmJiIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTcyMDAwMDAwLCJtZW1iZXIiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJtZW1iZXJLZXkiOiJXZDhOZ0lGQlIwcl9EYVhnb2lUSXB6aC1JcklvTTJ6ZlRHbEFaVUdjMkZVIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJzak5zZkFkZTN2NzBock9Ub1h3R3ZBIn0",
+      "expect": {
+        "status": 400,
+        "error": "wrong_vault"
+      }
+    },
+    {
+      "name": "actor-is-not-the-caller",
+      "why": "bob posts an entry whose actor is alice (her valid next entry, never stored).",
+      "stored": "live",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "add",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "member": "44444444-4444-4444-8444-444444444444",
+        "memberKey": "Wd8NgIFBR0r_DaXgoiTIpzh-IrIoM2zfTGlAZUGc2FU",
+        "role": "reader",
+        "grantId": "sjNsfAde3v70hrOToXwGvA"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyt_1g1erU6zL5HhOc2kcNk6gEm7bKaHejzXyzZyrc7Eoa_D-gQMYyq8EqlO6VuJ8NO6YAxyKTqbO67WMk27DKQR7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTcyMDAwMDAwLCJtZW1iZXIiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJtZW1iZXJLZXkiOiJXZDhOZ0lGQlIwcl9EYVhnb2lUSXB6aC1JcklvTTJ6ZlRHbEFaVUdjMkZVIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJzak5zZkFkZTN2NzBock9Ub1h3R3ZBIn0",
+      "expect": {
+        "status": 400,
+        "error": "bad_signer"
+      }
+    },
+    {
+      "name": "signed-with-another-key",
+      "why": "The actor is the caller, but the frame is signed with another account's key: the signer does not map to the caller's stored identity key.",
+      "stored": "live",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "leave",
+        "actor": "22222222-2222-4222-8222-222222222222",
+        "at": 1763172000000
+      },
+      "frameB64": "YXZzAgNmjWyNzVuzK785Pfo5900XSBUOLB31qPK_DfLoQ1ZEkFZ3SWREXC0kUizH2CwYtN1ANjmwFurjlwn54HaTZ5taxKBElOySsNVrnh7_Rgigk7gJ-tLlgRjQQsieo1B7zQx7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwiYXQiOjE3NjMxNzIwMDAwMDB9",
+      "expect": {
+        "status": 400,
+        "error": "bad_signer"
+      }
+    },
+    {
+      "name": "signature-does-not-verify",
+      "why": "The actor and the signer key are the caller's; the signature does not verify.",
+      "stored": "live",
+      "caller": "alice",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "add",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "member": "44444444-4444-4444-8444-444444444444",
+        "memberKey": "Wd8NgIFBR0r_DaXgoiTIpzh-IrIoM2zfTGlAZUGc2FU",
+        "role": "reader",
+        "grantId": "sjNsfAde3v70hrOToXwGvA"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyt_1g1erU6zL5HhPc2kcNk6gEm7bKaHejzXyzZyrc7Eoa_D-gQMYyq8EqlO6VuJ8NO6YAxyKTqbO67WMk27DKQR7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTcyMDAwMDAwLCJtZW1iZXIiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJtZW1iZXJLZXkiOiJXZDhOZ0lGQlIwcl9EYVhnb2lUSXB6aC1JcklvTTJ6ZlRHbEFaVUdjMkZVIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJzak5zZkFkZTN2NzBock9Ub1h3R3ZBIn0",
+      "expect": {
+        "status": 400,
+        "error": "bad_signature"
+      }
+    },
+    {
+      "name": "order-signer-before-signature",
+      "why": "An actor that is not the caller, and a broken signature: bad_signer comes first.",
+      "stored": "live",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "add",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "member": "44444444-4444-4444-8444-444444444444",
+        "memberKey": "Wd8NgIFBR0r_DaXgoiTIpzh-IrIoM2zfTGlAZUGc2FU",
+        "role": "reader",
+        "grantId": "sjNsfAde3v70hrOToXwGvA"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyt_1g1erU6zL5HhPc2kcNk6gEm7bKaHejzXyzZyrc7Eoa_D-gQMYyq8EqlO6VuJ8NO6YAxyKTqbO67WMk27DKQR7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTcyMDAwMDAwLCJtZW1iZXIiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJtZW1iZXJLZXkiOiJXZDhOZ0lGQlIwcl9EYVhnb2lUSXB6aC1JcklvTTJ6ZlRHbEFaVUdjMkZVIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJzak5zZkFkZTN2NzBock9Ub1h3R3ZBIn0",
+      "expect": {
+        "status": 400,
+        "error": "bad_signer"
+      }
+    },
+    {
+      "name": "order-frame-before-access",
+      "why": "A non-member posts a frame that is not canonical: step 3 comes before step 5.",
+      "stored": "live",
+      "caller": "dave",
+      "entryNote": "a non-member's leave signed with a space after a colon",
+      "frameB64": "YXZzAgNpCZezS1bv2X0cNptlZ_eGlW0Av0AWI_M9WLV1HYY6G5JlCoUwDj0LHbr4QA4S70JmbJbZy_rOiiaNkfqtmDMl2qCnx6796sUJSCYfa_FsJtZ_ViDjbJK9xDbhuMmaBwB7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjogMywicHJldiI6ImViNmNiZDczMzg0ZDljNjExZGM0YzJiYmU5NjZjNTViYmU4ZGY5MzgzYWUxZWMxNzdlMDYzOGYyMGYxMjllYzMiLCJraW5kIjoibGVhdmUiLCJhY3RvciI6IjQ0NDQ0NDQ0LTQ0NDQtNDQ0NC04NDQ0LTQ0NDQ0NDQ0NDQ0NCIsImF0IjoxNzYzMTcyMDAwMDAwfQ",
+      "expect": {
+        "status": 400,
+        "error": "non_canonical"
+      }
+    },
+    {
+      "name": "order-vault-before-signer",
+      "why": "Another vault in the frame, and an actor that is not the caller: wrong_vault comes first.",
+      "stored": "live",
+      "caller": "bob",
+      "entry": {
+        "vaultId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "add",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "member": "44444444-4444-4444-8444-444444444444",
+        "memberKey": "Wd8NgIFBR0r_DaXgoiTIpzh-IrIoM2zfTGlAZUGc2FU",
+        "role": "reader",
+        "grantId": "sjNsfAde3v70hrOToXwGvA"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izynBgXumXm_Si-vvDLwNv63I9o3u9wyaPD9Y49rlCPaJ3_Xj2dwfU01LcbWmREckMloZ739OAdEh0S2SdaVJLFQF7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYmJiYmJiYmItYmJiYi00YmJiLThiYmItYmJiYmJiYmJiYmJiIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTcyMDAwMDAwLCJtZW1iZXIiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJtZW1iZXJLZXkiOiJXZDhOZ0lGQlIwcl9EYVhnb2lUSXB6aC1JcklvTTJ6ZlRHbEFaVUdjMkZVIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJzak5zZkFkZTN2NzBock9Ub1h3R3ZBIn0",
+      "expect": {
+        "status": 400,
+        "error": "wrong_vault"
+      }
+    },
+    {
+      "name": "order-signer-before-access",
+      "why": "A non-member posts the owner's entry: step 4 comes before step 5, so bad_signer, not no_grant.",
+      "stored": "live",
+      "caller": "dave",
+      "entry": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "seq": 3,
+        "prev": "eb6cbd73384d9c611dc4c2bbe966c55bbe8df9383ae1ec177e0638f20f129ec3",
+        "kind": "add",
+        "actor": "11111111-1111-4111-8111-111111111111",
+        "at": 1763172000000,
+        "member": "44444444-4444-4444-8444-444444444444",
+        "memberKey": "Wd8NgIFBR0r_DaXgoiTIpzh-IrIoM2zfTGlAZUGc2FU",
+        "role": "reader",
+        "grantId": "sjNsfAde3v70hrOToXwGvA"
+      },
+      "frameB64": "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyt_1g1erU6zL5HhOc2kcNk6gEm7bKaHejzXyzZyrc7Eoa_D-gQMYyq8EqlO6VuJ8NO6YAxyKTqbO67WMk27DKQR7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiZWI2Y2JkNzMzODRkOWM2MTFkYzRjMmJiZTk2NmM1NWJiZThkZjkzODNhZTFlYzE3N2UwNjM4ZjIwZjEyOWVjMyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTcyMDAwMDAwLCJtZW1iZXIiOiI0NDQ0NDQ0NC00NDQ0LTQ0NDQtODQ0NC00NDQ0NDQ0NDQ0NDQiLCJtZW1iZXJLZXkiOiJXZDhOZ0lGQlIwcl9EYVhnb2lUSXB6aC1JcklvTTJ6ZlRHbEFaVUdjMkZVIiwicm9sZSI6InJlYWRlciIsImdyYW50SWQiOiJzak5zZkFkZTN2NzBock9Ub1h3R3ZBIn0",
+      "expect": {
+        "status": 400,
+        "error": "bad_signer"
+      }
+    }
+  ]
+}

@@ -13,7 +13,8 @@ import com.goterl.lazysodium.SodiumAndroid
  */
 private val loaded: Result<CryptoProvider> by lazy {
     try {
-        Result.success(LazySodiumCryptoProvider(LazySodiumAndroid(SodiumAndroid())))
+        // A test run's tripwire, when one is on the class path (the app's JVM unit tests), decorates it ([watched]).
+        Result.success(watched(LazySodiumCryptoProvider(LazySodiumAndroid(SodiumAndroid()))))
     } catch (t: Throwable) {
         // A VM-level failure is not a loader verdict — let it out un-memoized (the lazy retries).
         if (t is VirtualMachineError) throw t

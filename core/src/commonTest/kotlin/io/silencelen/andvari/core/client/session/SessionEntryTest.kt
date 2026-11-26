@@ -214,6 +214,27 @@ class SessionEntryTest {
         assertNull(session.get())
     }
 
+    /**
+     * Design §2.2, strict decoding, on the older account road too: a login whose account keys carry a text in another
+     * form than the canonical one (the sealed seed with padding) is refused before anything opens or is kept, and the
+     * session it issued is ended. Before, the tolerant decoder opened it and the keys were kept.
+     */
+    @Test
+    fun aLoginWhoseKeysAreNotInCanonicalFormIsRefusedAndKeepsNothing() = runBlocking<Unit> {
+        val seed = keys.encryptedIdentitySeed
+        assertTrue(seed.length % 4 != 0, "a text whose length padding can change")
+        val padded = seed + "=".repeat(4 - seed.length % 4)
+        assertNull(io.silencelen.andvari.core.crypto.Bytes.fromB64Canonical(padded), "not canonical")
+        login = { respond(sessionJson(keys.copy(encryptedIdentitySeed = padded)), HttpStatusCode.OK, headers) }
+        val r = assertIs<SignInResult.Failed>(entry.signIn(EMAIL, PASSWORD, null, engineSync))
+        assertIs<io.silencelen.andvari.core.client.onboard.ServedKeysNotCanonical>(r.cause)
+        val loggedIn = calls.indexOfFirst { it.endsWith("/auth/login") }
+        assertTrue(calls.indexOfFirst { it.endsWith("/auth/logout") } > loggedIn, "the session the login issued is ended")
+        assertNull(store.stored)
+        assertNull(store.origin(homeKey).accountKeys, "no key text was kept")
+        assertNull(session.get())
+    }
+
     @Test
     fun aSignInThatFailsBeforeAnySessionIsIssuedRevokesNothing() = runBlocking<Unit> {
         prelogin = refused("not_found", HttpStatusCode.NotFound)

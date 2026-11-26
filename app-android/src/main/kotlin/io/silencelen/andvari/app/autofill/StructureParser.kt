@@ -43,6 +43,13 @@ data class FieldOf<I>(
      *  OUT of new/confirm boxes when a current-password field exists. Default false so every
      *  pre-existing construction and its verdicts stay bit-identical. */
     val isNewPassword: Boolean = false,
+    /** The frame's scheme (`getWebScheme`, inherited with [webDomain]); null when the
+     *  frame reports none. On an `http` frame only an address saved as http matches ([FillPlan.fieldMatches]). */
+    val webScheme: String? = null,
+    /** The field is an HTML element (the node carries `htmlInfo`, or sits inside one that does).
+     *  In an app that is not a verified browser, such a field with no [webDomain] is a page of unknown address: it is
+     *  never filled directly and never matched to the app's own login ([FillPlan.fieldFit]). */
+    val isHtml: Boolean = false,
 )
 
 /**
@@ -112,13 +119,15 @@ object StructureParser {
         val autofillType: Int,
         val options: List<String>,
         val isNewPassword: Boolean,
+        val scheme: String?,
+        val html: Boolean,
     )
 
     fun parse(structure: AssistStructure, focusedId: AutofillId?): ParsedForm {
         val appPackage = structure.activityComponent?.packageName ?: ""
         val candidates = ArrayList<Candidate>()
         for (i in 0 until structure.windowNodeCount) {
-            walk(structure.getWindowNodeAt(i).rootViewNode, null, 0, candidates)
+            walk(structure.getWindowNodeAt(i).rootViewNode, null, null, false, 0, candidates)
         }
         val refined = CardForm.refine(candidates.map { it.signal })
         val fields = ArrayList<ParsedField>()
@@ -130,12 +139,12 @@ object StructureParser {
                 kind.isCardKind -> ccFields
                 else -> continue // NONE dropped, as before
             }
-            target.add(ParsedField(c.id, kind, c.domain, winningSignal(c.signal, kind), c.autofillType, c.options, c.signal.maxLength, c.isNewPassword))
+            target.add(ParsedField(c.id, kind, c.domain, winningSignal(c.signal, kind), c.autofillType, c.options, c.signal.maxLength, c.isNewPassword, c.scheme, c.html))
         }
         return ParsedForm(fields, appPackage, ccFields, refined.formKind, focusedId)
     }
 
-    private fun walk(node: AssistStructure.ViewNode, inheritedDomain: String?, depth: Int, out: MutableList<Candidate>) {
+    private fun walk(node: AssistStructure.ViewNode, inheritedDomain: String?, inheritedScheme: String?, inheritedHtml: Boolean, depth: Int, out: MutableList<Candidate>) {
         if (depth > MAX_DEPTH) return
         val important = node.importantForAutofill
         // A subtree marked NO_EXCLUDE_DESCENDANTS opts itself and its children out entirely.
@@ -143,6 +152,12 @@ object StructureParser {
 
         // This node's frame domain overrides the inherited one for itself + its subtree.
         val domain = node.webDomain?.takeIf { it.isNotEmpty() } ?: inheritedDomain
+        // The scheme rides with the domain, from the same node (API 28 getWebScheme), inherited the same way
+        // (as the save side takes it: the scheme the browser reported for the very frame that gave the domain).
+        val scheme = node.webScheme?.takeIf { it.isNotEmpty() } ?: inheritedScheme
+        // An HTML element, or anything inside one, is part of a web page whatever domain it reports
+        // (the save side marks the same, SaveExtractor's `node.htmlInfo != null`).
+        val html = node.htmlInfo != null || inheritedHtml
 
         val id = node.autofillId
         if (id != null && important != View.IMPORTANT_FOR_AUTOFILL_NO) {
@@ -156,10 +171,12 @@ object StructureParser {
                     // be selected), never what the user typed — the walk stays value-blind.
                     options = node.autofillOptions?.map(CharSequence::toString) ?: emptyList(),
                     isNewPassword = isNewPassword(node),
+                    scheme = scheme,
+                    html = html,
                 ),
             )
         }
-        for (i in 0 until node.childCount) walk(node.getChildAt(i), domain, depth + 1, out)
+        for (i in 0 until node.childCount) walk(node.getChildAt(i), domain, scheme, html, depth + 1, out)
     }
 
     /**

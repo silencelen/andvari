@@ -60,7 +60,7 @@
     --gold-hi: #8f6b16;
     --gold-lo: #7d5e14;
     --danger: #b3402c;
-    --ok: #4f7a3a;
+    --ok: #4c7538;
     --btn-ink: #fdf9f0;
     --glyph-hi: #e9d9a6;
     --glyph-lo: #d8bd7a;
@@ -97,7 +97,7 @@
   --gold-hi: #8f6b16;
   --gold-lo: #7d5e14;
   --danger: #b3402c;
-  --ok: #4f7a3a;
+  --ok: #4c7538;
   --btn-ink: #fdf9f0;
   --glyph-hi: #e9d9a6;
   --glyph-lo: #d8bd7a;
@@ -164,6 +164,15 @@ body {
     radial-gradient(120% 50% at 50% 115%, rgba(208, 169, 74, 0.05), transparent 55%);
   -webkit-font-smoothing: antialiased;
 }
+/* Rendered run 2026-11-16: Chrome caps the popup at 600px, and a card notice or a message above the 400px vault
+   pushed the message, Lock and Sign out below the fold, where nobody saw them. The popup (the page with .pop-head;
+   options and the connector share this file) is now one column capped at 600: everything keeps its height except the
+   unlocked vault, which gives up rows (its list scrolls) to make room. */
+body:has(> .pop-head) { display: flex; flex-direction: column; max-height: 600px; }
+body:has(> .pop-head) > * { flex: none; }
+body:has(> .pop-head) > .unlocked { flex: 0 1 auto; min-height: 110px; }
+/* A message under the sign-in form (link_required is long): the decorative hero gives its room to it. */
+body:has(#msg:not([hidden])) #locked .hero { display: none; }
 
 /* ---- header: compact wordmark + connectivity dot ---- */
 .pop-head {
@@ -171,12 +180,17 @@ body {
   border-bottom: 1px solid var(--edge);
 }
 .brand { font-family: var(--serif); font-weight: 600; font-size: 18px; letter-spacing: 0.02em; color: var(--ink); }
-.brand .a-mark { color: var(--gold); }
-.brand .sigil-sm { color: var(--gold); margin-right: 6px; text-shadow: 0 1px 10px rgba(208, 169, 74, 0.35); }
-/* The marks are inline SVG (web Sigil.tsx geometry — the raw runic codepoints tofu without a
-   Runic-covering font); text-shadow can't reach SVG strokes, so the glows are restated as
-   drop-shadows (web styles.css idiom). Nudged to sit on the wordmark baseline. */
-.brand .sigil-sm svg { vertical-align: -0.12em; filter: drop-shadow(0 1px 10px rgba(208, 169, 74, 0.35)); }
+/* The name is a drawing in one color (src/brand.ts, assets/brand/wordmark.svg). Its box is 0.98 of an
+   em, 1000 units to the em with y = 0 on the baseline: at a height of 0.98em, a width of 3.017em and
+   lowered by 0.24em it takes the size and the baseline of the text it stands in for. A test build's
+   " dev" is text after it. */
+.wordmark { height: 0.98em; width: 3.017em; vertical-align: -0.24em; }
+/* The header lockup, a twin of the web app's appbar (web styles.css `.brand .sigil-sm`): the rune as
+   tall as the name's "d" (BRAND.md, "Lockups": its 24-unit box 0.913em), its foot on the baseline
+   (-0.105em), and with 0.016em more than the box's own margin the gap to the name is the lockup's.
+   text-shadow can't reach an SVG, so the glow is a drop-shadow. */
+.brand .sigil-sm { color: var(--gold); margin-right: 0.016em; }
+.brand .sigil-sm svg { width: 0.913em; height: 0.913em; vertical-align: -0.105em; filter: drop-shadow(0 1px 10px rgba(208, 169, 74, 0.35)); }
 .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
 .dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
 .dot.off { background: var(--ink-faint); }
@@ -208,10 +222,21 @@ body {
 /* A15 review F1: the pending-server card shown instead of the sign-in form (reuses the locked card's padding). */
 .confirm-server-h { margin: 0 0 8px; font-size: 15px; font-weight: 600; }
 .confirm-server-body { margin: 0 0 10px; font-size: 12.5px; color: var(--ink-dim); }
+/* Rendered run 2026-11-16: the two choices of the first popup touched. */
+.confirm-server .primary + .primary { margin-top: 8px; }
+/* Rendered run: in the two stops "Forget this server" is the only way on, and it was an 11px dim link with a
+   2px ring around it. It is a whole-width button now, plain (not gold: it deletes this browser's copy). */
+.confirm-server .confirm-server-forget { width: 100%; font-size: 13px; color: var(--ink); padding: 9px 12px; }
+/* The password label names an email and an origin: never uppercased, which would hide the letters an origin is told
+   apart by (a capital I and a small l look alike in capitals). */
+#password-label { text-transform: none; letter-spacing: normal; font-size: 11.5px; }
 .confirm-server-origin {
   display: block; margin: 0 0 10px; padding: 8px 10px; border: 1px solid var(--edge); border-radius: var(--radius);
   font-family: var(--mono); font-size: 12px; color: var(--ink); overflow-wrap: anywhere; direction: ltr;
 }
+/* The question before filling a login saved for another site names hosts, and a crafted host has dots but no break
+   point: without this its end, where the site's registrable domain is, runs past the popup's edge. */
+#other-site-confirm, #other-site-confirm button { overflow-wrap: anywhere; }
 .hero { text-align: center; margin-bottom: 16px; }
 .hero .sigil {
   font-family: var(--serif); font-size: 38px; line-height: 1; color: var(--gold);
@@ -284,6 +309,14 @@ input:disabled { opacity: 0.6; cursor: not-allowed; }
 .msg.ok { background: color-mix(in oklab, var(--ok) 12%, transparent); color: var(--ok); border: 1px solid color-mix(in oklab, var(--ok) 40%, transparent); }
 /* The message strip is shared by both views (unlock errors, ping results, copy failures). */
 #msg { margin: 2px 16px 12px; }
+/* A message with parts (livemsg.ts renderBlocks): the title above, one paragraph per line of the words. */
+.msg-title { display: block; font-weight: 600; margin: 0 0 4px; }
+.msg-para, .confirm-server-body .msg-para, .gate-body .msg-para { margin: 0; }
+.msg-para + .msg-para { margin-top: 6px; }
+/* The card notice: the kind change gate's title above its sentence, its two choices below. */
+.card-notice-title { display: block; font-weight: 600; margin: 0 0 4px; }
+.card-notice-acts { display: flex; gap: 12px; align-items: center; margin-top: 6px; }
+.card-notice-acts:not(:has(button:not([hidden]))) { display: none; }
 
 /* Self-update banner — a calm gold note above both views; not an error, so it borrows the
    info palette rather than the danger one. Hidden until the SW confirms a newer build. */
@@ -483,6 +516,9 @@ input:disabled { opacity: 0.6; cursor: not-allowed; }
 /* ---- quick unlock Tier B (spec 01 §8.4): PIN entry, one-time offer card, Settings row ---- */
 /* A visual seam above the PIN entry / enroll form so the popup-only PIN affordance reads as ours. */
 .qu-block { margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--edge); }
+/* Rendered run: the rule divides the quick unlock from the hero above it. Where a message takes the hero's
+   room (above), nothing is left to divide from, and the rule stood alone as a blank ruled strip over the PIN. */
+body:has(#msg:not([hidden])) #locked .qu-block { margin-top: 0; padding-top: 0; border-top: 0; }
 #qu-master-form { margin-top: 4px; }
 /* The standing anti-phishing reminder (breaker B7) — muted, never alarming, never a page could show it. */
 .qu-antiphish { margin: 8px 0 0; font-size: 11.5px; line-height: 1.4; color: var(--ink-dim); }
@@ -491,6 +527,9 @@ input:disabled { opacity: 0.6; cursor: not-allowed; }
   margin: 0 0 12px; padding: 10px 12px; border-radius: var(--radius);
   background: color-mix(in oklab, var(--gold) 10%, transparent); border: 1px solid color-mix(in oklab, var(--gold) 32%, transparent);
 }
+/* Rendered run 2026-11-16: in the unlocked view the offer and the enroll form ran edge to edge. */
+#unlocked > .qu-offer { margin: 10px 16px 2px; }
+#unlocked > #qu-enroll { margin: 4px 16px 0; }
 .qu-offer p { margin: 0 0 8px; font-size: 12.5px; line-height: 1.4; color: var(--ink); }
 .qu-acts { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .qu-acts .sm, .primary.sm, .ghost.sm { padding: 6px 12px; font-size: 12.5px; }

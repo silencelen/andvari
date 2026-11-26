@@ -3,7 +3,12 @@ import type { ApiClient } from "../api/client";
 import type { AccountDeletePreview } from "../api/types";
 import type { Account } from "../vault/account";
 import type { VaultStore } from "../vault/store";
+import { deleteAccount, type SettingsSession } from "../vault/settingsflow";
+import type { SharedLogSession } from "../vault/sharedlogs";
 import {
+  cardOutcomeOf,
+  type DeletionOutcome,
+  previewOfV2,
   afterCheck,
   afterOutcome,
   BLOCKED_UNEXPLAINED,
@@ -180,7 +185,7 @@ export function DeleteAccountBody({
                 </Field>
               )}
               {v.err && <Msg kind="err">{v.err}</Msg>}
-              <div className="actions">
+              <div className="actions wrap">
                 <button type="submit" className="ghost" style={{ color: "var(--danger)" }} disabled={!v.canSubmit || v.busy}>
                   {v.busy ? <Busy>Deleting…</Busy> : "Delete my account permanently"}
                 </button>
@@ -194,6 +199,49 @@ export function DeleteAccountBody({
   );
 }
 
+/**
+ * The submit on the post-cut-over flow (spec 03 §13, design §3.11): a fresh preview, each membership's log brought
+ * up to its served head, one leave per membership from this browser's verified state, the password proof through
+ * the password rule, then the one request. `onSend` fires before the flow starts, so a session end App sees at any
+ * point of it is held for this request. Without a shared-vault layer no log is verified here: each leave is placed
+ * from the served head under the flow's one-day bound.
+ */
+export async function deleteThroughFlow(
+  settings: SettingsSession,
+  shared: SharedLogSession | null,
+  input: { typedEmail: string; password: string; totp: string; totpRequired: boolean },
+  onSend?: () => void,
+  clock: () => number = Date.now,
+): Promise<DeletionOutcome> {
+  onSend?.();
+  const code = totpDigits(input.totp);
+  const o = await deleteAccount(settings, {
+    typedEmail: input.typedEmail,
+    password: input.password,
+    ...(code.length > 0 ? { totp: code } : {}),
+    verifiedState: (id) => shared?.logs.verifiedState(id) ?? null,
+    nowMs: clock(),
+    ...(shared ? { refreshLogs: (ms: Parameters<SharedLogSession["refreshForDeletion"]>[0]) => shared.refreshForDeletion(ms) } : {}),
+  });
+  return cardOutcomeOf(o);
+}
+
+type RecentlyDeleted = { readonly vaultId: string; readonly name: string | null; readonly purgeAt: number };
+
+/**
+ * Spec 03 §13 (2026-11-16): the caller's `GET /vaults/deleted`, for the preview's wording. A list that cannot be read
+ * leaves the wording as it was (such vaults then count among those only the person holds): the preview still names
+ * what is deleted, and the deletion itself re-checks everything.
+ */
+export async function recentlyDeletedOf(store: Partial<Pick<VaultStore, "listDeleted">>): Promise<RecentlyDeleted[]> {
+  if (!store.listDeleted) return [];
+  try {
+    return (await store.listDeleted()).map((d) => ({ vaultId: d.vaultId, name: d.name === "(vault)" ? null : d.name, purgeAt: d.purgeAt }));
+  } catch {
+    return [];
+  }
+}
+
 /** Whether the form may be submitted: the address matches, a password is typed, and the code has its six digits. */
 export function deleteFormReady(f: { typedEmail: string; accountEmail: string; password: string; totp: string; totpRequired: boolean }): boolean {
   return emailConfirmed(f.typedEmail, f.accountEmail) && f.password.length > 0 && (!f.totpRequired || totpDigits(f.totp).length >= 6);
@@ -203,6 +251,8 @@ export function DeleteAccountCard({
   client,
   account,
   store,
+  settings,
+  shared,
   email,
   onDeleted,
   onTrack,
@@ -212,7 +262,14 @@ export function DeleteAccountCard({
 }: {
   client: ApiClient;
   account: Account;
-  store: Pick<VaultStore, "vaults">;
+  store: Pick<VaultStore, "vaults"> & Partial<Pick<VaultStore, "listDeleted">>;
+  /**
+   * The post-cut-over Settings session (vault/settingsflow.ts). With it the card previews and deletes through
+   * `deleteAccount`, whose leaves are placed from the session's verified vault logs ([shared]) after each membership's
+   * log is brought up to the preview's head (design §3.11). Absent only in old callers.
+   */
+  settings?: SettingsSession;
+  shared?: SharedLogSession | null;
   /** The signed-in address the typed confirmation must match ("" when the session predates it: the server decides). */
   email: string;
   /** This browser should forget the account (App wipes its state and lands signed out). */
@@ -235,6 +292,8 @@ export function DeleteAccountCard({
   const [busy, setBusy] = useState(false);
   const [checking, setChecking] = useState(false);
 
+  // Spec 03 §13 (2026-11-16): the vaults the person already deleted, still restorable, named from their own metaBlob.
+  const [recentlyDeleted, setRecentlyDeleted] = useState<RecentlyDeleted[]>([]);
   // Names decrypt locally (the server knows vaults only as ids); once per preview, not per keystroke.
   const names = useMemo(() => new Map(store.vaults().map((v) => [v.vaultId, v.name] as const)), [store, preview]);
   const vaultName = (id: string): string | null => names.get(id) ?? null;
@@ -255,7 +314,9 @@ export function DeleteAccountCard({
     setPreviewError("");
     setFlow(initialFlow());
     try {
-      setPreview(await client.accountDeletePreview());
+      const [p, deleted] = await Promise.all([settings ? settings.wire.deletePreview().then(previewOfV2) : client.accountDeletePreview(), recentlyDeletedOf(store)]);
+      setRecentlyDeleted(deleted);
+      setPreview(p);
     } catch (e) {
       setPreviewError(previewErrorText(e));
     } finally {
@@ -272,10 +333,15 @@ export function DeleteAccountCard({
     let started = false;
     let settled = false;
     try {
-      const outcome = await runAccountDeletion(client, account, { email: typedEmail, password, totp, totpRequired }, () => {
-        started = true;
-        onTrack?.({ kind: "started" });
-      });
+      const outcome = settings
+        ? await deleteThroughFlow(settings, shared ?? null, { typedEmail, password, totp, totpRequired }, () => {
+            started = true;
+            onTrack?.({ kind: "started" });
+          })
+        : await runAccountDeletion(client, account, { email: typedEmail, password, totp, totpRequired }, () => {
+            started = true;
+            onTrack?.({ kind: "started" });
+          });
       settled = true;
       onTrack?.({ kind: "settled", outcome: settledOutcome(outcome) });
       if (outcome.kind === "deleted") {
@@ -295,7 +361,7 @@ export function DeleteAccountCard({
   const check = async () => {
     setChecking(true);
     try {
-      const c = await checkDeletion(client);
+      const c = await checkDeletion(settings ? { accountDeletePreview: async () => previewOfV2(await settings.wire.deletePreview()) } : client);
       if (c.kind === "still_here") setPreview(c.preview);
       setFlow((f) => afterCheck(f, c));
       onTrack?.({ kind: "checked", result: checkedResult(c) });
@@ -309,7 +375,7 @@ export function DeleteAccountCard({
     open,
     loading,
     previewError,
-    summary: preview ? deletionSummary(preview, vaultName, account.personalVaultId || null) : null, // "" = no personal vault
+    summary: preview ? deletionSummary(preview, vaultName, account.personalVaultId || null, recentlyDeleted) : null, // "" = no personal vault
     blockers: blockers === null ? null : blockerLines(blockers, vaultName),
     totpRequired,
     typedEmail,
@@ -342,9 +408,10 @@ export function DeleteAccountCard({
 /**
  * App's landing when the session ended WHILE the deletion request was in flight and the request's answer never came
  * (stepDeletionWatch's `offer_forget`): that end was, most likely, the deletion's own revocation. The vault is already
- * closed and this browser's session wiped, as at any sign-out; forgetting also drops the userId-scoped state and the
- * spec 01 §5 self-identity records, so the address can register again here. Signing in instead keeps them — the way to
- * check, since an account that still exists signs in.
+ * closed and this browser's session wiped, as at any sign-out; forgetting also drops the userId-scoped state but keeps the
+ * spec 01 §5 records of which account the address is and of its identity key, as a sign-out does, since the account may
+ * still exist (only a deletion the server confirmed removes them). Signing in instead is the way to check, since an
+ * account that still exists signs in.
  */
 export function DeletionOutcomeUnknownCard({ notice, onForget, onSignIn }: { notice?: string; onForget: () => void; onSignIn: () => void }) {
   return (

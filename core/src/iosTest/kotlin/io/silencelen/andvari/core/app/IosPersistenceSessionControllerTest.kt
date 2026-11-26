@@ -33,11 +33,6 @@ class IosPersistenceSessionControllerTest : SessionControllerTest() {
             real.clear()
         }
 
-        override fun forgetServer(originKey: String) {
-            keys.keys.removeAll { it.startsWith("$originKey/") } // the real store drops every key kept under the origin
-            real.forgetServer(originKey)
-        }
-
         override fun origin(key: String): OriginStore {
             val originKey = key
             val inner = real.origin(key)

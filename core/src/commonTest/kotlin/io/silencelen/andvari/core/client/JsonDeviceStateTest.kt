@@ -35,8 +35,14 @@ class JsonDeviceStateTest {
         assertEquals(1, file.writes)
     }
 
-    @Test fun aCorruptFileReadsAsEmpty() {
-        assertNull(JsonDeviceState(MemoryFile("{not json")).get("a"))
+    /** Design §4.4 "A trust record that cannot be read is not an empty one": a file that does not parse is unknown, never
+     *  empty (it held pins and marks), and the whole-map write is never made over it. */
+    @Test fun aCorruptFileIsNeverReadAsEmptyNorWrittenOver() {
+        val file = MemoryFile("{not json")
+        val state = JsonDeviceState(file)
+        assertFailsWith<IllegalStateException> { state.get("a") }
+        assertFailsWith<IllegalStateException> { state.set("a", "1") }
+        assertEquals("{not json", file.text)
     }
 
     /** A file that is there and cannot be read now (iOS, the device locked) is never taken for an empty one: a write after

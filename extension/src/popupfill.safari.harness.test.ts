@@ -49,8 +49,11 @@ test("Safari: this site's login fills on the page shown; a login saved for anoth
   const ok = await w.popup({ type: "fillFromPopup", itemId: "item-bank", page: BANK });
   assert.equal(ok.ok, true, JSON.stringify(ok));
   const ask = await w.popup({ type: "fillFromPopup", itemId: "item-forum", page: BANK });
-  assert.deepEqual(ask.needsConfirm, { savedFor: "forum.example", page: "bank.example" }, "the person is asked, with both hosts named");
-  const confirmed = await w.popup({ type: "fillFromPopup", itemId: "item-forum", confirmedOtherSite: "bank.example", page: BANK });
+  assert.deepEqual([ask.needsConfirm.savedFor, ask.needsConfirm.page, ask.needsConfirm.domain], ["forum.example", "bank.example", null], "the person is asked, with both hosts named");
+  // A yes that names only the page fills nothing: the yes is bound to the login it was asked for.
+  const hostOnly = await w.popup({ type: "fillFromPopup", itemId: "item-forum", confirmedOtherSite: "bank.example", page: BANK });
+  assert.equal(hostOnly.ok, false);
+  const confirmed = await w.popup({ type: "fillFromPopup", itemId: "item-forum", confirmedOtherSite: ask.needsConfirm.confirm, page: BANK });
   assert.equal(confirmed.ok, true, JSON.stringify(confirmed));
   assert.deepEqual(redeemed.map((r) => r.origin), [BANK, BANK]);
   assert.deepEqual(redeemed.map((r) => (r.secret as { password: string }).password), ["bank-pw", "forum-pw"]);

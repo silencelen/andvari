@@ -9,7 +9,7 @@ import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
 import { initSodium } from "../crypto/sodium";
 import { planAttachments } from "../export/plan";
 import { Account } from "./account";
-import { VaultStore, type VaultItem } from "./store";
+import { type ItemWire, VaultStore, type VaultItem } from "./store";
 
 /**
  * Security review 2026-10 (root cause D): `AttachmentRef.size` is the item author's claim — a
@@ -41,8 +41,8 @@ describe("a declared attachment size is checked against the bytes", () => {
     const wire = new Uint8Array(enc.header.length + enc.ciphertext.length);
     wire.set(enc.header);
     wire.set(enc.ciphertext, enc.header.length);
-    const api = { downloadAttachment: async () => wire } as unknown as ApiClient;
-    const store = new VaultStore(api, account);
+    const items = { downloadAttachment: async () => wire } as unknown as ItemWire;
+    const store = new VaultStore({} as ApiClient, account, undefined, undefined, items);
     const ref = (size: number): AttachmentRef => ({ id: "0f8e2c1a-3b4d-4e5f-8a9b-0c1d2e3f4a5b", name: "f", size, fileKey: toB64(key) });
     const item = (r: AttachmentRef): VaultItem => ({ itemId: "i", vaultId: "v", rev: 1, updatedAt: 0, formatVersion: 1, doc: { type: "note", name: "n", attachments: [r] } satisfies ItemDoc });
 

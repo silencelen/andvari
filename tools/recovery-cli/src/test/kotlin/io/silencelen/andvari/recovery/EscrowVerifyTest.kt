@@ -5,8 +5,6 @@ import io.silencelen.andvari.core.crypto.Bytes
 import io.silencelen.andvari.core.crypto.Envelope
 import io.silencelen.andvari.core.crypto.Escrow
 import io.silencelen.andvari.core.crypto.createCryptoProvider
-import io.silencelen.andvari.core.model.EscrowDrillReceipt
-import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -39,20 +37,32 @@ class EscrowVerifyTest {
         crypto.signKeypairFromSeed(m.idSeed), m.uvk, 1_791_590_400_000L,
     )
 
-    private fun goodRow(userId: String): EscrowDumpRow = member(userId).let { row(it, v2(it)) }
+    /** The copy every client seals now (spec 04 §3): it names the account's address. */
+    private fun v3(m: Member, toPub: ByteArray = kp.publicKey) = Escrow.sealUvkV3(
+        crypto, toPub, Escrow.fingerprint(crypto, toPub), m.userId, "m@example.com", crypto.boxKeypairFromSeed(m.idSeed).publicKey,
+        crypto.signKeypairFromSeed(m.idSeed), m.uvk, 1_791_590_400_000L,
+    )
+
+    private fun goodRow(userId: String): EscrowDumpRow = member(userId).let { row(it, v3(it)) }
 
     @Test
-    fun allGoodBlobsPass_v2AndLegacyV1() {
+    fun aV3CopyPasses_andTheOldFormsFailBecauseTheyDoNotSayWhoseTheyAre() {
+        val old = member("33333333-3333-4333-8333-333333333333")
         val legacy = member("22222222-2222-4222-8222-222222222222")
         val rows = listOf(
             goodRow("11111111-1111-4111-8111-111111111111"),
+            row(old, v2(old)),
             row(legacy, Escrow.sealUvkV1(crypto, kp.publicKey, legacy.userId, legacy.uvk)),
         )
         val results = EscrowVerify.verify(crypto, seed, rows)
-        assertEquals(2, results.size)
-        assertTrue(results.all { it.pass }, results.toString())
-        assertTrue(results[0].detail.startsWith("v2 ok"), results[0].detail)
-        assertTrue(results[1].detail.startsWith("v1 legacy ok"), results[1].detail)
+        assertEquals(3, results.size)
+        assertTrue(results[0].pass && results[0].detail.startsWith("v3 ok"), results[0].detail)
+        // spec 04 §4 steps 4 and 7: assist cannot use them, so the drill names
+        // them; the pre-signed form is not read at all.
+        assertFalse(results[1].pass)
+        assertTrue(results[1].detail.startsWith("refused: no_address") && "the operator cannot recover this account" in results[1].detail, results[1].detail)
+        assertFalse(results[2].pass)
+        assertTrue(results[2].detail.startsWith("refused: unknown_format") && "the operator cannot recover this account" in results[2].detail, results[2].detail)
     }
 
     @Test
@@ -79,6 +89,31 @@ class EscrowVerifyTest {
         val r = EscrowVerify.verify(crypto, seed, listOf(goodRow("cccccccc-cccc-4ccc-8ccc-cccccccccccc").copy(encryptedIdentitySeed = null))).single()
         assertFalse(r.pass)
         assertTrue("identity columns" in r.detail, r.detail)
+    }
+
+    /** A row without its identity columns is refused by the name spec 04 §4 step 0.3 gives it, with the re-export sentence. */
+    @Test
+    fun rowWithoutTheIdentityColumns_isIdentityCheckRequired_withItsSentence() {
+        for (r in EscrowVerify.verify(
+            crypto, seed,
+            listOf(
+                goodRow("cccccccc-cccc-4ccc-8ccc-cccccccccccc").copy(encryptedIdentitySeed = null),
+                goodRow("dddddddd-dddd-4ddd-8ddd-dddddddddddd").copy(identityPub = null),
+            ),
+        )) {
+            assertFalse(r.pass)
+            assertTrue(r.detail.startsWith("refused: identity_check_required ("), r.detail)
+            assertTrue("re-export with: ${EscrowVerify.DUMP_SQL}" in r.detail, r.detail)
+        }
+    }
+
+    /** Every refusal the fleet check can make has a name, and none quotes an exception's message. */
+    @Test
+    fun everyRefusalOfTheFleetCheck_hasAName() {
+        val good = goodRow("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+        val (spaced, otherKey) = EscrowVerify.verify(crypto, seed, listOf(good.copy(sealed = good.sealed + " "), good.copy(fingerprint = "0".repeat(64))))
+        assertTrue(spaced.detail.startsWith("refused: bad_copy ("), spaced.detail)
+        assertTrue(otherKey.detail.startsWith("refused: recovery_fp_mismatch ("), otherKey.detail)
     }
 
     @Test
@@ -119,7 +154,7 @@ class EscrowVerifyTest {
     }
 
     @Test
-    fun mixedFleetReportsPerUser_andTheReceiptListsOnlyPasses() {
+    fun mixedFleetReportsPerUser_andPrintsNoReceipt() {
         val rows = listOf(
             goodRow("11111111-1111-4111-8111-111111111111"),
             goodRow("22222222-2222-4222-8222-222222222222").copy(sealed = Bytes.toB64(crypto.randomBytes(226))),
@@ -129,13 +164,18 @@ class EscrowVerifyTest {
         assertTrue(results[0].pass)
         assertFalse(results[1].pass)
         assertEquals(1, results.count { !it.pass }) // the exit-nonzero condition in main()
-        // §8.4 drill hook: the receipt carries each PASSED member blob's hash, never the canary or a FAIL.
-        val receipt = Json.decodeFromString(EscrowDrillReceipt.serializer(), EscrowVerify.receipt(results))
-        assertEquals(listOf("11111111-1111-4111-8111-111111111111"), receipt.passed.map { it.userId })
-        assertEquals(Bytes.toHexLower(crypto.sha256(Bytes.fromB64(rows[0].sealed))), receipt.passed.single().sealedSha256)
+        // No receipt for a route the server does not have
+        // (`/admin/escrow/drill`); the verification itself is the whole output.
+        for (fleet in listOf(results, results.filter { it.pass })) {
+            val out = EscrowVerify.reportLines(fleet).joinToString("\n")
+            assertFalse("receipt" in out.lowercase() || "escrow/drill" in out || "/api/" in out, out)
+            assertTrue("${fleet.count { it.pass }}/${fleet.size} PASS" in out, out)
+        }
+        assertTrue(EscrowVerify.reportLines(results).last().contains("1 escrow blob(s) FAILED"))
+        assertEquals("All escrowed accounts in this download (2) are recoverable with this sheet.", EscrowVerify.reportLines(results.filter { it.pass }).last())
     }
 
-    // ---- A14 (F12): the table and the receipt print server-supplied strings ----
+    // ---- A14 (F12): the table prints server-supplied strings ----
 
     @Test
     fun theTableEscapesHostileUserIdsAndDetail() {
@@ -150,17 +190,6 @@ class EscrowVerifyTest {
         assertTrue("\\u001B[1A\\u001B[2K11111111" in out, out)
         assertTrue("\\u009B" in out && "\\u001B]52;c;cHduZWQ=\\u0007" in out, out)
         assertEquals(3, out.lines().size, "header + one line per row")
-    }
-
-    @Test
-    fun theTerminalReceiptIsTheSameJsonWithItsControlsEscaped() {
-        val id = "11111111-1111-4111-8111-11111111111\u009B"
-        val results = listOf(EscrowVerifyResult(id, true, "v2 ok", "ab".repeat(32)))
-        val shown = EscrowVerify.receiptForTerminal(results)
-        assertEquals("", shown.filter { it != '\n' && io.silencelen.andvari.core.client.TerminalText.isControl(it) }, shown)
-        // Lossless: \u009B is JSON's own escape, so pasting the printed receipt uploads the same userId.
-        val parsed = Json.decodeFromString(EscrowDrillReceipt.serializer(), shown)
-        assertEquals(id, parsed.passed.single().userId)
     }
 
     @Test

@@ -58,8 +58,13 @@ kotlin {
                 implementation(libs.sqlite.jdbc)
             }
         }
-        jvmTest.dependencies {
-            implementation(libs.ktor.client.java)
+        jvmTest {
+            // The zero-key tripwire (test machinery, never shipped): see gradle/zero-key-tripwire.gradle.kts.
+            kotlin.srcDir("src/jvmTripwire/kotlin")
+            resources.srcDir("src/jvmTripwire/resources")
+            dependencies {
+                implementation(libs.ktor.client.java)
+            }
         }
         androidMain {
             kotlin.srcDir("src/jvmShared/kotlin")
@@ -77,6 +82,10 @@ kotlin {
                 // on the device.
                 implementation("com.goterl:lazysodium-android:${libs.versions.lazysodium.android.get()}") {
                     exclude(group = "net.java.dev.jna", module = "jna")
+                    // 5.2.0 declares androidx.core, which no class of the library refers to: excluded, so the
+                    // library's update moves no other dependency (every classpath differs from 5.1.0's in the
+                    // library's own line only).
+                    exclude(group = "androidx.core")
                 }
                 implementation("net.java.dev.jna:jna:${libs.versions.jna.get()}@aar")
                 api(libs.ktor.client.okhttp)
@@ -105,6 +114,63 @@ tasks.withType<org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeSimu
     inputs.dir(rootProject.projectDir.resolve("spec/test-vectors"))
         .withPropertyName("andvariTestVectors")
         .withPathSensitivity(PathSensitivity.RELATIVE)
+}
+
+// The tripwire for keys used after a lock: the test JVM's crypto provider
+// records every operation under an all-zero key, and the floor every refusal, and the suite fails at its end on any line
+// no test asked for. Core's Android unit tests (commonTest run again on the Android variant) are not watched.
+extra["zeroKeyTripwireTasks"] = listOf("jvmTest")
+apply(from = rootProject.file("gradle/zero-key-tripwire.gradle.kts"))
+
+// The shared code's test server (FakeInstance, BearerTransport and the other helpers of commonTest), for the apps' unit
+// tests: the apps prove their screens over the real engine against the same in-memory server the shared code's own tests
+// use. Each configuration below carries the classes of one TEST compilation of this module, as a jar, and nothing else:
+// no dependency (the consumer brings kotlin-test itself; ktor-client-mock is not carried), no resource, and none of
+// core's main classes (the consumer has those from its ordinary dependency on :core, in the variant it runs).
+// The apps take them on their unit-test class paths only, never on a main or release one.
+// - testServerJvmElements: jvmTest's classes (commonTest + jvmTest), compiled against core's JVM variant; for the
+//   desktop. The zero-key tripwire, which jvmTest compiles in as well, is left out: the desktop compiles its own copy.
+// - testServerAndroidDebugElements / testServerAndroidReleaseElements: the classes of core's own Android unit-test
+//   compilation of that build type (commonTest + androidUnitTest), compiled against core's Android variant of that build
+//   type; for the Android app's unit tests of the same build type. Not the JVM jar: a class of the shared code's tests
+//   that calls an `internal` member of core calls it by a name that carries the module's name, which differs between
+//   core's JVM and Android variants, so the JVM-compiled server does not link against the Android variant.
+// Each has a capability of its own (as Gradle's test fixtures have), so it never stands in for core itself.
+val testServerJvmElements: Configuration by configurations.creating {
+    isCanBeConsumed = true
+    isCanBeResolved = false
+    outgoing.capability("io.silencelen.andvari:core-test-server-jvm:1")
+}
+val testServerAndroidDebugElements: Configuration by configurations.creating {
+    isCanBeConsumed = true
+    isCanBeResolved = false
+    outgoing.capability("io.silencelen.andvari:core-test-server-android-debug:1")
+}
+val testServerAndroidReleaseElements: Configuration by configurations.creating {
+    isCanBeConsumed = true
+    isCanBeResolved = false
+    outgoing.capability("io.silencelen.andvari:core-test-server-android-release:1")
+}
+val testServerJvmJar by tasks.registering(Jar::class) {
+    archiveBaseName.set("core-test-server-jvm")
+    destinationDirectory.set(layout.buildDirectory.dir("test-server"))
+    from(kotlin.jvm().compilations.getByName("test").output.classesDirs)
+    exclude("io/silencelen/andvari/tripwire/**")
+}
+artifacts.add(testServerJvmElements.name, testServerJvmJar)
+kotlin.androidTarget().compilations.all {
+    val compilation = this
+    val (buildType, elements) = when (compilation.name) {
+        "debugUnitTest" -> "debug" to testServerAndroidDebugElements
+        "releaseUnitTest" -> "release" to testServerAndroidReleaseElements
+        else -> return@all
+    }
+    val jar = tasks.register<Jar>("testServerAndroid${buildType.replaceFirstChar { it.uppercase() }}Jar") {
+        archiveBaseName.set("core-test-server-android-$buildType")
+        destinationDirectory.set(layout.buildDirectory.dir("test-server"))
+        from(compilation.output.classesDirs)
+    }
+    artifacts.add(elements.name, jar)
 }
 
 tasks.withType<Test>().configureEach {

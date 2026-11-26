@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
-import type { ClientPolicy, KdfParams as WireKdfParams } from "../api/types";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { KdfParams as WireKdfParams } from "../api/types";
+import type { ClientPolicyV2 as ClientPolicy } from "../api/wire";
 import { concat, toB64, utf8 } from "../crypto/bytes";
 import { DEFAULT_KDF_PARAMS, type KdfParams } from "../crypto/keys";
 import { randomBytes } from "../crypto/provider";
@@ -29,7 +30,9 @@ import {
 } from "../export/plan";
 import type { Account } from "../vault/account";
 import type { VaultStore } from "../vault/store";
+import { BACKUP_NOT_MADE_CHANGED } from "./copy";
 import { Field } from "./Field";
+import { answerLimitText } from "./errors";
 import { fmtDate, humanSize } from "./format";
 import { BackLink } from "./BackLink";
 import { Busy } from "./Busy";
@@ -76,6 +79,12 @@ export function backupKdfParams(policy: { kdfParams: WireKdfParams } | null): Kd
   return usable ? p : DEFAULT_KDF_PARAMS;
 }
 
+/** An attachment file named on the panel, with the item it belongs to. */
+type NamedFile = { readonly itemId: string; readonly name: string };
+
+/** How many times a backup is sealed at most, where what may be handed out changed while it was sealed. */
+const MAX_SEALS = 3;
+
 /**
  * Export panel (spec 07) — both artifacts are built 100% client-side:
  * - "backup": the encrypted `.andvari` container (§2) — sync first, moment-of-truth
@@ -115,9 +124,15 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
   const [includeAttachments, setIncludeAttachments] = useState(false);
 
-  // Recompute the preview whenever the sync lands or toggles change.
-  const allVaults = useMemo(() => (syncDone ? store.vaults() : []), [store, syncDone]);
-  const allItems = useMemo(() => (syncDone ? store.list() : []), [store, syncDone]);
+  // Recompute the preview whenever the sync lands or toggles change, and whenever the vaults the store's guarded reader
+  // lists change (read at each render): a vault the person was removed from while the panel is open (by a sync, or by
+  // another tab of this browser) leaves the preview and the file at once.
+  const vaultsNow = syncDone ? store.vaults() : [];
+  const vaultsKey = JSON.stringify(vaultsNow);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const allVaults = useMemo(() => vaultsNow, [vaultsKey]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const allItems = useMemo(() => (syncDone ? store.list() : []), [store, syncDone, vaultsKey]);
   const preflight = useMemo(() => buildPreflight(allVaults, allItems), [allVaults, allItems]);
   const includedVaults = useMemo(
     () => allVaults.filter((v) => v.type === "personal" || !excluded.has(v.vaultId)),
@@ -125,6 +140,16 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
   );
   const orderedItems = useMemo(() => orderForExport(allItems, includedVaults), [allItems, includedVaults]);
   const attachmentPlan = useMemo(() => planAttachments(orderedItems), [orderedItems]);
+
+  /** What a file may hold at the moment it is written: the chosen items and vaults that the store's guarded reader still
+   *  hands out now (a removal can land while a backup fetches its attachments or seals). */
+  const handedOutNow = () => {
+    const listed = new Set(store.vaults().map((v) => v.vaultId));
+    return {
+      vaults: includedVaults.filter((v) => listed.has(v.vaultId)),
+      items: orderedItems.filter((it) => listed.has(it.vaultId) && store.get(it.itemId) !== undefined),
+    };
+  };
 
   const toggleVault = (vaultId: string) =>
     setExcluded((old) => {
@@ -137,7 +162,18 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState("");
   const [err, setErr] = useState("");
-  const [done, setDone] = useState<{ filename: string; overCap: string[]; fetchFailed: string[] } | null>(null);
+  /** The card after a file was written. The files it names are kept with their items, and drawn only while the store's
+   *  guarded reader still hands the item out (read at each render): a removal carried out later takes them off. */
+  const [done, setDone] = useState<{ filename: string; overCap: NamedFile[]; fetchFailed: NamedFile[]; fetchLimit: string | null } | null>(null);
+  const stillNamed = (files: readonly NamedFile[]): string[] => files.filter((f) => store.get(f.itemId) !== undefined).map((f) => f.name);
+  // A lock unmounts this panel: a backup still sealing when it does writes no file.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   // ---- backup passphrase (spec 07 §2.3) ----
   const [pw, setPw] = useState("");
@@ -158,11 +194,18 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
       keepAutoLockAlive();
       // 1. Fetch + section attachments one at a time (opt-in; §2.5). A fetch failure
       //    is retried once, then skipped BY NAME — never silently, never fatal.
-      const fetchFailed: string[] = [];
+      const fetchFailed: NamedFile[] = [];
+      let fetchLimit: string | null = null;
       const sections: AttachmentSection[] = [];
       const manifest: BackupAttachmentEntry[] = [];
+      // The files over the cap, with their items: every planned file the plan did not include.
+      const planned = new Set(attachmentPlan.included.map((e) => e.ref));
+      const overCap: NamedFile[] = includeAttachments
+        ? orderedItems.flatMap((item) => (item.doc.attachments ?? []).filter((ref) => !planned.has(ref)).map((ref) => ({ itemId: item.itemId, name: ref.name })))
+        : [];
       if (includeAttachments) {
         for (const { item, ref } of attachmentPlan.included) {
+          if (store.get(item.itemId) === undefined) continue; // no longer handed out: neither fetched nor written
           setProgress(`Fetching attachment “${ref.name}”…`);
           keepAutoLockAlive();
           let data: Uint8Array | null = null;
@@ -171,8 +214,9 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
           } catch {
             try {
               data = await store.downloadAttachment(item, ref); // retry once
-            } catch {
-              fetchFailed.push(ref.name);
+            } catch (e) {
+              fetchFailed.push({ itemId: item.itemId, name: ref.name });
+              fetchLimit = answerLimitText(e) ?? fetchLimit; // the server stopped answering: said beside the list
             }
           }
           if (!data) continue;
@@ -199,48 +243,72 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
       //    (VaultItem.formatVersion, captured from the wire at decrypt / the upload at
       //    save) — Kotlin-twin parity with Android's stored-fv recording, correct even
       //    on the fv1 legacy-restore edge where the floor and the stored fv diverge.
-      const payload: BackupPayload = {
-        v: 1,
-        exportedAt: Date.now(),
-        origin: typeof window !== "undefined" ? window.location.origin : "",
-        userId: account.userId,
-        identityFingerprint: fingerprint,
-        vaults: includedVaults.map((v) => ({ vaultId: v.vaultId, type: v.type, name: v.name, role: v.role ?? "" })),
-        items: orderedItems.map((it) => ({
-          itemId: it.itemId,
-          vaultId: it.vaultId,
-          formatVersion: it.formatVersion,
-          updatedAt: it.updatedAt,
-          doc: it.doc,
-        })),
-        attachments: manifest,
-        skipped: {
-          undecryptable: store.undecryptable().filter((u) => !excluded.has(u.vaultId)),
-          attachmentsOverCap: includeAttachments ? attachmentPlan.overCap : [],
-          attachmentFetchFailed: fetchFailed,
-        },
-      };
+      //    What the file holds is what the store's guarded reader hands out at the moment it is sealed, and it is read
+      //    again after the seal and its check (a removal can be carried out while either runs): a read that lost a vault
+      //    or an item is sealed again from the new read, at most MAX_SEALS times in all. If the last read still differs,
+      //    or nothing is left to back up, no file is written and the panel says so.
+      let now = handedOutNow();
+      let bytes: Uint8Array | null = null;
+      let named = { overCap, fetchFailed };
+      for (let seal = 1; bytes === null; seal++) {
+        const kept = new Set(now.items.map((it) => it.itemId));
+        const keptSections = manifest.map((m, i) => ({ m, s: sections[i]! })).filter((x) => kept.has(x.m.itemId));
+        named = { overCap: overCap.filter((f) => kept.has(f.itemId)), fetchFailed: fetchFailed.filter((f) => kept.has(f.itemId)) };
+        const payload: BackupPayload = {
+          v: 1,
+          exportedAt: Date.now(),
+          origin: typeof window !== "undefined" ? window.location.origin : "",
+          userId: account.userId,
+          identityFingerprint: fingerprint,
+          vaults: now.vaults.map((v) => ({ vaultId: v.vaultId, type: v.type, name: v.name, role: v.role ?? "" })),
+          items: now.items.map((it) => ({
+            itemId: it.itemId,
+            vaultId: it.vaultId,
+            formatVersion: it.formatVersion,
+            updatedAt: it.updatedAt,
+            doc: it.doc,
+          })),
+          attachments: keptSections.map((x, i) => ({ ...x.m, section: i + 1 })),
+          skipped: {
+            undecryptable: store.undecryptable().filter((u) => !excluded.has(u.vaultId)),
+            attachmentsOverCap: named.overCap.map((f) => f.name),
+            attachmentFetchFailed: named.fetchFailed.map((f) => f.name),
+          },
+        };
 
-      // 3. Build (spec 01 §1 production KDF params — the live policy's, window-checked
-      //    by backupKdfParams — fresh salt + fileId).
-      setProgress("Sealing backup…");
-      keepAutoLockAlive();
-      const parts = await buildBackup(pw, crypto.randomUUID(), randomBytes(16), backupKdfParams(policy), payload, sections);
-      const bytes = concat(...parts);
+        // 3. Build (spec 01 §1 production KDF params — the live policy's, window-checked
+        //    by backupKdfParams — fresh salt + fileId).
+        setProgress("Sealing backup…");
+        keepAutoLockAlive();
+        const parts = await buildBackup(pw, crypto.randomUUID(), randomBytes(16), backupKdfParams(policy), payload, keptSections.map((x) => x.s));
+        const sealed = concat(...parts);
 
-      // 4. Verify BEFORE declaring success (§2.6): re-open the exact output bytes and
-      //    check every attachment section's final tag, single pass.
-      setProgress("Verifying…");
-      keepAutoLockAlive();
-      const opened = await openBackup(pw, bytes);
-      for (const entry of opened.payload.attachments) opened.readAttachment(entry).fill(0);
+        // 4. Verify BEFORE declaring success (§2.6): re-open the exact output bytes and
+        //    check every attachment section's final tag, single pass.
+        setProgress("Verifying…");
+        keepAutoLockAlive();
+        const opened = await openBackup(pw, sealed);
+        for (const entry of opened.payload.attachments) opened.readAttachment(entry).fill(0);
+
+        // A lock during the seal or the check (the panel unmounted, the store closed) writes no file.
+        if (!mounted.current || store.isClosed()) return;
+        const again = handedOutNow();
+        const stillThere = new Set(again.items.map((it) => it.itemId));
+        const vaultsThere = new Set(again.vaults.map((v) => v.vaultId));
+        const lost = now.items.some((it) => !stillThere.has(it.itemId)) || now.vaults.some((v) => !vaultsThere.has(v.vaultId));
+        if (!lost) bytes = sealed;
+        else if (seal >= MAX_SEALS || again.items.length === 0) {
+          setErr(BACKUP_NOT_MADE_CHANGED);
+          return;
+        } else now = again;
+      }
 
       // 5. Only now hand the file to the browser (a lock anywhere above aborts with
       //    no partial file — nothing has left memory yet).
       const filename = exportFilename("backup");
       downloadBlob([bytes as BlobPart], "application/octet-stream", filename);
       writeLastExportAt(account.userId, Date.now());
-      setDone({ filename, overCap: includeAttachments ? attachmentPlan.overCap : [], fetchFailed });
+      setDone({ filename, overCap: named.overCap, fetchFailed: named.fetchFailed, fetchLimit });
       setPw("");
       setConfirm("");
     } catch {
@@ -268,12 +336,12 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
       // Every cell is written verbatim, formula characters included. A CSV export is input for
       // another password manager, and a ' prefix would corrupt a real password that starts with
       // = + - or @ there; the acknowledged warning above is the control instead.
-      const csv = writeCsv(orderedItems.map((it) => it.doc));
+      const csv = writeCsv(handedOutNow().items.map((it) => it.doc));
       const filename = exportFilename("csv");
       // UTF-8, no BOM (spec 07 §1) — encode explicitly rather than trusting Blob string handling.
       downloadBlob([utf8(csv) as BlobPart], "text/csv", filename);
       writeLastExportAt(account.userId, Date.now());
-      setDone({ filename, overCap: [], fetchFailed: [] });
+      setDone({ filename, overCap: [], fetchFailed: [], fetchLimit: null });
     } catch {
       setErr("Export failed — no file was saved.");
     }
@@ -313,15 +381,16 @@ export function ExportPanel({ mode, account, store, policy, onClose }: Props) {
               </>
             )}
           </div>
-          {done.overCap.length > 0 && (
+          {stillNamed(done.overCap).length > 0 && (
             <div className="msg info" style={{ display: "block" }}>
-              Skipped (over the {humanSize(64 * 1024 * 1024)} attachment cap): {done.overCap.join(", ")}.
+              Skipped (over the {humanSize(64 * 1024 * 1024)} attachment cap): {stillNamed(done.overCap).join(", ")}.
             </div>
           )}
-          {done.fetchFailed.length > 0 && (
+          {stillNamed(done.fetchFailed).length > 0 && (
             <div className="msg err" style={{ display: "block" }} role="alert">
-              Could not fetch (skipped after a retry): {done.fetchFailed.join(", ")}. The items
+              Could not fetch (skipped after a retry): {stillNamed(done.fetchFailed).join(", ")}. The items
               themselves are in the backup; only these attachment files are missing.
+              {done.fetchLimit !== null && <> {done.fetchLimit}</>}
             </div>
           )}
           <div className="actions">

@@ -49,15 +49,20 @@ function fakeStorage(): Storage {
   } as Storage;
 }
 
-/** A minimal Web Locks stand-in: a held name blocks a second request until its signal aborts. */
+/** A minimal Web Locks stand-in: a held name blocks a second request until its signal aborts; a name is let go when its
+ *  callback's promise settles (as the browser does), and both forms of the call are taken (with and without options). */
 function fakeLocks() {
   const held = new Set<string>();
   return {
     held,
-    request(name: string, opts: { signal?: AbortSignal; ifAvailable?: boolean }, cb: (lock: unknown) => unknown): Promise<unknown> {
+    request(name: string, a: { signal?: AbortSignal; ifAvailable?: boolean } | ((lock: unknown) => unknown), b?: (lock: unknown) => unknown): Promise<unknown> {
+      const opts = typeof a === "function" ? {} : a;
+      const cb = (typeof a === "function" ? a : b)!;
       if (!held.has(name)) {
         held.add(name);
-        return Promise.resolve(cb({ name }));
+        const run = Promise.resolve(cb({ name }));
+        void run.finally(() => held.delete(name)).catch(() => {});
+        return run;
       }
       if (opts.ifAvailable) return Promise.resolve(cb(null));
       return new Promise((_, reject) => opts.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError"))));
@@ -73,7 +78,6 @@ const sess = (userId: string, tokens: Tokens | null): Session => ({
   userId,
   personalVaultId: "pv",
   email: "m@example.com",
-  isAdmin: false,
   tokens,
 });
 const optIn = (uid: string) => localStorage.setItem(`andvari.cacheOptIn.${uid}`, "1");
@@ -228,7 +232,14 @@ describe("A14 F5 — lock revokes and drops a per-tab pair; unlock is then a ful
   it("the lock path branches on the offline copy: ON keeps today's behaviour, OFF goes per-tab", () => {
     const lockLocal = appTsx.slice(appTsx.indexOf("const lockLocal = useCallback"), appTsx.indexOf("const lock = useCallback"));
     expect(lockLocal).toContain("if (meta && !tokensKeptAcrossLock(meta.userId))");
+    // A14's "keeps no token once locked" holds at the server too, so the lock logs its pair out again
+    // (forgetting it only left a refresh token valid for 30 days). Locking one tab therefore also ends the account's
+    // other tabs in this browser, until the server can end one session by its own refresh token.
     expect(lockLocal).toContain("void lockPerTab(notice, meta, true);");
+    const onIdle = appTsx.slice(appTsx.indexOf("const onIdle = useCallback"), appTsx.indexOf("const lockWarning = useAutoLock("));
+    expect(onIdle).toContain('if (p.kind === "unlock" && p.session.tokens) void lockPerTab(notice, p.session, true);');
+    // Only the hand-over to another tab (it turned the offline copy off and holds this pair now) forgets without revoking.
+    expect([...appTsx.matchAll(/lockPerTab\([^;]*, false\);/g)].map((m) => m[0])).toEqual(['lockPerTab("The offline copy was turned off in another tab — sign in again.", v.meta, false);']);
   });
 
   it("per-tab lock: usage flushed first (H33), then revoked while the pair is still held, then dropped", () => {
@@ -246,14 +257,20 @@ describe("A14 F5 — lock revokes and drops a per-tab pair; unlock is then a ful
   });
 
   it("a session with no tokens boots to the unlock card, which runs the normal sign-in, TOTP included", () => {
-    expect(appTsx).toContain("const unlockable = session !== null && (session.tokens !== null || !tokensKeptAcrossLock(session.userId));");
-    expect(appTsx).toContain('unlockable ? { kind: "unlock", session,');
-    const unlock = welcomeTsx.slice(welcomeTsx.indexOf("function Unlock("), welcomeTsx.indexOf("export type LandingMode"));
-    expect(unlock).toContain("if (!session.tokens) {");
-    expect(unlock).toContain("<SignIn client={client} policy={policy} onReady={onReady} onBlockingChange={setSignInBlocking} lockedEmail={session.email} />");
-    const signIn = welcomeTsx.slice(welcomeTsx.indexOf("function SignIn("), welcomeTsx.indexOf("const ADMIN_PIN_PENDING"));
-    expect(signIn).toContain("useState(lockedEmail ?? \"\")");
-    expect(signIn).toContain("readOnly={lockedEmail !== undefined}");
+    // Every held session lands on the unlock card; with the offline copy on, one without tokens is one the server
+    // ended (design §4.4, its card is tested in session-end.test.ts).
+    expect(appTsx).toContain('setPhase(session !== null ? { kind: "unlock", session } : { kind: "welcome" });');
+    const unlock = welcomeTsx.slice(welcomeTsx.indexOf("function Unlock("), welcomeTsx.indexOf("// ---- Sign up"));
+    // Spec 01 §7: the same sign-in is where the unlock card goes when the server's keys could not be compared here.
+    expect(unlock.indexOf("if (endedByServer(session)) {")).toBeLessThan(unlock.indexOf("if (!session.tokens || signInInstead) {"));
+    expect(unlock).toContain("if (!session.tokens || signInInstead) {");
+    expect(unlock).toContain("<SignIn ctx={ctx} pin={pin} cardNotice={cardNotice} onReady={onReady} onForget={onForget} lockedEmail={session.email} />");
+    const signIn = welcomeTsx.slice(welcomeTsx.indexOf("function SignIn("), welcomeTsx.indexOf("// ---- Unlock a session"));
+    expect(signIn).toContain("useState(lockedEmail ?? initialEmail ?? \"\")");
+    expect(signIn).toContain("disabled={!!lockedEmail || needTotp}");
+    // The two-step code is asked without asking for the password again.
+    // (It keeps the typed password for that step only: after any refusal the field is emptied.)
+    expect(signIn).toContain('case "totp_required":\n          keepPassword = true;\n          setNeedTotp(true);');
   });
 
   it("boot claims this tab's slot and migrates a legacy pair before reading the session", () => {

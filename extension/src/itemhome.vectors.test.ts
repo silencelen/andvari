@@ -81,7 +81,11 @@ test("the service worker routes every row through admitRows and every item seal 
   // Every snapshot decrypt is home-admitted first.
   const decrypt = bg.slice(bg.indexOf("function homeAndDecrypt("), bg.indexOf("function decryptItems("));
   assert.match(decrypt, /admitRows\(/);
-  for (const site of ["const homed = await homeAndDecrypt(sync, vaultKeys, s.userId)", "const homed = await homeAndDecrypt(sync, vaultKeys, begin.userId)", "const homed = await homeAndDecrypt(sync, session.vaultKeys, session.userId, session.homes)"]) {
+  for (const site of [
+    "const homed = await homeAndDecrypt(sync, vaultKeys, s.userId, personalVaultId)",
+    "const homed = await homeAndDecrypt(sync, vaultKeys, begin.userId, personalVaultId)",
+    "const homed = await homeAndDecrypt(sync, session.vaultKeys, session.userId, session.personalVaultId, { homes: session.homes, known: session.homesKnown })",
+  ]) {
     assert.ok(bg.includes(site), `routed: ${site}`);
   }
   assert.equal((bg.match(/decryptItems\(sync, /g) ?? []).length, 0, "no un-homed snapshot decrypt left");

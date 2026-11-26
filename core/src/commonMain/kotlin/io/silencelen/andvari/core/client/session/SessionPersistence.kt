@@ -142,14 +142,13 @@ interface SessionPersistence {
     fun clearSessionTokens()
 
     /**
-     * Forget the server at [originKey] (spec 03 §13: once the server deleted the account, the device is left as a fresh
-     * install, with nothing of the account and nothing of its server). Everything kept under that origin goes, whoever's
-     * it is: the policy mirrors, cached account keys, full-password stamps, and the self-identity pins and bindings. So
-     * does the stored session when it is that origin's. A client that dials that origin is left where a first launch
-     * stands: with no origin on iOS ([baseUrl] null), with the default one elsewhere, and without the pending-switch
-     * marker or the last sync time, which were that server's. Another origin's namespace is never touched (§4.2).
+     * After the server confirmed the deletion of the account stored here: [clear], and the device is as new for the
+     * server it dials. The server's address and any server waiting to be confirmed go, with what this store keeps under
+     * that server's origin for the device (its cache permission, auto-lock, the policy's fetch time, the server-time
+     * floor), so the next launch starts at the first screen. True when done; false (the default, a store that cannot)
+     * when nothing was done, and the caller then [clear]s as before.
      */
-    fun forgetServer(originKey: String)
+    fun forgetServer(): Boolean = false
 
     /** F58: a recovery TEMP password is the live credential. Belongs to the session. */
     var mustChangePassword: Boolean

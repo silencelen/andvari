@@ -3,8 +3,22 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import nacl from "tweetnacl";
 import { buildQueuedSave, MAX_ENTRY_BYTES, MAX_FIELD_CHARS, MAX_SITE_CHARS, parseSaveKeyReply, queueSaveToApp, SAVE_MAGIC, savesThroughApp, sealTo } from "./appsave.ts";
-import { fromB64, sealOpen, toB64 } from "./crypto.ts";
+import { blake2b } from "@noble/hashes/blake2.js";
+import { fromB64, toB64 } from "./crypto.ts";
 
+/** libsodium's crypto_box_seal_open, test-side: what the andvari app runs on a queued save. The extension only seals
+ *  (appsave.ts sealTo); its own open was removed with the grant path. */
+function sealOpen(recipientPub: Uint8Array, recipientPriv: Uint8Array, sealed: Uint8Array): Uint8Array {
+  if (sealed.length < 32 + 16) throw new Error("sealed box too short");
+  const epk = sealed.subarray(0, 32);
+  const nonce = blake2b(new Uint8Array([...epk, ...recipientPub]), { dkLen: 24 });
+  const pt = nacl.box.open(sealed.subarray(32), nonce, epk, recipientPriv);
+  if (!pt) throw new Error("crypto_box_seal_open failed");
+  return pt;
+}
+
+/** A password far longer than chance can spell in base64url ciphertext ("s3cret-pw" could, rarely). */
+const PW = "s3cret-password-of-the-shop-login";
 const account = nacl.box.keyPair();
 const key = { origin: "https://home.example", userId: "u1", identityPub: account.publicKey };
 const keyText = JSON.stringify({ v: 1, origin: key.origin, userId: key.userId, identityPub: toB64(account.publicKey) });
@@ -19,12 +33,12 @@ test("a sealed box opens with the account's key and nobody else's", () => {
 });
 
 test("a queue entry holds no plaintext, names its account outside and inside, and opens to the capture", () => {
-  const entry = buildQueuedSave(key, "https://shop.example/login", "me", "s3cret-pw", 1234)!;
-  for (const secret of ["s3cret-pw", "shop.example", '"me"']) assert.ok(!entry.includes(secret), secret);
+  const entry = buildQueuedSave(key, "https://shop.example/login", "me", PW, 1234)!;
+  for (const secret of [PW, "shop.example", '"me"']) assert.ok(!entry.includes(secret), secret);
   const outer = JSON.parse(entry) as { v: number; origin: string; userId: string; sealed: string };
   assert.deepEqual({ v: outer.v, origin: outer.origin, userId: outer.userId }, { v: 1, origin: key.origin, userId: "u1" });
   const inside = JSON.parse(new TextDecoder().decode(sealOpen(account.publicKey, account.secretKey, fromB64(outer.sealed))));
-  assert.deepEqual(inside, { magic: SAVE_MAGIC, origin: key.origin, userId: "u1", site: "https://shop.example/login", username: "me", password: "s3cret-pw", capturedAtMs: 1234, source: "safari" });
+  assert.deepEqual(inside, { magic: SAVE_MAGIC, origin: key.origin, userId: "u1", site: "https://shop.example/login", username: "me", password: PW, capturedAtMs: 1234, source: "safari" });
 });
 
 test("the bounds are the core's: no password, an over-long field or an over-long site is not queued", () => {
@@ -67,11 +81,11 @@ test("queuing asks for the key, then hands over only ciphertext", async () => {
     sent.push(m);
     return m.type === "saveKey" ? { ok: true, type: "saveKey", key: keyText } : { ok: true, type: "queueSave", queued: true };
   };
-  const capture = { site: "https://shop.example", username: "me", password: "s3cret-pw" };
+  const capture = { site: "https://shop.example", username: "me", password: PW };
   assert.equal(await queueSaveToApp(native, capture, 1), "queued");
   assert.deepEqual(sent.map((m) => m.type), ["saveKey", "queueSave"]);
   assert.match(sent[1]!.id!, /^c-[0-9a-f]{32}$/, "an id minted for the capture");
-  assert.ok(!JSON.stringify(sent).includes("s3cret-pw"));
+  assert.ok(!JSON.stringify(sent).includes(PW));
 
   assert.equal(await queueSaveToApp(async () => ({ ok: true, type: "saveKey", key: null }), capture, 1), "no_account");
   assert.equal(await queueSaveToApp(async () => { throw new Error("no host"); }, capture, 1), "unavailable");

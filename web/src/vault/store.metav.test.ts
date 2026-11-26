@@ -2,15 +2,15 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { ApiError, type ApiClient } from "../api/client";
 import type { ItemDoc, Mutation, MutationResult, PushResponse, SyncResponse, WireGrant, WireItem, WireVault } from "../api/types";
 import { adVaultMeta } from "../crypto/ad";
-import { fromB64, toB64, utf8 } from "../crypto/bytes";
+import { toB64, utf8 } from "../crypto/bytes";
 import { seal } from "../crypto/envelope";
 import { fingerprint } from "../crypto/escrow";
 import type { KdfParams } from "../crypto/keys";
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
-import { openSharedGrant } from "../crypto/sharedgrant";
 import { initSodium } from "../crypto/sodium";
 import { Account } from "./account";
-import { VaultStore } from "./store";
+import { FakeSharedLogs } from "./fakesharedlogs.testkit";
+import { type ItemWire, VaultStore } from "./store";
 
 /**
  * spec 02 §4 warn-and-keep-newer (VaultStore.keepNewerMeta) + the pinned metaV parse rule:
@@ -41,13 +41,18 @@ class FakeApi {
     return resp;
   }
 
-  async push(mutations: Mutation[]): Promise<PushResponse> {
+  async pushMutations(mutations: Mutation[]): Promise<PushResponse> {
     const results: MutationResult[] = mutations.map((m) => ({ mutationId: m.mutationId, status: "applied", newItemRev: 1 }));
     return { rev: ++this.rev, results };
   }
 
   asClient(): ApiClient {
     return this as unknown as ApiClient;
+  }
+
+  /** The item routes the store calls (its ItemWire): this fake serves them too. */
+  asWire(): ItemWire {
+    return this as unknown as ItemWire;
   }
 }
 
@@ -71,6 +76,7 @@ interface Seed {
   store: VaultStore;
   api: FakeApi;
   vaultId: string;
+  vk: Uint8Array;
   vault: WireVault;
   grant: WireGrant;
   item: WireItem;
@@ -91,14 +97,14 @@ function name(s: Seed): string {
 async function seeded(): Promise<Seed> {
   const owner = await enroll("owner@example.com");
   const member = await enroll("member@example.com");
-  const { request, vaultId } = owner.buildCreateSharedVault("Family");
-  const sealedVk = owner.wrapVkForMember(member.identityPub, vaultId);
-  // A6: this fixture's member vouched for the v1-only key (as after "Accept" on the review card), so the
-  // legacy key is writable here; signedgrant.store.test.ts covers the unconfirmed path.
-  member.authorizeLegacyKey(vaultId, owner.legacyKeyTag(vaultId)!); // bound to the vault key (A6 HIGH-1)
+  // The key and both roles are what the vault's verified log says (design §3.6); the grant row is a hint only.
+  const vaultId = owner.newItemId();
+  const vk = randomBytes(32);
+  owner.logKeyRing().set(vaultId, vk.slice());
+  owner.attachLogRoles(() => "owner", () => true);
   const itemId = owner.newItemId();
-  const vault: WireVault = { vaultId, type: "shared", rev: 2, metaBlob: request.metaBlob, createdAt: 0 };
-  const grant: WireGrant = { vaultId, userId: member.userId, role: "writer", wrappedVk: "", rev: 3, sealedVk };
+  const vault: WireVault = { vaultId, type: "shared", rev: 2, metaBlob: toB64(seal(vk, utf8(JSON.stringify({ name: "Family" })), adVaultMeta(vaultId))), createdAt: 0 };
+  const grant: WireGrant = { vaultId, userId: member.userId, role: "writer", wrappedVk: "", rev: 3 };
   const item: WireItem = {
     itemId,
     vaultId,
@@ -112,10 +118,11 @@ async function seeded(): Promise<Seed> {
     blob: owner.encryptItem(vaultId, itemId, DOC).blob,
   };
   const api = new FakeApi();
-  const store = new VaultStore(api.asClient(), member);
+  const store = new VaultStore(api.asClient(), member, undefined, undefined, api.asWire());
+  new FakeSharedLogs(member).attachTo(store).share(vaultId, vk, "writer");
   api.queue.push({ rev: 5, full: true, vaults: [vault], grants: [grant], items: [item], removedGrants: [] });
   await store.sync();
-  return { owner, member, store, api, vaultId, vault, grant, item };
+  return { owner, member, store, api, vaultId, vk, vault, grant, item };
 }
 
 /** Deliver a rename to "Family v2" (metaV 0 → 1) and return the renamed metaBlob. */
@@ -126,12 +133,9 @@ async function applyRename(s: Seed): Promise<string> {
   return renamed;
 }
 
-/** The VK, extracted the way any key-holder could (sealed to a keypair the test holds),
- *  used to craft adversarial metaBlob plaintexts no honest client would write. */
+/** The VK, as any key-holder has it, used to craft adversarial metaBlob plaintexts no honest client would write. */
 function craftMeta(s: Seed, metaVJson: string): string {
-  const kp = boxKeypairFromSeed(randomBytes(32));
-  const vk = openSharedGrant(kp.publicKey, kp.privateKey, s.vaultId, fromB64(s.owner.wrapVkForMember(kp.publicKey, s.vaultId)));
-  return toB64(seal(vk, utf8(`{"name":"Imposter","metaV":${metaVJson}}`), adVaultMeta(s.vaultId)));
+  return toB64(seal(s.vk, utf8(`{"name":"Imposter","metaV":${metaVJson}}`), adVaultMeta(s.vaultId)));
 }
 
 describe("keepNewerMeta (spec 02 §4 warn-and-keep-newer)", () => {

@@ -203,6 +203,27 @@ describe("backup round-trip (own impl — random params + attachment sections)",
     expect(wrongKey).toBeInstanceOf(BackupError);
     expect((wrongKey as BackupError).code).toBe("wrong_passphrase_or_corrupt");
 
+    // The shared code's rule of 2026-11-17 (core aBackupSectionReadUnderAFileKeyOfZerosIsADamagedBackup): a manifest
+    // file key that is no key (all zeros, the wrong length) is a damaged backup, never a lock and never decrypted.
+    const zeroKey = toB64(new Uint8Array(32)); // the hostile input, built only here
+    const damaged = [
+      () => opened.readAttachmentSection(1, fromB64(zeroKey)),
+      () => opened.readAttachmentSection(1, randomBytes(16)),
+      () => opened.readAttachment({ ...opened.payload.attachments[0]!, fileKey: zeroKey }),
+      () => opened.readAttachment({ ...opened.payload.attachments[0]!, fileKey: toB64(randomBytes(33)) }),
+      () => opened.readAttachment({ ...opened.payload.attachments[0]!, fileKey: "not base64url!" }),
+    ];
+    for (const [i, read] of damaged.entries()) {
+      let e: unknown;
+      try {
+        read();
+      } catch (x) {
+        e = x;
+      }
+      expect(e, `case ${i}`).toBeInstanceOf(BackupError);
+      expect((e as BackupError).code, `case ${i}`).toBe("wrong_passphrase_or_corrupt");
+    }
+
     // A truncated file fails the framing scan (spec 07 §2.2 step 4) before any KDF.
     let truncated: unknown;
     try {

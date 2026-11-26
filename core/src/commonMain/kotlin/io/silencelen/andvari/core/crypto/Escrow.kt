@@ -14,8 +14,12 @@ data class EscrowPayload(
     @SerialName("sha256") val sha256: String,
 )
 
-/** Which escrow format [Escrow.open] accepted. A v1 blob is LEGACY and never reported as v2-equivalent. */
-enum class EscrowFormat(val code: String) { V2("v2"), V1_LEGACY("v1_legacy") }
+/**
+ * Which escrow format [Escrow.open] accepted. A v1 blob is LEGACY and never reported as v2-equivalent. [V3] is the
+ * only form a client seals (spec 04 §3): its statement names the account's address. [V2] does not, and only the
+ * vectors and the released tool's `recover` still open it.
+ */
+enum class EscrowFormat(val code: String) { V3("v3"), V2("v2"), V1_LEGACY("v1_legacy") }
 
 /**
  * Why [Escrow.open] refused (spec 04 §4). The wire [code] is shared with the web twin and pinned by
@@ -40,6 +44,17 @@ enum class EscrowVerdict(val code: String) {
     V1_MALFORMED("v1_malformed"),
     V1_SELF_CHECK_FAILED("v1_self_check_failed"),
     IDENTITY_CHECK_FAILED("identity_check_failed"),
+
+    // ---- [Escrow.openForAssist] only (spec 04 §4 steps 0, 7, 8) ----
+
+    /** The address the operator typed has no `emailNorm` (step 0, before anything is opened). */
+    BAD_EMAIL("bad_email"),
+
+    /** The copy is of an old form (v2 or v1) and does not say whose it is: the account must seal a new one (step 7). */
+    NO_ADDRESS("no_address"),
+
+    /** The copy names another address than the one the operator typed (step 8): the server gave another account's copy. */
+    EMAIL_MISMATCH("email_mismatch"),
     ;
 
     companion object {
@@ -57,7 +72,11 @@ enum class EscrowVerdict(val code: String) {
     }
 }
 
-class EscrowOpenException(val verdict: EscrowVerdict, detail: String) :
+/**
+ * [Escrow.open] / [Escrow.openForAssist] refused. [copyEmail] is set for [EscrowVerdict.EMAIL_MISMATCH] only: the
+ * address the opened copy names, in its own account's signed statement, so the tool can say whose copy it is.
+ */
+class EscrowOpenException(val verdict: EscrowVerdict, detail: String, val copyEmail: String? = null) :
     Exception("escrow refused: ${verdict.code} ($detail)")
 
 /**
@@ -79,6 +98,9 @@ enum class EscrowCheck {
     SIGNATURE,
     IDENTITY_BOUND,
     IDENTITY_SEED,
+
+    /** [Escrow.openForAssist]: the copy names the address the operator typed (spec 04 §4 step 8). */
+    ADDRESS,
 }
 
 /**
@@ -94,6 +116,11 @@ class EscrowOpened internal constructor(
     /** False only in the acknowledged unanchored mode (Q2): the bundle must then say UNANCHORED. */
     val anchored: Boolean,
     val checks: List<EscrowCheck>,
+    /**
+     * The account's `emailNorm` as the copy's own signed statement names it ([EscrowFormat.V3]); null for the old forms,
+     * which name none. Read only after the signature verified.
+     */
+    val email: String? = null,
 ) {
     private val uvkBytes = uvk.copyOf()
     private val identityKeyBytes = identityKey.copyOf()
@@ -141,8 +168,11 @@ object Escrow {
      * need a legacy blob, because v1 blobs remain recoverable indefinitely (owner decision Q3) through
      * [open]'s mandatory identity check.
      */
-    fun sealUvkV1(crypto: CryptoProvider, recoveryPub: ByteArray, userId: String, uvk: ByteArray): ByteArray =
-        crypto.sealTo(recoveryPub, canonicalPayload(userId, KEY_TYPE_UVK, uvk, crypto))
+    fun sealUvkV1(crypto: CryptoProvider, recoveryPub: ByteArray, userId: String, uvk: ByteArray): ByteArray {
+        // No wiped key is wrapped: KeysGoneException.
+        KeyFloor.requireKey(uvk)
+        return crypto.sealTo(recoveryPub, canonicalPayload(userId, KEY_TYPE_UVK, uvk, crypto))
+    }
 
     fun sealCanary(crypto: CryptoProvider, recoveryPub: ByteArray): ByteArray =
         crypto.sealTo(recoveryPub, canonicalPayload(CANARY_USER_ID, KEY_TYPE_CANARY, CANARY_KEY, crypto))
@@ -176,19 +206,60 @@ object Escrow {
         signer: KeyPairBytes,
         uvk: ByteArray,
         issuedAt: Long,
+    ): ByteArray = seal(crypto, recoveryPub, verifiedRecoveryFp, userId, null, identityPub, signer, uvk, issuedAt)
+
+    /**
+     * The recovery copy every client seals (spec 04 §3): [sealUvkV2]'s statement in its
+     * version-3 form, which also names [emailNorm], the account's address, inside what the account's own key signs. So
+     * the offline tool can tell whose copy it opened and compare it with the address the operator typed (§4 step 8).
+     *
+     * [emailNorm] is the address the account was registered with, already normal (`TrustGrammar.emailNorm` of it is
+     * itself): the one sent at registration, or the signed-in session's. Never one a server answer named on its own.
+     * Refuses ([CryptoException]) an address that is not an `emailNorm`, and everything [sealUvkV2] refuses. [uvk] and
+     * the signing key are used here only, so a caller that holds them lent (`GuardedKey.use`) seals inside the lend.
+     */
+    fun sealUvkV3(
+        crypto: CryptoProvider,
+        recoveryPub: ByteArray,
+        verifiedRecoveryFp: String,
+        userId: String,
+        emailNorm: String,
+        identityPub: ByteArray,
+        signer: KeyPairBytes,
+        uvk: ByteArray,
+        issuedAt: Long,
+    ): ByteArray {
+        if (io.silencelen.andvari.core.trust.TrustGrammar.emailNorm(emailNorm) != emailNorm) {
+            throw CryptoException("the account's address is not an emailNorm — refusing to seal a recovery copy that names it")
+        }
+        return seal(crypto, recoveryPub, verifiedRecoveryFp, userId, emailNorm, identityPub, signer, uvk, issuedAt)
+    }
+
+    private fun seal(
+        crypto: CryptoProvider,
+        recoveryPub: ByteArray,
+        verifiedRecoveryFp: String,
+        userId: String,
+        emailNorm: String?,
+        identityPub: ByteArray,
+        signer: KeyPairBytes,
+        uvk: ByteArray,
+        issuedAt: Long,
     ): ByteArray {
         if (recoveryPub.size != 32) throw CryptoException("recovery public key must be 32 bytes")
         if (!FULL_FP_RE.matches(verifiedRecoveryFp) || fingerprint(crypto, recoveryPub) != verifiedRecoveryFp) {
             throw CryptoException("recovery public key does not match the verified fingerprint (full compare) — refusing to seal escrow")
         }
         if (uvk.size != 32) throw CryptoException("escrow uvk must be 32 bytes")
+        // No wiped key is wrapped: KeysGoneException.
+        KeyFloor.requireKey(uvk)
         val mapped = try {
             crypto.ed25519PkToCurve25519(signer.publicKey)
         } catch (e: CryptoException) {
             throw CryptoException("escrow signer is not a usable Ed25519 key", e)
         }
         if (!Bytes.ctEquals(mapped, identityPub)) throw CryptoException("escrow signer does not map to the identity key it would name")
-        val frame = SignedStatement.build(crypto, signer, Statement.EscrowUvk(userId, identityPub, verifiedRecoveryFp, issuedAt, uvk))
+        val frame = SignedStatement.build(crypto, signer, Statement.EscrowUvk(userId, identityPub, verifiedRecoveryFp, issuedAt, uvk, emailNorm))
         return try {
             crypto.sealTo(recoveryPub, frame)
         } finally {
@@ -220,9 +291,10 @@ object Escrow {
      *   identityPub, and the escrowed UVK must open its seed to that same key.
      *
      * Order — the first failing step decides the [EscrowVerdict]:
-     * 0. inputs: `bad_user_id`, `bad_anchor`, `unanchored_not_acknowledged`, `identity_check_required`,
+     * 0. inputs: `bad_user_id`, `bad_anchor`, `identity_check_required`, `bad_email` ([openForAssist]),
      *    `identity_check_failed` (identityPub not 32 bytes);
-     * 1. anchor: `hex(SHA-256(identityCheck.identityPub))` starts with the prefix (`identity_fp_mismatch`).
+     * 1. anchor: `hex(SHA-256(identityCheck.identityPub))` starts with the prefix (`identity_fp_mismatch`); unanchored,
+     *    the acknowledgment (`unanchored_not_acknowledged`), after every input of step 0 (spec 04 §4 step 2).
      *    This is the ONLY place an identity enters the trust path, and it never comes from the blob;
      * 2. `crypto_box_seal_open` (`unopenable`); 3. format (`unknown_format`);
      * v2: 4–9. [SignedStatement.verifyEscrow] with the anchored identity, `expectedUserId` and the
@@ -245,21 +317,68 @@ object Escrow {
         expectedIdentityFpPrefix: String?,
         identityCheck: IdentityCheck?,
         unanchoredAcknowledgment: String? = null,
+    ): EscrowOpened = openChecked(crypto, recoveryKeypair, sealed, expectedUserId, expectedIdentityFpPrefix, identityCheck, unanchoredAcknowledgment, null)
+
+    /**
+     * `recovery-cli assist`'s opener (spec 04 §4): [open]'s steps, with the address of
+     * the person the operator is helping, [typedEmail], as the operator TYPED it from their own knowledge (never a value
+     * the console showed). It is checked in step 0, before anything is opened (`bad_email`: it has no `emailNorm`); after
+     * the identity check the copy must be the version-3 form, which says whose it is (`no_address` otherwise: the
+     * account must seal a new one), and the address its own signed statement names must be `emailNorm(typedEmail)`
+     * exactly (`email_mismatch`, with [EscrowOpenException.copyEmail] naming whose copy it is). The fleet `verify` has no
+     * address and uses [open], then refuses an old form itself.
+     *
+     * A refusal after the seal opened wipes the escrowed key before it throws.
+     */
+    fun openForAssist(
+        crypto: CryptoProvider,
+        recoveryKeypair: KeyPairBytes,
+        sealed: ByteArray,
+        expectedUserId: String,
+        typedEmail: String,
+        expectedIdentityFpPrefix: String?,
+        identityCheck: IdentityCheck?,
+        unanchoredAcknowledgment: String? = null,
+    ): EscrowOpened = openChecked(crypto, recoveryKeypair, sealed, expectedUserId, expectedIdentityFpPrefix, identityCheck, unanchoredAcknowledgment, typedEmail, tool = true)
+
+    /**
+     * The fleet `verify`'s whole check (spec 04 §4 steps 0 to 7): unanchored by design, so it supplies the
+     * acknowledgment itself and asks for nothing; it reads nothing that does not start with the magic (`unknown_format`)
+     * and refuses a copy that is not version 3 (`no_address`). There is no address to compare.
+     */
+    fun openForFleet(crypto: CryptoProvider, recoveryKeypair: KeyPairBytes, sealed: ByteArray, expectedUserId: String, identityCheck: IdentityCheck?): EscrowOpened =
+        openChecked(crypto, recoveryKeypair, sealed, expectedUserId, null, identityCheck, UNANCHORED_ACK, null, tool = true)
+
+    private fun openChecked(
+        crypto: CryptoProvider,
+        recoveryKeypair: KeyPairBytes,
+        sealed: ByteArray,
+        expectedUserId: String,
+        expectedIdentityFpPrefix: String?,
+        identityCheck: IdentityCheck?,
+        unanchoredAcknowledgment: String?,
+        /** Non-null for [openForAssist]: the address the operator typed. */
+        typedEmail: String?,
+        /** The tools' whole check ([openForAssist], [openForFleet]): signed copies only, version 3 only (spec 04 §4 steps 4 and 7). */
+        tool: Boolean = false,
     ): EscrowOpened {
         val checks = mutableListOf<EscrowCheck>()
         // 0. inputs
         if (!UUID_RE.matches(expectedUserId)) refuse(EscrowVerdict.BAD_USER_ID, "expectedUserId is not a lowercase uuid")
         val anchored = expectedIdentityFpPrefix != null
-        if (anchored) {
-            if (!ANCHOR_RE.matches(expectedIdentityFpPrefix!!)) refuse(EscrowVerdict.BAD_ANCHOR, "identity anchor must be 32..64 lowercase hex")
-        } else if (unanchoredAcknowledgment != UNANCHORED_ACK) {
-            refuse(EscrowVerdict.UNANCHORED_NOT_ACKNOWLEDGED, "an unanchored recovery needs the typed acknowledgment")
-        }
+        if (anchored && !ANCHOR_RE.matches(expectedIdentityFpPrefix!!)) refuse(EscrowVerdict.BAD_ANCHOR, "identity anchor must be 32..64 lowercase hex")
         if (identityCheck == null) refuse(EscrowVerdict.IDENTITY_CHECK_REQUIRED, "recovery needs the identity file (encryptedIdentitySeed + identityPub)")
+        val wantEmail = typedEmail?.let {
+            io.silencelen.andvari.core.trust.TrustGrammar.emailNorm(it) ?: refuse(EscrowVerdict.BAD_EMAIL, "the address of the person you are helping is not an address")
+        }
         val identityPub = runCatching { Bytes.fromB64(identityCheck.identityPubB64) }.getOrNull()
         if (identityPub == null || identityPub.size != 32) refuse(EscrowVerdict.IDENTITY_CHECK_FAILED, "identity file identityPub is not a 32-byte key")
 
-        // 1. anchor — the identity is vouched for out of band, before anything is read from the blob.
+        // 1. anchor — the identity is vouched for out of band, before anything is read from the blob; unanchored, the typed
+        // acknowledgment instead (spec 04 §4 step 2, after every input of step 0: comparison V4-K1).
+        if (!anchored && unanchoredAcknowledgment != UNANCHORED_ACK) {
+            refuse(EscrowVerdict.UNANCHORED_NOT_ACKNOWLEDGED, "an unanchored recovery needs the typed acknowledgment")
+        }
         if (anchored) {
             if (!fingerprint(crypto, identityPub).startsWith(expectedIdentityFpPrefix!!)) {
                 refuse(EscrowVerdict.IDENTITY_FP_MISMATCH, "identity does not match the fingerprint you were given")
@@ -282,6 +401,7 @@ object Escrow {
             // 3. format
             val format: EscrowFormat
             val uvk: ByteArray
+            var email: String? = null
             when (SignedStatement.formatOf(plaintext)) {
                 BlobFormat.V2_SIGNED -> {
                     val verified = try {
@@ -290,10 +410,15 @@ object Escrow {
                         refuse(EscrowVerdict.fromStatement(e.verdict), e.message ?: e.verdict.code)
                     }
                     checks += listOf(EscrowCheck.USER_ID, EscrowCheck.RECOVERY_FP, EscrowCheck.SIGNER_IS_IDENTITY, EscrowCheck.SIGNATURE, EscrowCheck.IDENTITY_BOUND)
-                    format = EscrowFormat.V2
-                    uvk = (verified.statement as Statement.EscrowUvk).key
+                    val st = verified.statement as Statement.EscrowUvk
+                    // The signed address, when the statement is the version-3 form (spec 04 §3).
+                    email = st.email
+                    format = if (email != null) EscrowFormat.V3 else EscrowFormat.V2
+                    uvk = st.key
                 }
+                // The tools read nothing that does not start with the magic: the pre-signed form is the opener's, for `recover` and the old vectors.
                 BlobFormat.V1_JSON -> {
+                    if (tool) refuse(EscrowVerdict.UNKNOWN_FORMAT, "not a signed recovery copy")
                     val payload = parseV1(crypto, plaintext)
                     checks += EscrowCheck.V1_SELF_CHECK
                     if (payload.userId != expectedUserId) refuse(EscrowVerdict.USER_MISMATCH, "this backstop key belongs to another account")
@@ -306,6 +431,9 @@ object Escrow {
 
             // 10. identity check (both formats).
             try {
+                // A copy that holds an all-zero key holds no account's key: refused here, by the identity check's own verdict,
+                // and nothing is opened under it (the key floor would otherwise answer for the opener).
+                if (KeyFloor.allZero(uvk)) refuse(EscrowVerdict.IDENTITY_CHECK_FAILED, "the copy holds an all-zero key, not this account's")
                 val derived = try {
                     val seed = Envelope.openB64(crypto, uvk, identityCheck.encryptedIdentitySeedB64, Ad.idkey(expectedUserId))
                     try {
@@ -321,7 +449,16 @@ object Escrow {
                     refuse(EscrowVerdict.IDENTITY_CHECK_FAILED, "the escrowed key does not open this account's identity")
                 }
                 checks += EscrowCheck.IDENTITY_SEED
-                return EscrowOpened(format, expectedUserId, uvk, identityPub, anchored, checks.toList())
+                // 7. The copy says whose it is (the tools only).
+                if (tool && (format != EscrowFormat.V3 || email == null)) {
+                    refuse(EscrowVerdict.NO_ADDRESS, "this recovery copy does not say whose it is; the account must seal a new one")
+                }
+                if (typedEmail != null) {
+                    // 8. It is the copy of the person the operator is helping.
+                    if (email != wantEmail) throw EscrowOpenException(EscrowVerdict.EMAIL_MISMATCH, "this recovery copy is another account's", copyEmail = email)
+                    checks += EscrowCheck.ADDRESS
+                }
+                return EscrowOpened(format, expectedUserId, uvk, identityPub, anchored, checks.toList(), email)
             } finally {
                 uvk.fill(0)
             }

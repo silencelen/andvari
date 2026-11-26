@@ -1,3 +1,5 @@
+// @ts-nocheck -- drives routes the cut-over deleted (invites, lookup, typed pins); design §15 has the tests and CI rewrite this
+// file on `andvari setup --test`. Until then it is skipped (no ANDVARI_E2E) and no longer type-checked.
 import "fake-indexeddb/auto";
 import { IDBFactory as FakeIDBFactory } from "fake-indexeddb";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -9,12 +11,12 @@ import { assertServerKdfParams } from "../crypto/keys";
 import { randomBytes } from "../crypto/provider";
 import { initSodium } from "../crypto/sodium";
 import { Account, deviceName } from "../vault/account";
-import { shortIdentityFingerprint } from "../crypto/sharedgrant";
+import { shortIdentityFingerprint } from "../crypto/fingerprint";
 import { NullCache, openVaultCache, vaultDbName } from "../vault/idbcache";
 import { VaultStore } from "../vault/store";
 import { memoryClientState } from "../vault/accountstatesync";
 
-/** A9 review LOW-4: a device that never confirmed a personal vault (each phase here is a fresh process) is asked once;
+/** A device that never confirmed a personal vault (each phase here is a fresh process) is asked once;
  *  confirm the served wrap the way the UI does (co-holders shown, then accepted). No-op on an established device. */
 async function confirmPersonalOnce(store: VaultStore, account: Account): Promise<void> {
   if (account.personalStatus !== "proposed") return;
@@ -22,7 +24,7 @@ async function confirmPersonalOnce(store: VaultStore, account: Account): Promise
   store.acceptPersonalChange();
 }
 
-/** A put for a NEW personal item, built in the test (the store's put builder is private since A1b's INV-SEAL routing). */
+/** A put for a NEW personal item, built in the test (the store's put builder is private). */
 function newPut(account: Account, itemId: string, doc: ItemDoc): Mutation {
   const up = account.encryptItem(account.personalVaultId, itemId, doc);
   return { mutationId: crypto.randomUUID(), op: "put", itemId, vaultId: account.personalVaultId, baseItemRev: 0, item: { formatVersion: up.formatVersion, attachmentIds: [], blob: up.blob } };
@@ -31,18 +33,20 @@ function newPut(account: Account, itemId: string, doc: ItemDoc): Mutation {
 /**
  * Live end-to-end against a running andvari server (the real shadowJar), reusing the
  * actual web client code paths (Account crypto, VaultStore sync, ApiClient + real
- * WebSocket). Orchestrated by scripts/e2e.sh, which starts/kills the server and runs
- * this in two phases across a SIGKILL to prove crash-durable idempotency.
+ * WebSocket), in three phases across a SIGKILL of the server to prove crash-durable idempotency.
+ * It was written for the earlier server, which a script started with a bootstrap token
+ * (ANDVARI_BOOTSTRAP_TOKEN); the rebuilt server has none, and no script runs this file now
+ * (scripts/e2e.sh runs the web journeys in web/src/journeys/).
  *
  * Skipped entirely unless ANDVARI_E2E (base URL) is set.
  */
 const BASE = process.env.ANDVARI_E2E;
 const PHASE = process.env.ANDVARI_E2E_PHASE ?? "a";
 /**
- * H96 (audit 2026-09-13): phase selection used to be an early `return` inside each test body, so
+ * Phase selection used to be an early `return` inside each test body, so
  * the two phases NOT selected were counted by vitest as passes — every phase printed "Tests 3
  * passed (3)" while it had proved exactly one thing, and any value this file did not recognise
- * (a typo, a renamed phase, a fourth phase added to scripts/e2e.sh before the test learned it)
+ * (a typo, a renamed phase, a fourth phase added to the script before the test learned it)
  * made all three "pass" in about a second with the script still announcing E2E PASSED. That is
  * the collected-nothing trap scripts/verify.sh explicitly guards against ("node --test EXITS 0
  * WHEN IT COLLECTED NOTHING … assert both"), reproduced in the one suite that talks to a real
@@ -216,7 +220,7 @@ describe.skipIf(!BASE)("live server e2e", () => {
     // (client.ts: it fires on the server's "pong" to the open-time "ping", and the echo
     // loop starts after notifier.register()), because a push that beats registration
     // rings no bell and the notifier has no replay — under load the gate lost exactly
-    // that race (push 3 ms after the 101, no bell in 10 s; wave-3 gate, 2026-09-13).
+    // that race (push 3 ms after the 101, no bell in 10 s; seen on 2026-09-13).
     const openDeadline = Date.now() + 5000;
     while (!wsOpen && Date.now() < openDeadline) await new Promise((r) => setTimeout(r, 25));
     expect(wsOpen, "client B's WebSocket opened (ticket mint + upgrade)").toBe(true);
@@ -296,7 +300,7 @@ describe.skipIf(!BASE)("live server e2e", () => {
     // Family sharing (P5) over the real routes + WebSocket: admin A creates a shared vault,
     // adds invitee C as writer after the out-of-band fingerprint check, C's dirty-bell fires,
     // C decrypts A's shared item; A removes C; C's next sync purges the vault.
-    // A6b: created through the store, which records this account's own evidence that it owns the vault (the
+    // Created through the store, which records this account's own evidence that it owns the vault (the
     // owner-only add below is refused on the server's role label alone).
     const share = { vaultId: await storeA.createSharedVault("Family") };
     expect(storeA.ownsVault(share.vaultId), "the creator's ownership record").toBe(true);
@@ -306,12 +310,12 @@ describe.skipIf(!BASE)("live server e2e", () => {
     expect(lookedUp.userId).toBe(sessionC.userId);
     // The fingerprint the owner verifies must equal what the member's own client shows.
     expect(await accountC2.identityFingerprintShort()).toBe(await shortIdentityFingerprint(fromB64(lookedUp.identityPub)));
-    // Root cause A (A6): each side verifies the other ONCE (the household ceremony: typed 32-hex code from the
+    // Each side verifies the other ONCE (the household ceremony: typed 32-hex code from the
     // other person's screen), then the owner's store signs a v2 grant to the PINNED key and dual-sends the v1 seal.
     expect(await storeA.verifyMemberTyped(lookedUp, await accountC2.identityFingerprintShort(), inviteEmail), "owner pins the invitee").not.toBeNull();
     const ownerServed = await clientC2.userIdentity(account.userId);
     expect(await storeC2.verifyMemberTyped(ownerServed, await account.identityFingerprintShort()), "invitee pins the owner").not.toBeNull();
-    await storeA.addVaultMember(share.vaultId, sessionC.userId, "writer", { typedEmail: inviteEmail }); // A11: the pin records the typed email
+    await storeA.addVaultMember(share.vaultId, sessionC.userId, "writer", { typedEmail: inviteEmail }); // the pin records the typed email
 
     let shareBell = 0;
     let cOpen = false;
@@ -330,7 +334,7 @@ describe.skipIf(!BASE)("live server e2e", () => {
     expect(accountC2.roleFor(share.vaultId), "invitee holds the writer role").toBe("writer");
     expect(accountC2.keySource(share.vaultId), "the key came from a VERIFIED v2 grant, not the v1 seal").toBe("signed-grant");
 
-    // H06: the owner's store mints the spec 03 §11 removal proof; a bodyless client call here
+    // The owner's store mints the spec 03 §11 removal proof; a bodyless client call here
     // would pin the proofless shape the production Sharing screen used to send.
     await storeA.removeVaultMember(share.vaultId, sessionC.userId);
     await storeC2.sync();
@@ -431,7 +435,7 @@ describe.skipIf(!BASE)("live server e2e", () => {
       const seedStore = new VaultStore(live, account, seedCache, device);
       await seedStore.hydrate();
       await seedStore.sync();
-      await confirmPersonalOnce(seedStore, account); // a fresh device confirms its personal vault once (A9 review LOW-4)
+      await confirmPersonalOnce(seedStore, account); // a fresh device confirms its personal vault once
       if (!seedStore.list().some((i) => i.doc.name.includes(A2_SENTINEL))) {
         await seedStore.save(null, {
           type: "login",
@@ -596,7 +600,7 @@ describe.skipIf(!BASE)("live server e2e", () => {
 
     // ======================================================================
     // DRILL 5 — wipe/close mid-queue must REFUSE-NOT-DEGRADE, never silent-success
-    // (CR-01, the compliance high). With the durable-queue path ARMED (persistence
+    // With the durable-queue path ARMED (persistence
     // granted), force-close the live cache mid-session (models a sibling-tab wipe /
     // browser-forced close: durable lingers true, every write no-ops §D.2a). A save()
     // while ONLINE must do the REAL send (verifiable enqueue reports the row did not
@@ -611,7 +615,7 @@ describe.skipIf(!BASE)("live server e2e", () => {
       await q5Store.hydrate();
       await q5Store.sync();
 
-      // Force-close the live handle mid-session — the CR-01 black-hole precondition.
+      // Force-close the live handle mid-session — the black-hole precondition.
       q5Cache.close();
 
       const bhName = `forceclose-online-${A2_SENTINEL}-note`;
@@ -624,7 +628,7 @@ describe.skipIf(!BASE)("live server e2e", () => {
       await verify5.sync();
       expect(
         verify5.list().filter((i) => i.doc.name === bhName).length,
-        "force-close mid-queue online: the save did the REAL send — never a silent black hole (CR-01)",
+        "force-close mid-queue online: the save did the REAL send — never a silent black hole",
       ).toBe(1);
       drill5 = "ran(forceclose→real-send,no-blackhole)";
     }

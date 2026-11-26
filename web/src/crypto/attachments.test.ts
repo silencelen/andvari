@@ -10,6 +10,7 @@ beforeAll(async () => {
 });
 
 describe("attachments", () => {
+  // Seven sizes, the largest over two chunks: a few seconds alone and longer beside other work, hence the budget.
   it("round-trips across chunk boundaries", () => {
     const key = randomBytes(32);
     for (const size of [1, 5, CHUNK - 1, CHUNK, CHUNK + 1, 2 * CHUNK, 2 * CHUNK + 7]) {
@@ -21,7 +22,7 @@ describe("attachments", () => {
       const dec = decryptAttachment(key, enc.header, enc.ciphertext);
       expect(Buffer.from(dec).equals(Buffer.from(plain)), `size ${size}`).toBe(true);
     }
-  });
+  }, 60_000);
 
   it("rejects empty plaintext", () => {
     expect(() => encryptAttachment(randomBytes(32), new Uint8Array(0))).toThrow();

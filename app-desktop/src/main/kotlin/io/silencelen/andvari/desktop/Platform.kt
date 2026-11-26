@@ -23,33 +23,46 @@ import java.util.concurrent.TimeUnit
 const val DESKTOP_VERSION = io.silencelen.andvari.core.client.ANDVARI_CLIENT_VERSION
 
 private val json = Json { ignoreUnknownKeys = true }
-private val clipboardCleaner = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "andvari-clip").apply { isDaemon = true } }
 
-// Last vault secret handed to [copyWithAutoClear] — lets lock/sign-out/exit clear the
-// clipboard without ever stomping an unrelated value the user copied since.
-@Volatile
-private var lastSecretCopied: String? = null
+/** The system clipboard as [SecretClipboard] uses it; null where there is none (a headless JVM). */
+private object SystemClipboardPort : ClipboardPort {
+    private fun board() = Toolkit.getDefaultToolkit().systemClipboard
 
-// The cleaner is a daemon thread: pending clears die silently at JVM exit, leaving the
-// secret on the clipboard after the app closes. This hook covers exit (still ==-guarded).
-private val exitClipGuard: Thread = Thread { runCatching { clearVaultClipboard() } }.also {
+    override fun put(selection: SensitiveTextSelection) = board().setContents(selection, selection)
+
+    override fun clear() = board().setContents(StringSelection(""), null)
+
+    override fun text(): String? {
+        val b = board()
+        if (!b.isDataFlavorAvailable(java.awt.datatransfer.DataFlavor.stringFlavor)) return null
+        return b.getData(java.awt.datatransfer.DataFlavor.stringFlavor) as? String
+    }
+}
+
+/** The app's one secret clipboard, on both clocks. */
+internal val secretClipboard = SecretClipboard(
+    port = { runCatching { Toolkit.getDefaultToolkit().systemClipboard }.getOrNull()?.let { SystemClipboardPort } },
+    monotonicMs = { System.nanoTime() / 1_000_000 },
+    wallMs = { System.currentTimeMillis() },
+)
+
+// The clear's tick: once a second, on its own daemon thread, so a clear that failed is tried again a second later.
+private val clipboardTicker = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "andvari-clip").apply { isDaemon = true } }.also {
+    it.scheduleWithFixedDelay({ runCatching { secretClipboard.tick() } }, 1, 1, TimeUnit.SECONDS)
+}
+
+// The ticker is a daemon thread and dies at JVM exit: this hook makes the exit's own attempt. A kill or a crash runs no
+// hook at all, so a secret copied then stays on a Windows clipboard (a remaining risk; X11 drops it with the process).
+private val exitClipGuard: Thread = Thread { runCatching { secretClipboard.clearNow() } }.also {
     Runtime.getRuntime().addShutdownHook(it)
 }
 
 /**
- * Clear the system clipboard iff it still holds the last secret copied via
- * [copyWithAutoClear]. Called on lock/sign-out (DesktopState) and at JVM exit — a vault
- * secret must not outlive the session, but an unrelated user clipboard is never touched.
+ * Clear a secret this app copied, now, if the clipboard still belongs to it. Called when the vault leaves the
+ * unlocked phase (TrustApp) and at JVM exit. A clear that fails stays due and is tried again at the next tick; an
+ * unrelated value the person copied since is never touched.
  */
-fun clearVaultClipboard() {
-    val secret = lastSecretCopied ?: return
-    runCatching {
-        val clipboard = Toolkit.getDefaultToolkit().systemClipboard
-        val current = clipboard.getData(java.awt.datatransfer.DataFlavor.stringFlavor) as? String
-        if (current == secret) clipboard.setContents(StringSelection(""), null)
-    }
-    lastSecretCopied = null
-}
+fun clearVaultClipboard() = secretClipboard.clearNow()
 
 @Serializable
 internal data class DownloadsManifest(
@@ -122,9 +135,6 @@ internal fun selectPlatformBuild(manifest: DownloadsManifest, isWindows: Boolean
     else -> manifest.linux
 }
 
-/** Where to download an update — surfaced to the user next to the banner. */
-fun downloadsUrl(baseUrl: String): String = "$baseUrl/downloads"
-
 /**
  * design 2026-07-13 platform-fit §2, Help ▸ Open web vault: open [url] in the OS default browser.
  * Fails GRACEFULLY — Desktop is unsupported on headless/no-browser Linux and Desktop.browse THROWS
@@ -135,7 +145,10 @@ fun openInBrowser(url: String): Boolean = runCatching {
     if (!Desktop.isDesktopSupported()) return false
     val desktop = Desktop.getDesktop()
     if (!desktop.isSupported(Desktop.Action.BROWSE)) return false
-    desktop.browse(URI(url))
+    val uri = URI(url)
+    // A user name or password before the host is never opened (the callers say why).
+    if (uri.rawUserInfo != null) return false
+    desktop.browse(uri)
     true
 }.getOrDefault(false)
 
@@ -165,22 +178,68 @@ fun openFolder(dir: java.io.File): Boolean = runCatching {
  * the UI shows at most one muted Settings line, never a nag and never a modal.
  */
 sealed interface UpdateCheck {
-    /** Verified manifest, strictly newer version for THIS OS — show the update nag. */
-    data class Available(val version: String, val seq: Long) : UpdateCheck
+    /**
+     * Verified manifest, strictly newer version for THIS OS — show the update nag. [downloadUrl] is where the banner
+     * points: the signed list's own address for this platform when it passes [UpdateChannel.bannerAddress], else the
+     * project's GitHub releases page. Never the relaying server's origin.
+     */
+    data class Available(val version: String, val seq: Long, val downloadUrl: String = UpdateChannel.GITHUB_RELEASES_PAGE, val signedAt: String = "") : UpdateCheck
 
-    /** Verified manifest, nothing newer. */
-    data class UpToDate(val seq: Long) : UpdateCheck
+    /** Verified manifest, nothing newer. [signedAt]: the list's own signed date, as it carries it. */
+    data class UpToDate(val seq: Long, val signedAt: String = "") : UpdateCheck
 
     /** Verified, nothing newer, but `signedAt` is older than [UPDATE_STALE_AFTER_DAYS] (or
      *  unreadable) — the channel can't prove freshness (§M-D4: withheld updates made DETECTABLE). */
-    data class Stale(val seq: Long) : UpdateCheck
+    data class Stale(val seq: Long, val signedAt: String = "") : UpdateCheck
 
-    /** Fail-closed-quiet (§M-D5/D6): fetch failed, sig missing/invalid, parse failed, or the seq
-     *  regressed below the persisted floor. NO update is offered; no state is persisted. */
+    /** Fail-closed-quiet (§M-D5/D6): an answer came, but the sig was missing/invalid, the list did not
+     *  parse, or the seq regressed below the persisted floor. NO update is offered; no state is persisted.
+     *  About says "could not verify". */
     data object Unverified : UpdateCheck
+
+    /** No source could be reached, or none serves a list. About says "could not check since …". */
+    data object Unreachable : UpdateCheck
+
+    /** Nothing was asked: no server is attached yet ([UpdateChannel.ASK_GITHUB_BEFORE_A_SERVER] is off). */
+    data object NotAsked : UpdateCheck
 
     /** §M-D3: only the TEST pubkey is pinned — the entire update path is compile-time disabled. */
     data object Disabled : UpdateCheck
+}
+
+/** One check's outcome: [from] is the source that gave it (null when nothing was asked), [atMs] when it ran. */
+data class UpdateReport(val from: UpdateSource?, val check: UpdateCheck, val atMs: Long) {
+    /** A verified list came: the floor may ratchet, and the check counts as done. */
+    val verified: Boolean get() = check is UpdateCheck.Available || check is UpdateCheck.UpToDate || check is UpdateCheck.Stale
+
+    val seq: Long? get() = when (val c = check) {
+        is UpdateCheck.Available -> c.seq
+        is UpdateCheck.UpToDate -> c.seq
+        is UpdateCheck.Stale -> c.seq
+        else -> null
+    }
+
+    /** The verified list's own signed date (`signedAt`, as signed; empty when it carries none or nothing verified). */
+    val signedAt: String get() = when (val c = check) {
+        is UpdateCheck.Available -> c.signedAt
+        is UpdateCheck.UpToDate -> c.signedAt
+        is UpdateCheck.Stale -> c.signedAt
+        else -> ""
+    }
+}
+
+/** What fetching one file came to. */
+sealed interface Fetched {
+    class Body(val bytes: ByteArray) : Fetched
+
+    /** The source answered and has no such file (or answered something other than 200). */
+    data object Missing : Fetched
+
+    /** Larger than its cap, or a redirect that may not be followed. */
+    data object Refused : Fetched
+
+    /** No answer: the network, a timeout, a name that does not resolve. */
+    data object Failed : Fetched
 }
 
 /** §M-D4: a verified manifest signed longer ago than this can't prove the channel is fresh. */
@@ -190,7 +249,8 @@ private const val UPDATE_STALE_AFTER_DAYS = 45L
 private val updateCrypto by lazy { createCryptoProvider() }
 
 /**
- * In-app update check (spec P3 + H2 §M): fetch the EXACT bytes of {base}/downloads/manifest.json
+ * In-app update check (spec P3 + H2 §M), from the sources [UpdateChannel.sources] gives (the attached server, then
+ * GitHub's latest release): fetch the EXACT bytes of the source's manifest.json
  * (ofByteArray — §M-D6: the sig is over the raw bytes, so no string round-trip may touch them),
  * fetch the detached base64url Ed25519 signature from manifest.json.sig (the update-signer's
  * output format), verify against the pinned key set BEFORE parsing, then gate on the anti-rollback
@@ -202,34 +262,66 @@ private val updateCrypto by lazy { createCryptoProvider() }
  * Blocking I/O — call from a background dispatcher (UI-audit #24: this ran synchronously on the
  * Compose thread and froze the window for up to ~8 s).
  */
-fun checkForUpdate(baseUrl: String, lastAcceptedSeq: Long): UpdateCheck {
-    if (!UpdateVerify.updatesEnabled()) return UpdateCheck.Disabled // §M-D3 hard-off on the test key
-    // Reference-instance scope (2026-07-18 arming; multi-tenant §9): the pinned ceremony key signs
-    // the REFERENCE instance's `/downloads` only, so the channel runs solely against the shipped
-    // default origin. A self-host/custom baseUrl returns the same quiet Disabled the un-armed build
-    // gave every origin — never an "unverified" nag about a server our key was never meant to vouch
-    // for. (Per-instance keys/pinning are separate later work.)
-    if (baseUrl.trimEnd('/') != DesktopSessionStore.DEFAULT_BASE_URL) return UpdateCheck.Disabled
+fun checkForUpdates(
+    attachedOrigin: String?,
+    lastAcceptedSeq: Long,
+    nowMs: Long = System.currentTimeMillis(),
+    enabled: Boolean = UpdateVerify.updatesEnabled(),
+    sources: List<UpdateSource> = UpdateChannel.sources(attachedOrigin),
+    fetch: (String, Int) -> Fetched = ::fetchUpdateFile,
+    verify: (ByteArray, ByteArray) -> Boolean = { raw, sig -> UpdateVerify.verify(updateCrypto, raw, sig) },
+    platform: Pair<Boolean, Boolean> = currentPlatform(),
+): UpdateReport {
+    if (!enabled) return UpdateReport(null, UpdateCheck.Disabled, nowMs) // §M-D3 hard-off on the test key
+    // Nothing is asked before a server is chosen, and the old address never.
+    if (sources.isEmpty()) return UpdateReport(null, UpdateCheck.NotAsked, nowMs)
     // §M-D4(a) anti-rollback FLOOR (mirror of extension background.ts:711 `Math.max(storedSeq, MIN_SEQ)`):
     // a fresh install (or one whose persisted lastAcceptedSeq was wiped) evaluates from MIN_SEQ, not 0,
     // so a T1 server can't steer it below the compile-time floor with a validly-signed-but-older manifest.
     val floorSeq = maxOf(lastAcceptedSeq, UpdateVerify.MIN_SEQ)
-    val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(4)).build()
-    // q19 (security review 2026-10): both bodies are UNVERIFIED server bytes, so they are size-capped while they are
-    // read — never buffered whole first. An oversized answer is the same quiet Unverified as any other failure.
-    val raw: ByteArray = try {
-        fetchBounded(client, "$baseUrl/downloads/manifest.json", UPDATE_MANIFEST_MAX_BYTES) ?: return UpdateCheck.Unverified
-    } catch (_: Exception) {
-        return UpdateCheck.Unverified
+    // The attached server first; when it gives no verified list (none served, unreachable, not verifiable, or below
+    // the floor), GitHub. A source can withhold an update this way; it can never forge one. The quiet state reported
+    // when no source verified is "could not verify" if any source answered with a list, else "could not check".
+    var unverifiedFrom: UpdateSource? = null
+    for (source in sources) {
+        when (val c = checkSource(source, floorSeq, fetch, verify, platform)) {
+            is UpdateCheck.Available, is UpdateCheck.UpToDate, is UpdateCheck.Stale -> return UpdateReport(source, c, nowMs)
+            UpdateCheck.Unverified -> if (unverifiedFrom == null) unverifiedFrom = source
+            else -> {}
+        }
     }
-    val sig: ByteArray = try {
-        val text = fetchBounded(client, "$baseUrl/downloads/manifest.json.sig", UPDATE_SIG_MAX_BYTES) ?: return UpdateCheck.Unverified
-        Bytes.fromB64(text.decodeToString().trim())
-    } catch (_: Exception) {
-        return UpdateCheck.Unverified
+    return unverifiedFrom?.let { UpdateReport(it, UpdateCheck.Unverified, nowMs) } ?: UpdateReport(sources.last(), UpdateCheck.Unreachable, nowMs)
+}
+
+/** (isWindows, isArch) of this computer: a Linux build must not compare itself against the Windows MSI's version. */
+private fun currentPlatform(): Pair<Boolean, Boolean> {
+    val isWindows = System.getProperty("os.name").orEmpty().lowercase().contains("win")
+    return isWindows to (!isWindows && isArchLike(readOsRelease()))
+}
+
+/** One source's list: fetched size-capped, verified over its raw bytes BEFORE any parse, then floored and selected. */
+internal fun checkSource(
+    source: UpdateSource,
+    floorSeq: Long,
+    fetch: (String, Int) -> Fetched,
+    verify: (ByteArray, ByteArray) -> Boolean,
+    platform: Pair<Boolean, Boolean>,
+): UpdateCheck {
+    // q19 (security review 2026-10): both bodies are UNVERIFIED source bytes, so they are size-capped while they are
+    // read — never buffered whole first.
+    val raw = when (val f = fetch(source.manifestUrl, UPDATE_MANIFEST_MAX_BYTES)) {
+        is Fetched.Body -> f.bytes
+        Fetched.Refused -> return UpdateCheck.Unverified
+        Fetched.Missing, Fetched.Failed -> return UpdateCheck.Unreachable
+    }
+    val sig: ByteArray = when (val f = fetch(source.signatureUrl, UPDATE_SIG_MAX_BYTES)) {
+        is Fetched.Body -> runCatching { Bytes.fromB64(f.bytes.decodeToString().trim()) }.getOrNull() ?: return UpdateCheck.Unverified
+        // A list with no signature beside it is a list that cannot be verified.
+        Fetched.Missing, Fetched.Refused -> return UpdateCheck.Unverified
+        Fetched.Failed -> return UpdateCheck.Unreachable
     }
     // The crux (§D#2): verify the raw bytes against the pinned key set BEFORE any parse.
-    if (!UpdateVerify.verify(updateCrypto, raw, sig)) return UpdateCheck.Unverified
+    if (!verify(raw, sig)) return UpdateCheck.Unverified
     val manifest = try {
         json.decodeFromString(DownloadsManifest.serializer(), raw.decodeToString())
     } catch (_: Exception) {
@@ -241,15 +333,57 @@ fun checkForUpdate(baseUrl: String, lastAcceptedSeq: Long): UpdateCheck {
     // every launch into a false "couldn't verify". The floor only advances on seq > floor.
     // floorSeq (not the raw stored seq) is the effective floor — never below MIN_SEQ (§M-D4a).
     if (manifest.seq < floorSeq) return UpdateCheck.Unverified
-    val isWindows = System.getProperty("os.name").orEmpty().lowercase().contains("win")
-    val isArch = !isWindows && isArchLike(readOsRelease())
-    val available = selectPlatformBuild(manifest, isWindows, isArch)?.version?.takeIf { it.isNotBlank() }
+    val (isWindows, isArch) = platform
+    val build = selectPlatformBuild(manifest, isWindows, isArch)
+    val available = build?.version?.takeIf { it.isNotBlank() }
     return when {
-        available != null && compareVersions(available, DESKTOP_VERSION) > 0 -> UpdateCheck.Available(available, manifest.seq)
-        updateChannelStale(manifest.signedAt) -> UpdateCheck.Stale(manifest.seq)
-        else -> UpdateCheck.UpToDate(manifest.seq)
+        available != null && compareVersions(available, DESKTOP_VERSION) > 0 ->
+            UpdateCheck.Available(available, manifest.seq, UpdateChannel.bannerAddress(build.url), manifest.signedAt)
+        updateChannelStale(manifest.signedAt) -> UpdateCheck.Stale(manifest.seq, manifest.signedAt)
+        else -> UpdateCheck.UpToDate(manifest.seq, manifest.signedAt)
     }
 }
+
+/** Redirects followed at most (GitHub's latest-asset address redirects once, to the asset's storage). */
+private const val UPDATE_MAX_REDIRECTS = 5
+
+/**
+ * GET [url] with [fetchBounded]'s caps, following redirects by hand so that each hop is checked: never the retired
+ * host ([UpdateChannel.mayAsk]), never from https down to http, and never to another host than the request's own
+ * (GitHub's asset hosts from github.com only: [UpdateChannel.mayRedirect]).
+ */
+internal fun fetchUpdateFile(url: String, limit: Int, client: HttpClient = updateHttpClient()): Fetched {
+    var uri = runCatching { URI.create(url) }.getOrNull() ?: return Fetched.Refused
+    val start = uri
+    repeat(UPDATE_MAX_REDIRECTS + 1) {
+        if (!UpdateChannel.mayAsk(uri)) return Fetched.Refused
+        val req = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(8)).GET().build()
+        val resp = try {
+            client.send(req, HttpResponse.BodyHandlers.ofInputStream())
+        } catch (e: Exception) {
+            return Fetched.Failed
+        }
+        resp.body().use { body ->
+            val status = resp.statusCode()
+            if (status in 300..399) {
+                val next = resp.headers().firstValue("Location").orElse(null) ?: return Fetched.Missing
+                val target = runCatching { uri.resolve(next) }.getOrNull() ?: return Fetched.Refused
+                if (uri.scheme.equals("https", true) && !target.scheme.equals("https", true)) return Fetched.Refused
+                if (!UpdateChannel.mayRedirect(start, target)) return Fetched.Refused
+                uri = target
+                return@use
+            }
+            if (status != 200) return Fetched.Missing
+            val declared = resp.headers().firstValueAsLong("Content-Length")
+            if (declared.isPresent && declared.asLong > limit) return Fetched.Refused
+            return runCatching { readBounded(body, limit) }.getOrNull()?.let { Fetched.Body(it) } ?: Fetched.Refused
+        }
+    }
+    return Fetched.Refused
+}
+
+internal fun updateHttpClient(): HttpClient =
+    HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(4)).followRedirects(HttpClient.Redirect.NEVER).build()
 
 /** q19: the signed downloads manifest is a few KiB; 256 KiB leaves room for growth and still cannot exhaust a heap. */
 internal const val UPDATE_MANIFEST_MAX_BYTES = 256 * 1024
@@ -271,6 +405,25 @@ internal fun fetchBounded(client: HttpClient, url: String, limit: Int): ByteArra
         if (declared.isPresent && declared.asLong > limit) return null
         return readBounded(body, limit)
     }
+}
+
+/**
+ * Read at most [limit] bytes from [input]; null if the source is larger, so an oversized body is refused without ever
+ * being buffered whole. (Moved here from the old `DesktopState.kt`, where the attachment picker and the CSV import also
+ * used it; the update fetch is its only caller now.)
+ */
+internal fun readBounded(input: java.io.InputStream, limit: Int): ByteArray? {
+    val out = java.io.ByteArrayOutputStream()
+    val buf = ByteArray(64 * 1024)
+    var total = 0L
+    while (true) {
+        val r = input.read(buf)
+        if (r < 0) break
+        total += r
+        if (total > limit) return null
+        out.write(buf, 0, r)
+    }
+    return out.toByteArray()
 }
 
 /** §M-D4 freshness: true when `signedAt` is missing/unreadable or older than the window — a
@@ -299,45 +452,10 @@ private fun compareVersions(a: String, b: String): Int {
 fun copyPlain(value: String): Boolean =
     runCatching { Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(value), null) }.isSuccess
 
-// ux-parity--5: the NEWEST copy owns the clipboard — and the only clear scheduled against it.
-// Every copy used to schedule its own uncancelled wipe, and the equal-value guard below let an
-// OLD timer fire inside a NEWER copy's window (copy the same password at t=0 and t=25 s with a
-// 30 s policy and the clipboard emptied at t=30 s — 5 s into a window the UI had just promised
-// was 30 s). Web and the extension each keep one live timer; this is that rule ported back,
-// alongside the Android twin (MainActivity's clipboardCopyGeneration).
-private val clipboardCopyGeneration = java.util.concurrent.atomic.AtomicLong(0)
-
-/** The auto-clear's two guards, together — byte-twin of Android's [shouldClearClipboard]. Clears
- *  only when (a) no later copy has superseded this scheduled one (ux-parity--5) and (b) the
- *  clipboard still demonstrably holds OUR secret (the pre-existing guard: never stomp something
- *  the user copied from another app since). Pure so both rules are unit-testable without AWT. */
-internal fun shouldClearClipboard(scheduledGeneration: Long, currentGeneration: Long, clipboardNow: String?, copiedValue: String): Boolean =
-    scheduledGeneration == currentGeneration && clipboardNow == copiedValue
-
 /**
- * Copy to the system clipboard and auto-clear after [clearSeconds] (best-effort). Vault-secret
- * call sites pass `max(1, policy.clipboardClearSeconds)` — clamped exactly like web's useCopy,
- * so a policy of 0 still clears after 1 s (never "keep forever" for secrets).
- * False = the write failed (ux-error--3, [copyPlain]'s guard rationale); nothing landed on the
- * clipboard, so [lastSecretCopied] is NOT set, the generation does NOT advance (a failed copy must
- * never supersede a live timer), and no clear is scheduled.
+ * Copy a secret to the system clipboard, marked sensitive where the platform has a mark (A14, F9), and clear it after
+ * [clearSeconds] (at least 1: a policy of 0 never means "keep forever"). The one way anything of the app reaches the
+ * clipboard: a text field's own Ctrl+C, Ctrl+X and context menu come here too ([SensitiveClipboardManager]).
+ * False = the write failed (ux-error--3): nothing landed on the clipboard and no clear is due.
  */
-fun copyWithAutoClear(value: String, clearSeconds: Int = 30): Boolean {
-    // The systemClipboard ACCESSOR can throw too (headless JVM; some Linux setups without a
-    // system clipboard) — guard the whole acquire-and-write, not just setContents.
-    val clipboard = runCatching { Toolkit.getDefaultToolkit().systemClipboard }.getOrNull() ?: return false
-    // A14 (F9): marked sensitive — Windows clipboard history/cloud clipboard and Klipper skip it.
-    if (runCatching { clipboard.setContents(SensitiveClipboard.selectionFor(value), null) }.isFailure) return false
-    val generation = clipboardCopyGeneration.incrementAndGet()
-    lastSecretCopied = value
-    clipboardCleaner.schedule({
-        runCatching {
-            val current = clipboard.getData(java.awt.datatransfer.DataFlavor.stringFlavor) as? String
-            if (shouldClearClipboard(generation, clipboardCopyGeneration.get(), current, value)) clipboard.setContents(StringSelection(""), null)
-        }
-        // Same ownership rule for the exit-hook's memory: a superseded timer must not retire the
-        // secret a NEWER copy of the same value is still guarding.
-        if (generation == clipboardCopyGeneration.get() && lastSecretCopied == value) lastSecretCopied = null
-    }, clearSeconds.toLong(), TimeUnit.SECONDS)
-    return true
-}
+fun copyWithAutoClear(value: String, clearSeconds: Int = 30): Boolean = secretClipboard.copy(value, clearSeconds)

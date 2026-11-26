@@ -15,19 +15,17 @@ test("the Safari manifest names no server and has no options page", () => {
   assert.ok(m.host_permissions.includes("https://*/*"), "pages still get the content script (Safari asks per site)");
 });
 
-test("the Safari build replaces the reference origin, and fails if it is left in dist/", () => {
+test("no build has a default server, and the Safari build fails if the old reference origin is left in dist/", () => {
   const build = read("../build.mjs");
-  assert.match(build, /plugins: target === "safari" \? \[noDefaultServer\] : \[\]/);
-  assert.match(build, /const NO_SERVER_ORIGIN = "https:\/\/no-server\.invalid";/, "a name that can never resolve (RFC 6761)");
+  assert.ok(read("./serverurl.ts").includes('export const NO_SERVER_ORIGIN = "https://no-server.invalid";'), "a name that can never resolve (RFC 6761)");
+  assert.ok(!read("./serverurl.ts").includes("DEFAULT_SERVER_URL"));
   assert.match(build, /if \(left\.length > 0\) throw new Error/);
-  assert.match(build, /if \(target !== "safari"\) cpSync\("INSTALL\.txt"/, "the desktop install notes (which name the reference server) stay out");
-  // The swap is of the exact declaration: a reworded one fails the build instead of silently keeping the default.
-  assert.ok(read("./serverurl.ts").includes('export const DEFAULT_SERVER_URL = "https://andvari.monahanhosting.com";'));
+  assert.match(build, /if \(target !== "safari"\) cpSync\("INSTALL\.txt"/, "the desktop install notes stay out");
 });
 
 test("in the Safari build, no server chosen means nothing is dialed and no autofill is registered", () => {
   const bg = read("./background.ts");
-  assert.match(bg, /function noServerChosen\(\): boolean \{\s*return BUILD_TARGET === "safari" && serverUrl === DEFAULT_SERVER_URL;/);
+  assert.match(bg, /function noServerChosen\(\): boolean \{\s*return serverUrl === NO_SERVER_ORIGIN;/);
   const apply = bg.slice(bg.indexOf("async function applyServerState("), bg.indexOf("const serverReady"));
   assert.match(apply, /if \(dialBlock === null && noServerChosen\(\)\) dialBlock = \{ kind: "unsettled" \};/);
   // The Safari lane answers a connection test without dialing.
@@ -43,17 +41,18 @@ test("the Safari build ships no Options, connector or offscreen page, and its wo
   assert.match(build, /if \(pages\.length > 0\) throw new Error\(`the Safari build must not ship/);
   const bg = read("./background.ts");
   const lane = bg.slice(bg.indexOf("async function appVaultDispatch("), bg.indexOf('case "status":', bg.indexOf("async function appVaultDispatch(")));
-  assert.match(lane, /case "setServerUrl":[\s\S]*?return \{ ok: false, code: "not_allowed" \} satisfies Res<"setServerUrl">;/);
-  assert.match(lane, /case "forgetLegacyServer":\s*return \{ ok: false \} satisfies Res<"forgetLegacyServer">;/);
+  assert.match(lane, /case "chooseServer":\s*case "confirmServer":[\s\S]*?return \{ ok: false, code: "not_allowed" \} satisfies Res<"chooseServer">;/);
+  assert.match(lane, /case "forgetServer":\s*return \{ ok: false \} satisfies Res<"forgetServer">;/);
+  assert.match(lane, /case "followServerChange":\s*return \{ ok: false, code: "not_allowed" \} satisfies Res<"followServerChange">;/);
 });
 
 test("the Safari popup copies no password, card number or security code (C4): they are filled, or copied in the app", () => {
   const popup = read("./popup.ts");
   assert.match(popup, /function copiesLongLivedSecrets\(\): boolean \{\s*return BUILD_TARGET !== "safari";/);
   // Every button that copies one of them is behind the rule.
-  for (const line of popup.split("\n").filter((l) => /actBtn\("(pass|copy|num|cvv)", "Copy (password|card number|security code)"/.test(l))) {
-    assert.ok(line.includes("copiesLongLivedSecrets()"), line.trim());
-  }
-  assert.equal((popup.match(/"Copy password"/g) ?? []).length, 2, "the row and the detail, both guarded");
+  const guarded = popup.split("\n").filter((l) => /actBtn\(T\.BTN_(PASS|COPY|NUM|CVV), T\.COPY_(PASSWORD|CARD_NUMBER|CARD_CVV),/.test(l));
+  assert.equal(guarded.length, 4, "the row's and the detail's password, the card number and the security code");
+  for (const line of guarded) assert.ok(line.includes("copiesLongLivedSecrets()"), line.trim());
+  assert.equal((popup.match(/T\.COPY_PASSWORD\b/g) ?? []).length, 2, "the row and the detail, both guarded");
 });
 

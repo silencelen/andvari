@@ -4,18 +4,18 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { ApiClient } from "../api/client";
 import { ApiError } from "../api/client";
 import type { AccountKeys, ItemDoc, Mutation, PushResponse, SyncResponse, WireGrant, WireItem, WireVault } from "../api/types";
-import { adItem, adUvk, adVaultMeta, adVk } from "../crypto/ad";
+import { adItem, adVaultMeta } from "../crypto/ad";
 import { fromB64, toB64 } from "../crypto/bytes";
 import { open, seal } from "../crypto/envelope";
 import { fingerprint } from "../crypto/escrow";
-import { masterKey, wrapKey, type KdfParams } from "../crypto/keys";
+import type { KdfParams } from "../crypto/keys";
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
-import { sealSharedGrant } from "../crypto/sharedgrant";
 import { initSodium } from "../crypto/sodium";
 import { Account, VaultKeyNotVerifiedError } from "./account";
 import { memoryClientState } from "./accountstatesync";
+import { type FakeRole, FakeSharedLogs } from "./fakesharedlogs.testkit";
 import { openVaultCache, type VaultCache } from "./idbcache";
-import { ItemChangedVaultsError, VaultStore } from "./store";
+import { type ItemWire, ItemChangedVaultsError, VaultStore } from "./store";
 
 /**
  * Item home (security review 2026-10, root cause A §5; branch A1b) on the path a real client takes — web twin of core
@@ -26,7 +26,8 @@ import { ItemChangedVaultsError, VaultStore } from "./store";
  *  1. no push carries an S envelope whose plaintext is P's doc for X (every pushed S envelope is decrypted);
  *  2. `get(X).vaultId == P` and P's doc is unchanged;
  *  3. exactly one "the server sent an item under the wrong vault" anomaly;
- *  4. in-window, a v1-only S is legacy-read-only and INV-WRITE-KEY blocks any seal under it on its own.
+ *  4. an S whose verified log lists the victim as a reader: INV-WRITE-KEY blocks any seal under it on its own.
+ * S's key and the victim's role come from the fake log layer (design §3.6), never from S's grant row.
  */
 
 const KDF: KdfParams = { v: 1, alg: "argon2id13", ops: 1, memBytes: 8192 };
@@ -64,11 +65,6 @@ async function enroll(tag: string): Promise<Enrolled> {
 
 const unlock = (e: Enrolled) => Account.unlock(e.userId, e.password, e.keys);
 
-async function uvkOf(e: Enrolled): Promise<Uint8Array> {
-  const mk = masterKey(e.password, fromB64(e.keys.kdfSalt), e.keys.kdfParams);
-  return open(await wrapKey(mk), fromB64(e.keys.wrappedUvk), adUvk(e.userId));
-}
-
 /** A scripted hostile server: a queue of /sync answers, and every mutation the client pushes. */
 class Server {
   queue: SyncResponse[] = [];
@@ -87,7 +83,7 @@ class Server {
     }
     return this.queue.shift() ?? { rev: this.rev, full: false, vaults: [], grants: [], items: [], removedGrants: [] };
   }
-  async push(mutations: Mutation[]): Promise<PushResponse> {
+  async pushMutations(mutations: Mutation[]): Promise<PushResponse> {
     this.pushed.push(...mutations);
     return {
       rev: this.rev,
@@ -107,13 +103,20 @@ class Server {
   asClient(): ApiClient {
     return this as unknown as ApiClient;
   }
+
+  /** The item routes the store calls (its ItemWire): this fake serves them too. */
+  asWire(): ItemWire {
+    return this as unknown as ItemWire;
+  }
 }
 
-/** The §5.3 fixture (see the core twin): `writable` false = the review's v1-sealed S; true = S a vault the victim
- *  owns that a colluding co-member can read (INV-HOME must hold with no INV-WRITE-KEY behind it). */
+/** The §5.3 fixture (see the core twin): `writable` false = an S the victim may only read (the review's v1-sealed S,
+ *  under the log a reader's role); true = S a vault the victim owns that a colluding co-member can read (INV-HOME must
+ *  hold with no INV-WRITE-KEY behind it). */
 interface World {
   victim: Enrolled;
   writable: boolean;
+  role: FakeRole;
   p: string;
   s: string;
   x: string;
@@ -133,29 +136,19 @@ async function world(writable: boolean): Promise<World> {
   const x = victim.account.newItemId();
   const docP: ItemDoc = { type: "login", name: "Bank", login: { username: "me", password: "P-SECRET-0001", uris: [] } };
   const bait: ItemDoc = { type: "login", name: "Bank", login: { username: "me", password: "server-chosen", uris: [] } };
-  let s: string;
-  let vkS: Uint8Array;
-  let sRow: WireVault;
-  let sGrant: WireGrant;
-  if (writable) {
-    const shared = victim.account.buildCreateSharedVault("Household");
-    s = shared.vaultId;
-    vkS = open(await uvkOf(victim), fromB64(shared.request.wrappedVk), adVk(s, victim.userId));
-    sRow = { vaultId: s, type: "shared", rev: 7, metaBlob: shared.request.metaBlob, createdAt: 0 };
-    sGrant = { vaultId: s, userId: victim.userId, role: "owner", wrappedVk: shared.request.wrappedVk, rev: 7, sealedVk: null };
-  } else {
-    s = victim.account.newItemId();
-    vkS = randomBytes(32);
-    sRow = { vaultId: s, type: "shared", rev: 7, metaBlob: toB64(seal(vkS, utf8(JSON.stringify({ name: "Server" })), adVaultMeta(s))), createdAt: 0 };
-    sGrant = { vaultId: s, userId: victim.userId, role: "writer", wrappedVk: "", rev: 7, sealedVk: toB64(sealSharedGrant(fromB64(victim.keys.identityPub), s, vkS)) };
-  }
+  // S's key and the victim's role in it are what S's verified log says (design §3.6); the grant row is a hint only.
+  const s = victim.account.newItemId();
+  const vkS = randomBytes(32);
+  const role: FakeRole = writable ? "owner" : "reader";
+  const sRow: WireVault = { vaultId: s, type: "shared", rev: 7, metaBlob: toB64(seal(vkS, utf8(JSON.stringify({ name: "Household" })), adVaultMeta(s))), createdAt: 0 };
+  const sGrant: WireGrant = { vaultId: s, userId: victim.userId, role, wrappedVk: "", rev: 7 };
   const up = victim.account.encryptItem(p, x, docP);
   const genuine: WireItem = { itemId: x, vaultId: p, rev: 3, createdAt: 1, updatedAt: 1, deleted: false, conflict: false, formatVersion: up.formatVersion, attachmentIds: [], blob: up.blob };
   const flagged: WireItem = { itemId: x, vaultId: s, rev: 8, createdAt: 1, updatedAt: 2, deleted: false, conflict: true, formatVersion: 1, attachmentIds: [], blob: toB64(seal(vkS, utf8(JSON.stringify(bait)), adItem(s, x, 1))) };
   return {
-    victim, writable, p, s, x, vkS, docP,
+    victim, writable, role, p, s, x, vkS, docP,
     personalRow: { vaultId: p, type: "personal", rev: 2, metaBlob: victim.personalMeta, createdAt: 0 },
-    personalGrant: { vaultId: p, userId: victim.userId, role: "owner", wrappedVk: victim.personalWrappedVk, rev: 2, sealedVk: null },
+    personalGrant: { vaultId: p, userId: victim.userId, role: "owner", wrappedVk: victim.personalWrappedVk, rev: 2 },
     sRow, sGrant, genuine, flagged,
   };
 }
@@ -182,14 +175,16 @@ async function client(w: World, server: Server, cold: boolean): Promise<{ device
   const local = memoryClientState();
   const first = await unlock(w.victim);
   const cache: VaultCache = await openVaultCache(w.victim.userId);
-  const s1 = new VaultStore(server.asClient(), first, cache, local);
+  const s1 = new VaultStore(server.asClient(), first, cache, local, server.asWire());
+  new FakeSharedLogs(first).attachTo(s1).share(w.s, w.vkS, w.role);
   server.queue.push(seedFeed(w));
   await s1.sync();
   expect(s1.get(w.x)?.vaultId).toBe(w.p);
   if (!cold) return { device: first, store: s1 };
   cache.close();
   const second = await unlock(w.victim);
-  const s2 = new VaultStore(server.asClient(), second, await openVaultCache(w.victim.userId), local);
+  const s2 = new VaultStore(server.asClient(), second, await openVaultCache(w.victim.userId), local, server.asWire());
+  new FakeSharedLogs(second).attachTo(s2).share(w.s, w.vkS, w.role);
   await s2.hydrate();
   return { device: second, store: s2 };
 }
@@ -203,7 +198,8 @@ function assertAcceptance(w: World, server: Server, device: Account, store: Vaul
   expect(store.list().filter((i) => i.itemId === w.x)).toHaveLength(1);
   expect(store.notices().filter((n) => n.kind === "wrong-vault")).toHaveLength(1);
   if (!w.writable) {
-    expect(device.isLegacyReadOnly(w.s)).toBe(true);
+    // The log lists the victim as a reader of S: INV-WRITE-KEY refuses any seal under it on its own.
+    expect(device.hasVault(w.s) && !device.canSealUnder(w.s)).toBe(true);
     expect(() => device.encryptItem(w.s, device.newItemId(), w.docP)).toThrow(VaultKeyNotVerifiedError);
   }
 }
@@ -219,7 +215,7 @@ describe("A1b — item home (VaultStore)", () => {
   for (const writable of [false, true]) {
     for (const flaggedFirst of [true, false]) {
       for (const cold of [false, true]) {
-        it(`§5.3 acceptance: ${writable ? "writable" : "v1-sealed"} S, ${flaggedFirst ? "flagged row first" : "genuine row first"}, ${cold ? "cold" : "warm"}`, async () => {
+        it(`§5.3 acceptance: ${writable ? "writable" : "read-only"} S, ${flaggedFirst ? "flagged row first" : "genuine row first"}, ${cold ? "cold" : "warm"}`, async () => {
           const w = await world(writable);
           const server = new Server();
           const { device, store } = await client(w, server, cold);
@@ -291,13 +287,13 @@ describe("A1b — item home (VaultStore)", () => {
     expect(store.get(w.x)?.vaultId).toBe(w.p);
   });
 
-  it("INV-WRITE-KEY on every web path (save, copy-into, import, restore): a v1-only S is never written under", async () => {
+  it("INV-WRITE-KEY on every web path (save, copy-into, import, restore): an S the log makes us a reader of is never written under", async () => {
     const w = await world(false);
     const server = new Server();
     const { device, store } = await client(w, server, false);
     server.queue.push({ rev: 9, full: false, vaults: [w.sRow], grants: [w.sGrant], items: [], removedGrants: [] });
     await store.sync();
-    expect(device.isLegacyReadOnly(w.s)).toBe(true);
+    expect(device.hasVault(w.s) && !device.canSealUnder(w.s)).toBe(true);
     server.pushed = [];
     await expect(store.save(null, { ...w.docP, name: "new in S" }, [], undefined, w.s)).rejects.toThrow(VaultKeyNotVerifiedError);
     await expect(store.runGesture(store.newMoveGesture(w.x, w.s, false))).rejects.toThrow(VaultKeyNotVerifiedError);

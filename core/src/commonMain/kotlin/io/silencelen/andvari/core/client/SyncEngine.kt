@@ -3038,9 +3038,14 @@ class SyncEngine(
         // bound) is the bytes actually held — and the plaintext is exactly ref.size bytes.
         val bytes = api.downloadAttachment(ref.id, Attachments.wireLength(ref.size))
         if (bytes.size <= Attachments.HEADER_BYTES) throw CryptoException("attachment response truncated")
+        // Spec 02 §6: a file key is a per-file random 32-byte key, inside the item's ciphertext, so any writer of a
+        // shared vault chooses it. One of zeros is no file's key: the item is damaged, and the file is refused as any
+        // corrupt one is (the hard failure of §6), never decrypted under it.
+        val fileKey = Bytes.fromB64(ref.fileKey)
+        if (io.silencelen.andvari.core.crypto.KeyFloor.allZero(fileKey)) throw CryptoException("attachment ${ref.id} has an all-zero file key")
         return Attachments.decrypt(
             account.cryptoProvider(),
-            Bytes.fromB64(ref.fileKey),
+            fileKey,
             bytes.copyOfRange(0, Attachments.HEADER_BYTES),
             bytes.copyOfRange(Attachments.HEADER_BYTES, bytes.size),
         )

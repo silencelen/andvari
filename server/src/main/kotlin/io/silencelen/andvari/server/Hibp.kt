@@ -23,22 +23,32 @@ import kotlinx.coroutines.withTimeout
 class HibpRelay(private val http: HttpClient, private val timeoutMs: Long = 10_000) {
     suspend fun range(prefix: String): String {
         val p = prefix.uppercase()
-        require(p.length == 5 && p.all { it in "0123456789ABCDEF" }) { "bad prefix" }
+        if (p.length != 5 || !p.all { it in "0123456789ABCDEF" }) badRequest("bad_prefix")
         // Bound the upstream call like GraphEmailSender's withTimeout (bug-server--2): a
         // black-holed HIBP must not park the request coroutine forever — the web Health scan
         // awaits these sequentially and would hang with it. Timeout and non-2xx both surface
         // as 502-class [BadGateway] ("HIBP is down"), never a 400 ("your prefix was bad").
-        val resp: HttpResponse = try {
+        // A connect failure (refused, unresolvable, reset, a failed TLS handshake) is "HIBP
+        // unreachable" like a timeout: the same `502 hibp_timeout`, never a 500 with a stack trace. The body
+        // read is inside the same guard.
+        val (resp: HttpResponse, text: String) = try {
             withTimeout(timeoutMs) {
-                http.get("https://api.pwnedpasswords.com/range/$p") {
+                val r = http.get("https://api.pwnedpasswords.com/range/$p") {
                     header("Add-Padding", "true")
                     header("User-Agent", "andvari-hibp-relay")
                 }
+                r to (if (r.status.isSuccess()) r.bodyAsText() else "")
             }
         } catch (e: TimeoutCancellationException) {
-            throw BadGateway("hibp_timeout")
+            throw ApiException(502, "hibp_timeout")
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: java.io.IOException) {
+            throw ApiException(502, "hibp_timeout")
+        } catch (e: java.nio.channels.UnresolvedAddressException) {
+            throw ApiException(502, "hibp_timeout")
         }
-        if (!resp.status.isSuccess()) throw BadGateway("hibp_upstream_${resp.status.value}")
-        return resp.bodyAsText()
+        if (!resp.status.isSuccess()) throw ApiException(502, "hibp_upstream_${resp.status.value}")
+        return text
     }
 }

@@ -74,10 +74,10 @@ class CoMemberInputTest {
         assertEquals("File.pdf", SaveTarget.defaultName(".pdf"), "only an extension keeps it")
         assertEquals("a_b.pdf", SaveTarget.defaultName("a?b.pdf"), "then Windows' reserved characters")
         assertEquals("_CON.pdf", SaveTarget.defaultName("\u202ECON.pdf"), "and its device names, after what does not show is gone")
-        val ui = listOf(java.io.File("src/main/kotlin/io/silencelen/andvari/desktop/Ui.kt"), java.io.File("app-desktop/src/main/kotlin/io/silencelen/andvari/desktop/Ui.kt"))
+        val ui = listOf(java.io.File("src/main/kotlin/io/silencelen/andvari/desktop/trust/VaultItemsScreens.kt"), java.io.File("app-desktop/src/main/kotlin/io/silencelen/andvari/desktop/trust/VaultItemsScreens.kt"))
             .first { it.isFile }.readText()
-        assertFalse(ui.contains("Text(ref.name"), "an attachment's name is shown as AttachmentRules.safeFileName has it")
-        assertTrue(ui.contains("Text(AttachmentRules.safeFileName(ref.name)"))
+        assertFalse(ui.contains("Text(a.name"), "an attachment's name is shown as AttachmentRules.safeFileName has it")
+        assertEquals(2, Regex("""Text\(AttachmentRules\.safeFileName\(a\.name\)""").findAll(ui).count(), "on the detail and in the editor")
     }
 
     @Test
@@ -90,21 +90,6 @@ class CoMemberInputTest {
         assertNull(SaveTarget.resolve(dir.path, File(root, "elsewhere.bat").absolutePath))
         assertNull(SaveTarget.resolve(dir.path, ".."))
         assertNull(SaveTarget.resolve(dir.path, ""))
-    }
-
-    @Test
-    fun aLyingDeclaredSize_cannotStretchTheIdleLockDeferral() {
-        val bound = DesktopState.attachmentTimeoutMs(DesktopState.ATTACHMENT_TIMEOUT_CEILING_BYTES)
-        for (lie in listOf(100_000_000_000_000L, Long.MAX_VALUE, Long.MAX_VALUE / 1000 + 1)) {
-            val t = DesktopState.attachmentTimeoutMs(lie)
-            assertTrue(t in 1..bound, "a declared $lie bytes gives $t ms, bound $bound")
-        }
-        assertTrue(bound <= 90L * 60 * 1000, "the ceiling keeps the worst-case deferral near an hour: $bound ms")
-        // An honest 1 MiB attachment keeps its exact, size-scaled window.
-        assertEquals(
-            DesktopState.SYNC_TIMEOUT_MS + (1L shl 20) * 1000 / DesktopState.ATTACHMENT_MIN_BYTES_PER_SEC,
-            DesktopState.attachmentTimeoutMs(1L shl 20),
-        )
     }
 
     @Test

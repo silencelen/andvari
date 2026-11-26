@@ -6,6 +6,7 @@ import io.silencelen.andvari.core.crypto.KdfParams
 import io.silencelen.andvari.core.crypto.createCryptoProvider
 import io.silencelen.andvari.core.model.AccountKeys
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -71,6 +72,48 @@ class AccountWipeTest {
         for ((what, call) in refused) {
             assertFailsWith<AccountWipedException>(what) { call() }
         }
+    }
+
+    /**
+     * The old account line (what the iPhone app and the released apps run on) also refuses every use
+     * that only READS a key once wiped. Before, each of these ran under the zeros: an open failed as damaged data (a grant
+     * row marked unreadable, the personal vault UNREADABLE, a name or ledger read as missing), the password proof said
+     * "wrong password", and a held key's tag was the tag of zeros. Each is built while live and asked after the wipe; the
+     * account's own state is unchanged by the refused call.
+     */
+    @Test
+    fun aWipedAccountOpensComparesAndTagsNothing() {
+        val e = enroll()
+        val a = e.account
+        val personal = a.personalVaultId
+        val shared = a.buildCreateSharedVault("shared")
+        val grant = io.silencelen.andvari.core.model.WireGrant(shared.vaultId, a.userId, "owner", shared.request.wrappedVk, 1)
+        val accountState = a.sealAccountState(AccountStateDoc(userId = a.userId, seq = 1))
+        val usage = a.sealUsage(byteArrayOf(1, 2, 3))
+        val wrap = a.buildPersonalWrap(personal)
+        val keys = keysOf(e)
+        val status = a.personalStatus
+        a.wipe()
+        val refused = listOf<Pair<String, () -> Any?>>(
+            "a grant row" to { a.addGrant(grant) },
+            "a held vault's name from its row" to { a.peekVaultName(grant, shared.request.metaBlob) },
+            "a vault's name" to { a.decryptVaultName(shared.vaultId, shared.request.metaBlob) },
+            "a vault's meta" to { a.decryptVaultMeta(shared.vaultId, shared.request.metaBlob) },
+            "the account state" to { a.openAccountState(accountState) },
+            "the usage ledger" to { a.openUsage(usage) },
+            "the personal wrap" to { a.applyPersonalWrap(wrap) },
+            "a cached personal wrap" to { a.applyCachedPersonalWrap(wrap) },
+            "a personal-vault change held" to { a.holdPersonalChange(wrap) },
+            "a designated personal wrap" to { a.installDesignatedPersonalWrap(wrap) },
+            "the password proof" to { a.verifyPassword("pw", keys) },
+            "the reauthentication key" to { a.reauthAuthKey("pw", keys) },
+            "a held key's tag" to { a.legacyKeyTag(shared.vaultId) },
+        )
+        for ((what, call) in refused) {
+            assertFailsWith<AccountWipedException>(what) { call() }
+        }
+        assertEquals(status, a.personalStatus, "a refused wrap changed nothing")
+        assertFalse(a.keyUnreadable(shared.vaultId), "a refused row is not marked unreadable")
     }
 
     @Test

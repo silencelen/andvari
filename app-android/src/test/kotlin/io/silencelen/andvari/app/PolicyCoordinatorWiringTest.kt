@@ -46,9 +46,7 @@ class PolicyCoordinatorWiringTest {
         for (secret in listOf("zeroPendingRecovery()", "zeroPendingRecover()", "pendingCaptureAuthKey = null", "closeEditor()", "importDismiss()")) {
             assertTrue(end.contains(secret), "$secret must die with the session")
         }
-        // The F26 reason says why: the session ended; after a deletion whose outcome is unknown, that its fate is open.
-        assertTrue(end.contains("val reason = if (deletionUnknown) deletion.copy.SESSION_ENDED_OUTCOME_UNKNOWN else REASON_SESSION_ENDED"), "the F26 reason says why")
-        assertTrue(end.contains("sessionCleared(reason)"))
+        assertTrue(end.contains("sessionCleared(REASON_SESSION_ENDED)"), "the F26 reason says why")
         assertTrue(end.contains("screen = Screen.Welcome"), "and the session is over, so the sign-in surface")
     }
 

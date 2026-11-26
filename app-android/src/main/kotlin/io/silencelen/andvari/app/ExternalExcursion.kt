@@ -23,7 +23,10 @@ import android.os.SystemClock
  * single skip; the next background transition consumes it, and returning to the foreground clears
  * it either way. A launch that never happens (the user cancels the chooser, no browser is
  * installed, the intent throws) therefore cannot leave the app permanently unlockable — the worst
- * case is one skipped lock, and the inactivity timer still stands behind it.
+ * case is one skipped lock. On the new path the main screen's idle ticker runs only while it is
+ * resumed, so nothing would lock a vault left open behind an excursion nobody returns from: a
+ * consumed excursion therefore arms the autofill hard lock (TrustApp's
+ * process observer), which locks once the policy's idle window has passed.
  *
  * **…and the one-shot EXPIRES ([ARM_TTL_MS]).** Audit 2026-09-13 H57, the G64 residue: every arm
  * is cleared by a process ON_STOP (consumed) or a process ON_START (dropped), and an ON_START
@@ -60,7 +63,7 @@ object ExternalExcursion {
      * not seconds; a window too short would re-introduce the bug the exemption fixed (the vault
      * sealing under a user who is mid-task) on slow devices and slow humans. It only has to be
      * short enough that a *leaked* arm cannot survive to a later, unrelated backgrounding, and the
-     * failure it bounds is one skipped lock with the idle timer still standing behind it.
+     * failure it bounds is one skipped lock with the hard lock (armed when it is consumed) behind it.
      */
     const val ARM_TTL_MS: Long = 5 * 60 * 1000L
 

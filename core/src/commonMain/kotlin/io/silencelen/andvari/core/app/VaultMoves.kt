@@ -58,7 +58,8 @@ class VaultMoves(private val store: Store = Store.Memory()) {
                 val owner = account() ?: return emptyMap()
                 val sealed = file.read() ?: return emptyMap()
                 // A memo that is not this account's own (its MAC does not hold, round-9 review 2) is never replayed.
-                val plain = runCatching { owner.openLocalRecord(RECORD, sealed) }.getOrNull() ?: return carriedOver(owner, sealed)
+                // A lock passes through: the kept moves are never deleted because the vault locked.
+                val plain = io.silencelen.andvari.core.crypto.orNullUnlessLocked { owner.openLocalRecord(RECORD, sealed) } ?: return carriedOver(owner, sealed)
                 return try {
                     decode(plain) ?: emptyMap()
                 } finally {
@@ -72,7 +73,7 @@ class VaultMoves(private val store: Store = Store.Memory()) {
              * stop a second copy being made while theirs is in the target ([prepare]). Anything else is removed and counted.
              */
             private fun carriedOver(owner: Account, sealed: ByteArray): Map<String, Kept> {
-                val plain = runCatching { owner.openQueuedSave(sealed) }.getOrNull()
+                val plain = io.silencelen.andvari.core.crypto.orNullUnlessLocked { owner.openQueuedSave(sealed) }
                 val earlier = plain?.let { p ->
                     try {
                         decode(p)

@@ -17,7 +17,7 @@ import { strict as assert } from "node:assert";
 import { afterEach, test } from "node:test";
 import { AndvariApi } from "./api.ts";
 import { originKeyFor } from "./serverurl.ts";
-import { applyServerSwitch, purgeOriginRecords, purgeServerDataFor } from "./serverswitch.ts";
+import { applyServerSwitch, moveNamespaceRecords, purgeOriginRecords, purgeServerDataFor } from "./serverswitch.ts";
 import type { KvArea } from "./trustedkv.ts";
 
 const realFetch = globalThis.fetch;
@@ -206,4 +206,36 @@ test("A15 purge: one store failing does not stop the others; a malformed origin 
   const keep = mapArea({ [`ns.${A}.itemHomes:u`]: {}, "ns..x": 1, serverUrl: "x" });
   for (const bad of ["", "XYZ", A.toUpperCase(), `${A}0`, "../"]) await purgeOriginRecords(bad, [keep]);
   assert.equal(keep.map.size, 3, "only a 16-hex origin key ever names a namespace");
+});
+
+test("§4.4: a move copies the namespace's records in one write, with the new pin, and never lowers a mark", async () => {
+  const A = originKeyFor("https://old.example");
+  const B = originKeyFor("https://new.example");
+  const area = mapArea({
+    [`ns.${A}.cardPin`]: { old: true },
+    [`ns.${A}.accountStateMemory:u1`]: { highWater: 5, vaults: {} },
+    [`ns.${A}.accountStateMemory:u2`]: { highWater: 2, vaults: {} },
+    [`ns.${A}.device:alice@example.com`]: { deviceSecret: "s" },
+    [`ns.${A}.itemHomes:u1`]: { i: "v" },
+    [`ns.${B}.accountStateMemory:u2`]: { highWater: 9, vaults: {} }, // the target already holds a higher mark
+    "ns.ffffffffffffffff.cardPin": { other: true },
+    serverUrl: "https://old.example",
+  });
+  let writes = 0;
+  const set = area.set.bind(area);
+  area.set = async (items) => {
+    writes++;
+    return set(items);
+  };
+  const written = await moveNamespaceRecords(area, A, B, { [`ns.${B}.cardPin`]: { moved: true } });
+  assert.equal(writes, 1, "one write");
+  assert.deepEqual(area.map.get(`ns.${B}.cardPin`), { moved: true }, "the new pin replaces the moved copy of the old one");
+  assert.deepEqual(area.map.get(`ns.${B}.accountStateMemory:u1`), { highWater: 5, vaults: {} });
+  assert.deepEqual(area.map.get(`ns.${B}.accountStateMemory:u2`), { highWater: 9, vaults: {} }, "a move never lowers a mark");
+  assert.deepEqual(area.map.get(`ns.${B}.device:alice@example.com`), { deviceSecret: "s" });
+  assert.deepEqual(area.map.get(`ns.${B}.itemHomes:u1`), { i: "v" });
+  assert.ok(!written.includes(`ns.${B}.accountStateMemory:u2`));
+  assert.equal(area.map.get(`ns.${A}.cardPin`) !== undefined, true, "the old namespace stays until the caller removes it");
+  await assert.rejects(moveNamespaceRecords(area, A, B, { "ns.ffffffffffffffff.cardPin": {} }), "an override outside the target is refused");
+  await assert.rejects(moveNamespaceRecords(area, A, A));
 });

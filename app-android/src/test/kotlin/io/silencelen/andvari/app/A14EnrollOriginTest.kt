@@ -65,8 +65,7 @@ class A14EnrollOriginTest {
         for (fn in listOf("fun cancelPendingSwitch() {", "fun trustGateConnect() {", "fun requestInviteTrustGate(origin: String, email: String) {")) {
             assertTrue(body(vm, fn, "\n    }\n").contains("if (_ui.value.busy) return // A14 (F8)"), "$fn must refuse while busy")
         }
-        val notice = body(activity, "private fun PendingSwitchNotice(", "\n}\n")
-        assertTrue(notice.contains("enabled = !busy"), "the Cancel button is disabled while an op runs")
+        // The PendingSwitchNotice half of this pin went with that composable.
     }
 
     /** Step 7: sign-in and enroll are core's ([SessionEntry]); these pins moved there with the code. */

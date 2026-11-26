@@ -1,0 +1,1540 @@
+{
+  "_about": [
+    "The version-3 answer of operator-assisted recovery: spec 04 \u00a77 steps 3 to 5, spec 01 \u00a75.1 (the version-3 template of 0x09) and \u00a75.5 (the commit hash), spec 03 \u00a718.5 (the commit value) and \u00a718.6 (the upload), in the specification as corrected on 2026-11-16 (first written from its text of that day before the corrections). Changed with those corrections: the device rows frame-of-three-bytes and magic-only (spec 01's checking order); commitCheck absent / null / a-number / an-object; fulfil's absent, null and non-string fields and its order rows. The old form is in recovery.json, whose request key, request id, UVK and identity-seed envelope this file reuses.",
+    "Generated and graded by the independent oracle in tools/vector-gen/oracle (src/answer3.mjs, src/versioned.mjs), written from the specification text alone: `npm run check` regenerates this file byte for byte and recomputes every row. No andvari code was read or run to make it.",
+    "Keys: the answer is signed by recovery key A's signing key (crypto_sign_seed_keypair of the seed that gives the X25519 recovery key; seed = SHA-256(\"andvari-vector-oracle|seed/recovery-a\")) and sealed to the request key (rSec = SHA-256(\"andvari-vector-oracle|recovery/request-secret\"), rPub its X25519 public key). Every other fixed value is the first bytes of SHA-256(\"andvari-vector-oracle|\" + label): the commit values \"recovery-v3/commit\" (alice's) and \"recovery-v3/commit/<row>\", each seal's ephemeral X25519 secret \"recovery-v3/ephemeral/<row>\" or \"recovery-v3/ephemeral/open/<row name>\". A real commit value and a real ephemeral key are drawn from the CSPRNG; here they are fixed so the bytes reproduce. issuedAt is 1763884800000 (13 digits).",
+    "answers: the statement {\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\",\"userId\",\"email\",\"requestId\",\"requestKey\",\"commit\",\"uvk\",\"issuedAt\"}, its frame (purpose 0x09) and the sealed answer, the commit hash and the token andvari-answer:3:<requestId>:<requestKey>:<commitHash>:<unpadded base64url of the sealed answer>. Every value is recomputable from the input.",
+    "sizes: with n the octets of the address and E = ceil(4n / 3) the characters of its unpadded base64url, the statement is 376 + E bytes, the frame 477 + E and the sealed answer 525 + E (issuedAt of 13 digits). checkedWith names the address an answer of that size was built with (n = 3 has none: no emailNorm is shorter than 5 octets).",
+    "commitHash: hexLower(SHA-256(\"andvari/v2|recovery-request|commit|\" + b64url(commit))).",
+    "open: the person's device opens an answer (spec 04 \u00a77 step 4), in order: unopenable; the frame and the strict parse under the version-3 template only (bad_frame, unknown_format, non_canonical, bad_statement; a statement canonical under the old version-2 template is bad_statement); signer_not_pinned_key (the signer must map to the recovery key the pinned card's recoveryFp names, recoveryPubB64); bad_signature; request_mismatch (instanceId, userId unless request.userId is null on a fresh install, requestId, requestKey, and email decoding to exactly emailNorm(request.typedEmail), on a fresh install too); identity_mismatch (the served seed does not open under the delivered UVK with Ad.idkey of the answer's userId, or opens to another key than identityPubB64). On ok the device keeps uvkB64 and commitB64. The request key pair is requestKey.",
+    "commitCheck: the server's check of the commit value (spec 03 \u00a718.5), after the poll secret and the request's state, which these rows leave out: commit a JSON string that is a b64_32 (absent, null, a number or any other non-string, or another text: 400 bad_commit; a row without a commit key is the absent body); its hash equals storedCommitHash (the newest upload's), else 403 commit_mismatch. The count of wrong values (the fifth cancels the request) needs stored state and has no rows.",
+    "fulfil: the upload's checks that need nothing stored but the row (spec 03 \u00a718.6), in the text's order; the password proof, request_unknown and request_state are left out. The body's shape, in this order (bad_sealed for a sealed that is not a string of canonical unpadded base64url of 1 to 1,024 bytes, bad_request_key for a requestKey that is not a string b64_32, bad_commit_hash for a commitHash that is not a string hex64; each absent, null or not a string is that field's refusal), then request_key_mismatch (requestKey is not the row's rPub), then the size: exactly 525 + E bytes for the row's emailNorm (bad_sealed)."
+  ],
+  "_aboutWorkedExample": "workedExample: the Kotlin implementation's worked example of each new form (core's AssistedRecoveryV3ExampleTest), recomputed by the oracle from the same fixed inputs. Its printout and this row are equal byte for byte: the escrow and answer statements and frames, the sizes, the commit hash and the token head; the oracle also read and opened the printout's randomised token. A grader checks that its own seal and sign give these frames.",
+  "templates": {
+    "assisted-recovery v3": [
+      [
+        "v",
+        "3"
+      ],
+      [
+        "purpose",
+        "\"assisted-recovery\""
+      ],
+      [
+        "instanceId",
+        "uuid"
+      ],
+      [
+        "userId",
+        "uuid"
+      ],
+      [
+        "email",
+        "email_b64"
+      ],
+      [
+        "requestId",
+        "b64_16"
+      ],
+      [
+        "requestKey",
+        "b64_32"
+      ],
+      [
+        "commit",
+        "b64_32"
+      ],
+      [
+        "uvk",
+        "b64_32"
+      ],
+      [
+        "issuedAt",
+        "ms"
+      ]
+    ],
+    "assisted-recovery v2": [
+      [
+        "v",
+        "2"
+      ],
+      [
+        "purpose",
+        "\"assisted-recovery\""
+      ],
+      [
+        "instanceId",
+        "uuid"
+      ],
+      [
+        "userId",
+        "uuid"
+      ],
+      [
+        "requestId",
+        "b64_16"
+      ],
+      [
+        "requestKey",
+        "b64_32"
+      ],
+      [
+        "uvk",
+        "b64_32"
+      ],
+      [
+        "issuedAt",
+        "ms"
+      ]
+    ]
+  },
+  "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+  "keys": {
+    "recoveryA": {
+      "seedB64": "VlNStoQosODdiGMVOXllMsvHLDOGo4Gxqr3qDljpztE",
+      "publicKeyB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "signPubB64": "YREHx41HjvS7tDY-xISES5evi14OvEmbmxepG_-hCro",
+      "fingerprint": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987"
+    },
+    "recoveryB": {
+      "publicKeyB64": "cgJW-OUfTMgUpnV4SN-AVkPh2RxcLjnxOn8WbOi4Yzk",
+      "fingerprint": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed"
+    },
+    "alice": {
+      "userId": "11111111-1111-4111-8111-111111111111",
+      "seedB64": "DRQbIikwNz5FTFNaYWhvdn2Ei5KZoKeutbzDytHY3-Y",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "signPubB64": "nHq6JH1Lmot5tW6rGCV05fjNlUAomh-JWgaeAFtYs8o",
+      "address": "alice@example.org"
+    },
+    "bob": {
+      "userId": "22222222-2222-4222-8222-222222222222",
+      "seedB64": "oKOmqayvsrW4u77BxMfKzdDT1tnc3-Ll6Ovu8fT3-v0",
+      "identityPubB64": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM",
+      "signPubB64": "s6JVnClZbikPKKTc0Db3imvaLINlV0pXZiJiA_TrMQI",
+      "address": "bob@example.org"
+    },
+    "operator": {
+      "userId": "99999999-9999-4999-8999-999999999999",
+      "seedB64": "vuBjPWkq66XorPwQ29EhCLqdhrrWV7r1SjUZm8gwgpY",
+      "identityPubB64": "9bCo4oYJda6IeG04WiJHGhYmWlcEvU-WeCMEpXVpaxo",
+      "signPubB64": "veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc"
+    }
+  },
+  "requestKey": {
+    "rSecB64": "rDBq5AmLBBJdxjxrXsz9kfkDkbWG-6bZn-RLdXCUpyg",
+    "rPubB64": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+    "otherRPubB64": "cMrbMNvJYWVl4VNSpRInL_QmqBQJgOUunvHjlZehDAY"
+  },
+  "answers": [
+    {
+      "name": "alice",
+      "why": "The answer for alice's request: the 0x09 statement, version 3, keys in the template's order; email is her copy's own email field; commit is the tool's fresh value; signed by recovery key A's signing key and sealed to the request key. A 17-octet address: 548 bytes sealed, the example the text gives.",
+      "input": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "address": "alice@example.org",
+        "emailB64": "YWxpY2VAZXhhbXBsZS5vcmc",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitB64": "RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk",
+        "uvkB64": "vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI",
+        "issuedAt": 1763884800000,
+        "signer": "recoveryA",
+        "ephemeralSecretB64": "FRpz0bOyea097EpB1wRU8MyPd1ATrLFaF8-y6ReDI_A"
+      },
+      "expect": {
+        "emailOctets": 17,
+        "emailChars": 23,
+        "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+        "statementBytes": 399,
+        "messageHex": "616e64766172692f76327c7369676e65642d73746174656d656e74006176730209611107c78d478ef4bbb4363ec484844b97af8b5e0ebc499b9b17a91bffa10aba7b2276223a332c22707572706f7365223a2261737369737465642d7265636f76657279222c22696e7374616e63654964223a2265656565656565652d656565652d346565652d386565652d656565656565656565656565222c22757365724964223a2231313131313131312d313131312d343131312d383131312d313131313131313131313131222c22656d61696c223a2259577870593256415a586868625842735a533576636d63222c22726571756573744964223a226b657673795a6d674356504f3854546c2d316f714b51222c22726571756573744b6579223a224c4b4545645679556a544476497044364d426450794f5f43625f536635696a565f616a77764e7a646e3145222c22636f6d6d6974223a225272495a434944756b7a7366324879364549534b6462732d626d7878424b517358326b2d4173785551506b222c2275766b223a227655523173334f5a564632574b7546564958626a4b7361653976442d6a3257793046547438794754454e49222c226973737565644174223a313736333838343830303030307d",
+        "signatureB64": "u3OUst_-WoriTPmWAzbU6un69sSDh4MFnc59bwBqbzDOOsa5LmXU87qAGQV2jeYd40HhwGeukfE9LivlFwFUBw",
+        "frameB64": "YXZzAglhEQfHjUeO9Lu0Nj7EhIRLl6-LXg68SZubF6kb_6EKurtzlLLf_lqK4kz5lgM21Orp-vbEg4eDBZ3OfW8Aam8wzjrGuS5l1PO6gBkFdo3mHeNB4cBnrpHxPS4r5RcBVAd7InYiOjMsInB1cnBvc2UiOiJhc3Npc3RlZC1yZWNvdmVyeSIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJlbWFpbCI6IllXeHBZMlZBWlhoaGJYQnNaUzV2Y21jIiwicmVxdWVzdElkIjoia2V2c3labWdDVlBPOFRUbC0xb3FLUSIsInJlcXVlc3RLZXkiOiJMS0VFZFZ5VWpURHZJcEQ2TUJkUHlPX0NiX1NmNWlqVl9hand2TnpkbjFFIiwiY29tbWl0IjoiUnJJWkNJRHVrenNmMkh5NkVJU0tkYnMtYm14eEJLUXNYMmstQXN4VVFQayIsInV2ayI6InZVUjFzM09aVkYyV0t1RlZJWGJqS3NhZTl2RC1qMld5MEZUdDh5R1RFTkkiLCJpc3N1ZWRBdCI6MTc2Mzg4NDgwMDAwMH0",
+        "frameBytes": 500,
+        "sealedB64": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+        "sealedBytes": 548,
+        "commitHashInputUtf8": "andvari/v2|recovery-request|commit|RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "token": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "bob",
+      "why": "The answer for a request of bob's (15 octets, so 20 characters of base64url and 545 bytes sealed), sealed to the same request key.",
+      "input": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "22222222-2222-4222-8222-222222222222",
+        "address": "bob@example.org",
+        "emailB64": "Ym9iQGV4YW1wbGUub3Jn",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitB64": "LAlxECMsJQpMto0goatR8YrINqtzBCrYe_n61iZ6KCg",
+        "uvkB64": "zskvwGvbGChqR9gDoqImmxTR5SQpCSJrp2q1MBQHWuE",
+        "issuedAt": 1763884800000,
+        "signer": "recoveryA",
+        "ephemeralSecretB64": "ei-BLIh_MCHWs17KMLYnJ5nlO3E2IcgEs6dVPaRNLPQ"
+      },
+      "expect": {
+        "emailOctets": 15,
+        "emailChars": 20,
+        "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"22222222-2222-4222-8222-222222222222\",\"email\":\"Ym9iQGV4YW1wbGUub3Jn\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"LAlxECMsJQpMto0goatR8YrINqtzBCrYe_n61iZ6KCg\",\"uvk\":\"zskvwGvbGChqR9gDoqImmxTR5SQpCSJrp2q1MBQHWuE\",\"issuedAt\":1763884800000}",
+        "statementBytes": 396,
+        "messageHex": "616e64766172692f76327c7369676e65642d73746174656d656e74006176730209611107c78d478ef4bbb4363ec484844b97af8b5e0ebc499b9b17a91bffa10aba7b2276223a332c22707572706f7365223a2261737369737465642d7265636f76657279222c22696e7374616e63654964223a2265656565656565652d656565652d346565652d386565652d656565656565656565656565222c22757365724964223a2232323232323232322d323232322d343232322d383232322d323232323232323232323232222c22656d61696c223a22596d396951475634595731776247557562334a6e222c22726571756573744964223a226b657673795a6d674356504f3854546c2d316f714b51222c22726571756573744b6579223a224c4b4545645679556a544476497044364d426450794f5f43625f536635696a565f616a77764e7a646e3145222c22636f6d6d6974223a224c416c7845434d734a51704d746f30676f617452385972494e71747a42437259655f6e3631695a364b4367222c2275766b223a227a736b767747766247436871523967446f71496d6d7854523553517043534a72703271314d425148577545222c226973737565644174223a313736333838343830303030307d",
+        "signatureB64": "5TvJ0I58HGIZ0aHYGOIbEcOJNnn_6wsiDWwpnQvvS6jNtLqzoczRTcxvuorv0jGZnKtLBO5RH2kJ0aOv3grfBg",
+        "frameB64": "YXZzAglhEQfHjUeO9Lu0Nj7EhIRLl6-LXg68SZubF6kb_6EKuuU7ydCOfBxiGdGh2BjiGxHDiTZ5_-sLIg1sKZ0L70uozbS6s6HM0U3Mb7qK79IxmZyrSwTuUR9pCdGjr94K3wZ7InYiOjMsInB1cnBvc2UiOiJhc3Npc3RlZC1yZWNvdmVyeSIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJ1c2VySWQiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJlbWFpbCI6IlltOWlRR1Y0WVcxd2JHVXViM0puIiwicmVxdWVzdElkIjoia2V2c3labWdDVlBPOFRUbC0xb3FLUSIsInJlcXVlc3RLZXkiOiJMS0VFZFZ5VWpURHZJcEQ2TUJkUHlPX0NiX1NmNWlqVl9hand2TnpkbjFFIiwiY29tbWl0IjoiTEFseEVDTXNKUXBNdG8wZ29hdFI4WXJJTnF0ekJDclllX242MWlaNktDZyIsInV2ayI6Inpza3Z3R3ZiR0NocVI5Z0RvcUltbXhUUjVTUXBDU0pycDJxMU1CUUhXdUUiLCJpc3N1ZWRBdCI6MTc2Mzg4NDgwMDAwMH0",
+        "frameBytes": 497,
+        "sealedB64": "7xZrSN64wznj1NjJackrTgEHp9nr-iXRu6todV-nq0JxQtfA_K9jTXA9sRpYzn8LQyxps0P7pq8t8MNVFXNToN73zpvZL0ovdjbG-kihw9hqLO-4-DaOj6gt5Yh3tRQZOIhX9du5QUS-CbdfQQc-EfeR_9v_DlrDBS00wZmJ1iKXbtkDA1snD0Shvx3Ia5nfDzEkiyMZbCHDSI4jVkyotDMJAomgqU8twDH5zEg0sF-O209-GUK3Owo8_tO0dtKqcmiMhEsLKHaoskGzXluefr_aHD9V-AkZF_U7pB9FbashPudbRwK36d9LgJ04cYCgTA_MCaet6SUguFut_OFUrId_Ec9V1COH-882vFVLPM4RjMK2A5b_hgswoLHQ2lFN5CjJeA9NXb9K6D_FR8F1yGHWBk2sL3beohHTnkwmoaEE92sy2pHLvUjl_xMhm7J-FI73phpORL_GTh5s34C59h4mO8c2E_vEQtXW84IM5xdAqgnNzogViBOdOYhTzyIb7Vtz08W_9U7BHUb5r6KVUvairyxWiO71uwGVmTmF99ItJv8Svuk1YPHqaFZMF1e5dHCViyckweRtMr30CJtMkgCHfKfzuuPpAu_LlbWOOqQKc9fh-FFb5911ATMWMLRV-GIMzmxnOAgBoKJolOGPzSaULes3RqPdMkDZQWWbm1OQoP7UCIiyifU8Z9Fx_b2b2dw7BxouYlEfV2uY2eWQhd0",
+        "sealedBytes": 545,
+        "commitHashInputUtf8": "andvari/v2|recovery-request|commit|LAlxECMsJQpMto0goatR8YrINqtzBCrYe_n61iZ6KCg",
+        "commitHash": "edef9faa437790ce566c202515e34afd7ce025c218cf92ad64853b2089688561",
+        "token": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:edef9faa437790ce566c202515e34afd7ce025c218cf92ad64853b2089688561:7xZrSN64wznj1NjJackrTgEHp9nr-iXRu6todV-nq0JxQtfA_K9jTXA9sRpYzn8LQyxps0P7pq8t8MNVFXNToN73zpvZL0ovdjbG-kihw9hqLO-4-DaOj6gt5Yh3tRQZOIhX9du5QUS-CbdfQQc-EfeR_9v_DlrDBS00wZmJ1iKXbtkDA1snD0Shvx3Ia5nfDzEkiyMZbCHDSI4jVkyotDMJAomgqU8twDH5zEg0sF-O209-GUK3Owo8_tO0dtKqcmiMhEsLKHaoskGzXluefr_aHD9V-AkZF_U7pB9FbashPudbRwK36d9LgJ04cYCgTA_MCaet6SUguFut_OFUrId_Ec9V1COH-882vFVLPM4RjMK2A5b_hgswoLHQ2lFN5CjJeA9NXb9K6D_FR8F1yGHWBk2sL3beohHTnkwmoaEE92sy2pHLvUjl_xMhm7J-FI73phpORL_GTh5s34C59h4mO8c2E_vEQtXW84IM5xdAqgnNzogViBOdOYhTzyIb7Vtz08W_9U7BHUb5r6KVUvairyxWiO71uwGVmTmF99ItJv8Svuk1YPHqaFZMF1e5dHCViyckweRtMr30CJtMkgCHfKfzuuPpAu_LlbWOOqQKc9fh-FFb5911ATMWMLRV-GIMzmxnOAgBoKJolOGPzSaULes3RqPdMkDZQWWbm1OQoP7UCIiyifU8Z9Fx_b2b2dw7BxouYlEfV2uY2eWQhd0"
+      }
+    },
+    {
+      "name": "shortest-address",
+      "why": "A 5-octet address: E = 7, 532 bytes sealed.",
+      "input": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "address": "a@b.c",
+        "emailB64": "YUBiLmM",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitB64": "Qr48sbXBgkk9Oq-sNszPqnz1H4PrpXCukN1--jl6ojw",
+        "uvkB64": "vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI",
+        "issuedAt": 1763884800000,
+        "signer": "recoveryA",
+        "ephemeralSecretB64": "Q0Gchh-hAsrJ9H5GlnmPZIId5DeZ_U3zQ82hGyYdV7E"
+      },
+      "expect": {
+        "emailOctets": 5,
+        "emailChars": 7,
+        "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"YUBiLmM\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"Qr48sbXBgkk9Oq-sNszPqnz1H4PrpXCukN1--jl6ojw\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+        "statementBytes": 383,
+        "messageHex": "616e64766172692f76327c7369676e65642d73746174656d656e74006176730209611107c78d478ef4bbb4363ec484844b97af8b5e0ebc499b9b17a91bffa10aba7b2276223a332c22707572706f7365223a2261737369737465642d7265636f76657279222c22696e7374616e63654964223a2265656565656565652d656565652d346565652d386565652d656565656565656565656565222c22757365724964223a2231313131313131312d313131312d343131312d383131312d313131313131313131313131222c22656d61696c223a22595542694c6d4d222c22726571756573744964223a226b657673795a6d674356504f3854546c2d316f714b51222c22726571756573744b6579223a224c4b4545645679556a544476497044364d426450794f5f43625f536635696a565f616a77764e7a646e3145222c22636f6d6d6974223a225172343873625842676b6b394f712d734e737a50716e7a3148345072705843756b4e312d2d6a6c366f6a77222c2275766b223a227655523173334f5a564632574b7546564958626a4b7361653976442d6a3257793046547438794754454e49222c226973737565644174223a313736333838343830303030307d",
+        "signatureB64": "SF89se6gLX23NIPlUGzOmgmirnV7mADZN3GkGTLGAejxCNXHnrDEJFfkENr1RHxnlQ9qoK5ifLUPkKYiNpBFCA",
+        "frameB64": "YXZzAglhEQfHjUeO9Lu0Nj7EhIRLl6-LXg68SZubF6kb_6EKukhfPbHuoC19tzSD5VBszpoJoq51e5gA2TdxpBkyxgHo8QjVx56wxCRX5BDa9UR8Z5UPaqCuYny1D5CmIjaQRQh7InYiOjMsInB1cnBvc2UiOiJhc3Npc3RlZC1yZWNvdmVyeSIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJlbWFpbCI6IllVQmlMbU0iLCJyZXF1ZXN0SWQiOiJrZXZzeVptZ0NWUE84VFRsLTFvcUtRIiwicmVxdWVzdEtleSI6IkxLRUVkVnlValREdklwRDZNQmRQeU9fQ2JfU2Y1aWpWX2Fqd3ZOemRuMUUiLCJjb21taXQiOiJRcjQ4c2JYQmdrazlPcS1zTnN6UHFuejFINFBycFhDdWtOMS0tamw2b2p3IiwidXZrIjoidlVSMXMzT1pWRjJXS3VGVklYYmpLc2FlOXZELWoyV3kwRlR0OHlHVEVOSSIsImlzc3VlZEF0IjoxNzYzODg0ODAwMDAwfQ",
+        "frameBytes": 484,
+        "sealedB64": "nPtuP1Q4qYBn1tMhyT3VkDtLw2ULkkHnzNuuKv0QbRU7rKQAPBFBaXXcT8KSHOkJu71HuDITs6m1alAHleLjTwyh6BXr0D0rk_FCjZDBl6zKwmFZrDoh0500zeJ1awbGbVAyUp-1G0keZOW1ltGyRZWuwXtE0hbPSF9fIFxpkCTGBQpqAycdzlRObGYx-6ah8m9Qg5PvsgyDzpVhf60jMqas-lJaGXw6KjNPCQWlKAUQiMRKKQsToKZnHevhyNzb0YccufWH5hfJ3tmYm_p0dhmKUpHLzRdPzaaXLkwC8BTPcAbYl63v-_DV2izmXyu11Vq7FP2peB9nE6xJAqmnEZcjACUU7HI8qQmqpAda9SfjouQVu4YJYZmFH201EwjLDvmNt3S2V7nCrFiqcPhd_-jAJENZGpJGA7u1Ows0qgRgldJayVYJT8tf0NF3W5aV6GtffPQ0o1NGtmKMwroCWKQFGQn8Fjk18vgsxLcfQdYU8Nfki2jmeCfRiMx4ZDjAqtyNH9dNZaC5h0KZA1Wl1-8GbroeyhQuvwMaCd8uh4gvcaLCI-Tu3sv6KJV3Qn2HIBTw5OdJc241i1qlOT6PltGC9LVvfIXRo2ws4n7sS0XLlmVdDCQJClHnH8e0oTjWdlC45yeV4qHX-Ow4p-OYeIX2EP6ZE-zCYKkD_2P0dkF0hRrS11tkkBozESG_-cEeOAVTuQ",
+        "sealedBytes": 532,
+        "commitHashInputUtf8": "andvari/v2|recovery-request|commit|Qr48sbXBgkk9Oq-sNszPqnz1H4PrpXCukN1--jl6ojw",
+        "commitHash": "d8a44851a2b63ea01948aceabe79c8fe041cec274c364a5d1c23b5d25562e8cc",
+        "token": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:d8a44851a2b63ea01948aceabe79c8fe041cec274c364a5d1c23b5d25562e8cc:nPtuP1Q4qYBn1tMhyT3VkDtLw2ULkkHnzNuuKv0QbRU7rKQAPBFBaXXcT8KSHOkJu71HuDITs6m1alAHleLjTwyh6BXr0D0rk_FCjZDBl6zKwmFZrDoh0500zeJ1awbGbVAyUp-1G0keZOW1ltGyRZWuwXtE0hbPSF9fIFxpkCTGBQpqAycdzlRObGYx-6ah8m9Qg5PvsgyDzpVhf60jMqas-lJaGXw6KjNPCQWlKAUQiMRKKQsToKZnHevhyNzb0YccufWH5hfJ3tmYm_p0dhmKUpHLzRdPzaaXLkwC8BTPcAbYl63v-_DV2izmXyu11Vq7FP2peB9nE6xJAqmnEZcjACUU7HI8qQmqpAda9SfjouQVu4YJYZmFH201EwjLDvmNt3S2V7nCrFiqcPhd_-jAJENZGpJGA7u1Ows0qgRgldJayVYJT8tf0NF3W5aV6GtffPQ0o1NGtmKMwroCWKQFGQn8Fjk18vgsxLcfQdYU8Nfki2jmeCfRiMx4ZDjAqtyNH9dNZaC5h0KZA1Wl1-8GbroeyhQuvwMaCd8uh4gvcaLCI-Tu3sv6KJV3Qn2HIBTw5OdJc241i1qlOT6PltGC9LVvfIXRo2ws4n7sS0XLlmVdDCQJClHnH8e0oTjWdlC45yeV4qHX-Ow4p-OYeIX2EP6ZE-zCYKkD_2P0dkF0hRrS11tkkBozESG_-cEeOAVTuQ"
+      }
+    },
+    {
+      "name": "longest-address",
+      "why": "A 254-octet address: E = 339, 864 bytes sealed (under the upload's 1,024).",
+      "input": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "address": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "emailB64": "eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eEBhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEuYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiLmNjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitB64": "6tKX8RO1lk0b6zbiWNn8coQi3JURjpxvVsEDG69e8sI",
+        "uvkB64": "vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI",
+        "issuedAt": 1763884800000,
+        "signer": "recoveryA",
+        "ephemeralSecretB64": "QN699q6mZl4pCEECGmhcDHEmfriD496_zPHe4PvMGA4"
+      },
+      "expect": {
+        "emailOctets": 254,
+        "emailChars": 339,
+        "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eEBhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEuYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiLmNjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"6tKX8RO1lk0b6zbiWNn8coQi3JURjpxvVsEDG69e8sI\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+        "statementBytes": 715,
+        "messageHex": "616e64766172692f76327c7369676e65642d73746174656d656e74006176730209611107c78d478ef4bbb4363ec484844b97af8b5e0ebc499b9b17a91bffa10aba7b2276223a332c22707572706f7365223a2261737369737465642d7265636f76657279222c22696e7374616e63654964223a2265656565656565652d656565652d346565652d386565652d656565656565656565656565222c22757365724964223a2231313131313131312d313131312d343131312d383131312d313131313131313131313131222c22656d61696c223a2265486834654868346548683465486834654868346548683465486834654868346548683465486834654868346548683465486834654868346548683465486834654868346548683465486834654868346548683465454268595746685957466859574668595746685957466859574668595746685957466859574668595746685957466859574668595746685957466859574668595746685957466859574668595746685957466859574575596d4a69596d4a69596d4a69596d4a69596d4a69596d4a69596d4a69596d4a69596d4a69596d4a69596d4a69596d4a69596d4a69596d4a69596d4a69596d4a69596d4a69596d4a69596d4a69596d4a69596d4a694c6d4e6a59324e6a59324e6a59324e6a59324e6a59324e6a59324e6a59324e6a59324e6a59324e6a59324e6a59324e6a59324e6a59324e6a59324e6a59324e6a59324e6a59324e6a59324e6a59324e6a59324d222c22726571756573744964223a226b657673795a6d674356504f3854546c2d316f714b51222c22726571756573744b6579223a224c4b4545645679556a544476497044364d426450794f5f43625f536635696a565f616a77764e7a646e3145222c22636f6d6d6974223a2236744b5838524f316c6b3062367a6269574e6e38636f5169334a55526a7078765673454447363965387349222c2275766b223a227655523173334f5a564632574b7546564958626a4b7361653976442d6a3257793046547438794754454e49222c226973737565644174223a313736333838343830303030307d",
+        "signatureB64": "7B1rAoy7Jo_tUS8xIxXLfFriTUVoPpzouFtxyhEG5yyF2wzexjfoUevT0-6_lHcdOmVzEEULb1euM7z-2H-VDA",
+        "frameB64": "YXZzAglhEQfHjUeO9Lu0Nj7EhIRLl6-LXg68SZubF6kb_6EKuuwdawKMuyaP7VEvMSMVy3xa4k1FaD6c6LhbccoRBucshdsM3sY36FHr09Puv5R3HTplcxBFC29XrjO8_th_lQx7InYiOjMsInB1cnBvc2UiOiJhc3Npc3RlZC1yZWNvdmVyeSIsImluc3RhbmNlSWQiOiJlZWVlZWVlZS1lZWVlLTRlZWUtOGVlZS1lZWVlZWVlZWVlZWUiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJlbWFpbCI6ImVIaDRlSGg0ZUhoNGVIaDRlSGg0ZUhoNGVIaDRlSGg0ZUhoNGVIaDRlSGg0ZUhoNGVIaDRlSGg0ZUhoNGVIaDRlSGg0ZUhoNGVIaDRlSGg0ZUhoNGVFQmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRmhZV0ZoWVdGaFlXRXVZbUppWW1KaVltSmlZbUppWW1KaVltSmlZbUppWW1KaVltSmlZbUppWW1KaVltSmlZbUppWW1KaVltSmlZbUppWW1KaVltSmlZbUppWW1KaVltSmlMbU5qWTJOalkyTmpZMk5qWTJOalkyTmpZMk5qWTJOalkyTmpZMk5qWTJOalkyTmpZMk5qWTJOalkyTmpZMk5qWTJOalkyTmpZMk5qWTJOalkyTSIsInJlcXVlc3RJZCI6ImtldnN5Wm1nQ1ZQTzhUVGwtMW9xS1EiLCJyZXF1ZXN0S2V5IjoiTEtFRWRWeVVqVER2SXBENk1CZFB5T19DYl9TZjVpalZfYWp3dk56ZG4xRSIsImNvbW1pdCI6IjZ0S1g4Uk8xbGswYjZ6YmlXTm44Y29RaTNKVVJqcHh2VnNFREc2OWU4c0kiLCJ1dmsiOiJ2VVIxczNPWlZGMldLdUZWSVhiaktzYWU5dkQtajJXeTBGVHQ4eUdURU5JIiwiaXNzdWVkQXQiOjE3NjM4ODQ4MDAwMDB9",
+        "frameBytes": 816,
+        "sealedB64": "E07d6nLQ9Z3sDaaD2hCGsEZG35U2KOfDH6ycFaiYZFOGnOXluFQINnJTeVCER03O_rDbrlqssPlN0VIRTs7_pQ5MYTDSiNGmU8IeKD90RlBxiwloR91qO5_Lmc3n-KjHlR6GXXrhsqLFPpxe1ZCrBhcl3isxr0lKzd1NVusPhUbkWAlxIB0gxgUo0gwW0ZfXTs1ZAIatEt62wSbse6TYKLft_QA0ioFtUYfMpkfIroumy-2oj7e4rccBQ4ov2ZqY142RKNPV7j5FCg2B18aNA_mZt48rIN94IC3HJjI57HxBTKOOmxR7xWjByLHSPe1qwLp9y0rWKznWUsovzTlOdzlbU4wXY7q0Na3thY_VJtRsijRQ0sArzkpIu8ovAhp_ouyrUmnu3Nq472LGgii6cmJ5JK6XavBTp0obGqLg2E_0oWhzOMTn_zvq2ZTF4tuWCkhljxL3JTUhhWbl4gzJNQ3IKA0GSubbR2raj6PqQdk5Oty87DLyAwsr8OTQsCmwI9z2rEt9gvf_jXdnyfn6mMQ40v0ig177xH3KfuoBtnrjFlJgvEs0LKQmdqZToO8SbnGzGHfHQIY36XRdfeNm4p2DF4hKwkMOpVJnRBaeUnFT1Kw5vNLaswanW3lhVmiXJagfCv9RCnpSbq86ikU44Fwkr3VvRRD1N40zq6npI-NYuRhwk2FHaUFfSlys6CYSv_vt6O4XxzSmuBc5jfB57zqN___dOtikBKmy6MB7bt9Bj2NtvyH-G9vyfqj6w2TgF8EEp3SE4Gxy2z81a8r663WnHmRVHnOXkjr2ZGmU5xKq_EuNY0DA8_82JEBlwAZbs9RIKmbxEd4CgGTFsNI27T6k9n3ompZtQmLb_UsDXjlQi-y1hCd7aO6zB4BdGFkuG7jAz57YruokYjRsv-kqevRJboh5MnlECwxjyyUsVByW3ZAYn0IkeQhEhWt235QKFYMBiTwvo00ijEF3IEdCRXweyI31qD-Rxz_y4D9FMehXhe2LX9SDb9woehdxa7e3xaXXGnYg3aVqPiGiqORd4n1Zjd5WH2zqh2aXQo-rO7EUOZN5fD25YSM-dXJT2qKnfr71hjiOJI76G0QQ4SoK-zScyoi6bREOwVm4y9AgjrRKfebO6Rm4hP2QeZtr1P4S",
+        "sealedBytes": 864,
+        "commitHashInputUtf8": "andvari/v2|recovery-request|commit|6tKX8RO1lk0b6zbiWNn8coQi3JURjpxvVsEDG69e8sI",
+        "commitHash": "d8d5ff66d9059939425d6d954cb2fa796856817379eaa22f13c57be0e88e3e7a",
+        "token": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:d8d5ff66d9059939425d6d954cb2fa796856817379eaa22f13c57be0e88e3e7a:E07d6nLQ9Z3sDaaD2hCGsEZG35U2KOfDH6ycFaiYZFOGnOXluFQINnJTeVCER03O_rDbrlqssPlN0VIRTs7_pQ5MYTDSiNGmU8IeKD90RlBxiwloR91qO5_Lmc3n-KjHlR6GXXrhsqLFPpxe1ZCrBhcl3isxr0lKzd1NVusPhUbkWAlxIB0gxgUo0gwW0ZfXTs1ZAIatEt62wSbse6TYKLft_QA0ioFtUYfMpkfIroumy-2oj7e4rccBQ4ov2ZqY142RKNPV7j5FCg2B18aNA_mZt48rIN94IC3HJjI57HxBTKOOmxR7xWjByLHSPe1qwLp9y0rWKznWUsovzTlOdzlbU4wXY7q0Na3thY_VJtRsijRQ0sArzkpIu8ovAhp_ouyrUmnu3Nq472LGgii6cmJ5JK6XavBTp0obGqLg2E_0oWhzOMTn_zvq2ZTF4tuWCkhljxL3JTUhhWbl4gzJNQ3IKA0GSubbR2raj6PqQdk5Oty87DLyAwsr8OTQsCmwI9z2rEt9gvf_jXdnyfn6mMQ40v0ig177xH3KfuoBtnrjFlJgvEs0LKQmdqZToO8SbnGzGHfHQIY36XRdfeNm4p2DF4hKwkMOpVJnRBaeUnFT1Kw5vNLaswanW3lhVmiXJagfCv9RCnpSbq86ikU44Fwkr3VvRRD1N40zq6npI-NYuRhwk2FHaUFfSlys6CYSv_vt6O4XxzSmuBc5jfB57zqN___dOtikBKmy6MB7bt9Bj2NtvyH-G9vyfqj6w2TgF8EEp3SE4Gxy2z81a8r663WnHmRVHnOXkjr2ZGmU5xKq_EuNY0DA8_82JEBlwAZbs9RIKmbxEd4CgGTFsNI27T6k9n3ompZtQmLb_UsDXjlQi-y1hCd7aO6zB4BdGFkuG7jAz57YruokYjRsv-kqevRJboh5MnlECwxjyyUsVByW3ZAYn0IkeQhEhWt235QKFYMBiTwvo00ijEF3IEdCRXweyI31qD-Rxz_y4D9FMehXhe2LX9SDb9woehdxa7e3xaXXGnYg3aVqPiGiqORd4n1Zjd5WH2zqh2aXQo-rO7EUOZN5fD25YSM-dXJT2qKnfr71hjiOJI76G0QQ4SoK-zScyoi6bREOwVm4y9AgjrRKfebO6Rm4hP2QeZtr1P4S"
+      }
+    }
+  ],
+  "sizes": [
+    {
+      "emailOctets": 3,
+      "emailChars": 4,
+      "statement": 380,
+      "frame": 481,
+      "sealed": 529
+    },
+    {
+      "emailOctets": 5,
+      "emailChars": 7,
+      "statement": 383,
+      "frame": 484,
+      "sealed": 532,
+      "checkedWith": "a@b.c"
+    },
+    {
+      "emailOctets": 15,
+      "emailChars": 20,
+      "statement": 396,
+      "frame": 497,
+      "sealed": 545,
+      "checkedWith": "aaaaaaaaaaa@b.c"
+    },
+    {
+      "emailOctets": 16,
+      "emailChars": 22,
+      "statement": 398,
+      "frame": 499,
+      "sealed": 547,
+      "checkedWith": "aaaaaaaaaaaa@b.c"
+    },
+    {
+      "emailOctets": 17,
+      "emailChars": 23,
+      "statement": 399,
+      "frame": 500,
+      "sealed": 548,
+      "checkedWith": "aaaaaaaaaaaaa@b.c"
+    },
+    {
+      "emailOctets": 18,
+      "emailChars": 24,
+      "statement": 400,
+      "frame": 501,
+      "sealed": 549,
+      "checkedWith": "aaaaaaaaaaaaaa@b.c"
+    },
+    {
+      "emailOctets": 19,
+      "emailChars": 26,
+      "statement": 402,
+      "frame": 503,
+      "sealed": 551,
+      "checkedWith": "aaaaaaaaaaaaaaa@b.c"
+    },
+    {
+      "emailOctets": 254,
+      "emailChars": 339,
+      "statement": 715,
+      "frame": 816,
+      "sealed": 864,
+      "checkedWith": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    }
+  ],
+  "commitHash": [
+    {
+      "why": "alice's answer's commit value",
+      "commitB64": "RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk",
+      "inputUtf8": "andvari/v2|recovery-request|commit|RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk",
+      "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9"
+    },
+    {
+      "why": "bob's answer's",
+      "commitB64": "LAlxECMsJQpMto0goatR8YrINqtzBCrYe_n61iZ6KCg",
+      "inputUtf8": "andvari/v2|recovery-request|commit|LAlxECMsJQpMto0goatR8YrINqtzBCrYe_n61iZ6KCg",
+      "commitHash": "edef9faa437790ce566c202515e34afd7ce025c218cf92ad64853b2089688561"
+    },
+    {
+      "why": "thirty-two 0xff bytes",
+      "commitB64": "__________________________________________8",
+      "inputUtf8": "andvari/v2|recovery-request|commit|__________________________________________8",
+      "commitHash": "c1e954cd3e530c3e9f32b8b5fff357b0c6dc968c59b838cb23d3ab8f80e6426e"
+    }
+  ],
+  "open": [
+    {
+      "name": "valid",
+      "why": "The answer the tool made for alice's request, opened by the device that asked with her address: every check passes, and the device keeps the UVK and the commit value for the commit.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "ok",
+        "uvkB64": "vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI",
+        "commitB64": "RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk"
+      }
+    },
+    {
+      "name": "fresh-install",
+      "why": "A fresh install holds no userId and skips that comparison; it still compares the address it asked with.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": null,
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "ok",
+        "uvkB64": "vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI",
+        "commitB64": "RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk"
+      }
+    },
+    {
+      "name": "typed-address-in-another-form",
+      "why": "The person typed \" Alice@EXAMPLE.org\" when asking: the device compares the emailNorm of what was typed.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": " Alice@EXAMPLE.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "ok",
+        "uvkB64": "vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI",
+        "commitB64": "RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk"
+      }
+    },
+    {
+      "name": "sealed-to-another-key",
+      "why": "Sealed to another request key.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "_02266z4vpQBVdaPg5j7I6bIDYWlv25dfWDzfFnh335pMvMZfAyDnu1GWdD-ajg7AxN_k3Lxwo_WADaJiqUW_ohjHnrL12vDrvHJoVqtlf7umNErYx8BBT7OZzANL7WjJGgT7hPGm3nC8v0tt-tz-_KbcJf7g8qyzDkmQM3mcZZ6tTTtF1XZoyVLFWAsOtwPwWFGVpM0-eKcAhM0cs4Nzf6VoecOeNs3cbWghKmmQXfFDcc72OiLTeejuDrb2L0n2DJp-L6dJuTd-hobgHdDEZc_C5OfPV7pXR2q1QrVEPpXd_2A61nWnEFMDUmeu-2T6l7xIwadBnernpysyvFaIEdxW2o5hkCboKJj3StUD0Ky4TgHnidZhvc1ZSvMAZOMeGJFOdX9bvw3cehBuxyWxobpa8sHfFMT16pLmW6U__dSEBRp1CKe7-QNd8hBTQlmU8XsB-A3z5JTPJUo1QeAzAE8W8X8J33jWK5eCkSpv5g6YOETa-VPWMe-xJvdAZKRdA912QU51ZVqc7T7QmrzRaX_hjMNLRYdpXctY-eaHawnZSDwqptb7FKT5VPiSMs46qH_s4fAIMY4mamjh8xmOtSsyZ2L97nJV2-i2Y3NDkpoXmrZB3IUw9nuroI8xflcMvVVUnu8aRsXyJom5fEXQ0IoIeRZP9sPfSVQYXN5i845OtqFTw0q9KtQZn_bkrogCrhFRj_I4zCTgXZ2djPPE2IrVfs",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "unopenable"
+      }
+    },
+    {
+      "name": "seal-cut-short",
+      "why": "The first 40 bytes of the sealed answer.",
+      "sealedB64": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5Q",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "unopenable"
+      }
+    },
+    {
+      "name": "escrow-frame-inside",
+      "why": "The seal opens to a 0x02 frame.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"escrow-uvk\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"recoveryFp\":\"a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987\",\"issuedAt\":1763884800000,\"key\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\"}",
+      "sealedB64": "00ijNDd4UZPnE76DRDXz3SCFuVBHHdv9PzNlnDqGfiVWAmnnoUMJGmKDmd028NMSSwENPXg0TX9S7QRKJ52acFIe8kpjFH5WAA2CsoeKfjWrDN6S51RQfGUvPtJYSBUtfp5NKQkmqyr0YXvBu9HG-mDvgFo0Viz3HNnSucjY44Y1CxYQM4cBX5QUSvnN107lBt1kpi7aLLM15LIAsDj0NyyoSjWE2dbYNewsfa1-Xa6wH9HQpHF9Wxd3iTj978nekbuGingw9VUoWttnQZSsXaIfo78ae2EqhKjpCcyY8cJrqak67K7WbotGKhEREc2TTE5ClkCDU9DWhQ3YXgvXanXiWwq3onb4libiTStJv3gZ9SbQhEYDm8sRYSc859kV_JLRRUpcYSDdmWtJ-WcjO3oSIFEhZ8qwQ3A19Qs0suVTTCeOT0AneRPZcXmd3tPRG1RaR3-0c6u5xITtSTjyKAc2qt1n8tMSFNi7Bu1TR-ZEdIyu9QYYvvrrDw0GliXXMhXUewH2SnLr_tASN0jd8oDYBQW1Ip6QoNszisFbZym6ACB7W_FKNycBpG3wzlSSZwjE4WHSOUc3mMEg6czvHHVf29RlVEqo8W0soLrrwuluOVSqT-PK1VznR9JKEg",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "bad_frame"
+      }
+    },
+    {
+      "name": "bare-statement-inside",
+      "why": "The seal opens to the statement alone.",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "8YOJyaHse3Cgwd5i6dVc7WRrC-WwB0-nDe74qE_46hGbDDTFLxkWaR-DlgoOt9Bg4hFY5Oe5FaOIl__WIbivVTeBtiWc87AoZK9w88eRH97KnKpfRfTZ4PEILXGygoWaCTYvqrN9DXz39jHu-CcrOqyli09EBeXc5jbbIYCa6vLvb3HN-X0uElOT1K7BfVK3f2VPmc6uJL8Fv_gLaOEiUwwu5USCBMna56PUkbMenr26pRkoKlhtzpnxI_-OKqqXvu2GvruavkajtyUB80ZjkTeSjqi9TXOE0Vumj7FCqxtT2MIPzyxsq3kMBaKpKid7h-Rm2suWf0jxL9yRiJSNFeJG1c0Cbw809VAVhehfSpHF197ZBy1_yp6m9PopyvwLpWdhRgUmiVBTWuw9QqDchTe_sdMjoFJr8NSUC1e8Aedmb1HIINI9c8gm4BoOixvyPE7T4JUSv4DS7mp-exfUTr0FDGZHCTDKlhpH04uX5awxdvwaKSUePsipyIWRRAqKqmpl6cZ6xTbuHZGI0VectnCiswuD-CibhZLfbQVKvnEDD93ex32yMCZ2Kp-mLo4ZEcnKa715DS_cHQn1NBgi",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "unknown_format"
+      }
+    },
+    {
+      "name": "frame-of-three-bytes",
+      "why": "The seal opens to the three bytes \"avs\": spec 01 \u00a75.1's bad_frame for a frame under four bytes comes first in its checking order (\u00a77 step 4).",
+      "sealedB64": "rKwQJzq_oSAMOWOa04NFbNBkXDPpcUjxaYcPoOHUSFDCF_1i0K4yvrIg7OtGDDXd44YP",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "bad_frame"
+      }
+    },
+    {
+      "name": "magic-only",
+      "why": "The seal opens to the four bytes avs\\x02 and nothing more: the magic is right, the frame is shorter than any frame.",
+      "sealedB64": "tWf4imNyZyQwf482RG3qt8U7zvPBRCNs8M23bpbuI07jsUe5rHQAQx1ldsuQ8sILImojUg",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "bad_frame"
+      }
+    },
+    {
+      "name": "not-canonical",
+      "why": "A space after a colon.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\": \"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "xA2lgHRL-hNAY9l3Us4GnVdbbB3KDlhcTodQi2OFb10LF2v2-0bKUL_5wnLJ3uD5oCbqFi1ijibKDUjR_LS5sgIwalvEGgAlO4O_qv732y7OVUoypCk0Ag67IOLY_kdfGrlwmVM0C7apqSlZ5Zvd_Cdzc8ljtMyRkZICEcugerBvy-NnwWxFfvjOPFMlYyrZHsA0O4IP0ziR0NhbTSFYf2YVba94rTZVDi56Whg_KEvlBFimtQrESE9LumqUXgX6WU_3Gdvnk1c3LlHIyrprAhXCxhBmrOhioix_cQ-N4VEIcpgMeRdX8YAMXXb8tQ7VJl2L8-OQe5H1cnxYI1ssjTqMYrLSsuju8zi9gUp7tzX30EAcbPXvsL4a_YsAVZ5tdWqyIeE6Btx1RULbCY0ypow-A50YFyx1yBp6DaDS2gd0OCyZf3_k-S73TvAWGUoQ2C2-7oyOWkMDCOCBiE-_PofUje51jVlVuwt9M-haJh8AcJiDkTv7mYyRQQZMO_mMD5i6DdmPrHPinSobxE6wVTcjuz49AfbnaszqKhCqeTJro0HVipmXiJLA7i4lQXQnLjkCiMsKf5KnGC8ki_w_AAIOsbz-WCarlFznAcHXTKWkNEk-e222cpgvathHTTeaix1XQdGGL7iz90FjoYina90Ie1_SawNG8BrL1kV4PGII_a0EoSzb256ugHK3ukzf5cQycuHaq04866kgqNwgNFYXy64c",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "non_canonical"
+      }
+    },
+    {
+      "name": "email-none",
+      "why": "email \"none\".",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"none\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "eMNzwJJcyF-zVFiP6166lTJdMo6IvNIEoddTnR1Z2ynSH6DBSMZMSLy5mpWUJgJcVJ_Lo06kyCYYknrcAPW3nPn3U7fbXfh5R0-K0K_3m5TE7H1Nt2rifjgE2Ta4muUsOW9lEqAmCPQZA3T9woo1gfPpTGJjP-QwEythBxNG6BryKfMBWcLlCK0tyBseGz1I3d0vOJXCbJqvKiC0kTpMRvUObgtcAunHNoD7yU2ZTY3s3bVG7OZxXF5uNXK48uhcXoL_wJfgFS_mhiPK9bkG6IluztQy2ROm18zaotP24nr0puYEXtG4npJE_U_7VGtr7wTN_xne6ZykKtUm1XtI-n-BWiE-eAq2pcJGhUSeLNfTUJkGrOEFBxNB8wlVHa9W5blPBZTYPdd1TWfnSX0-6L2fAipCY-GHYW6KEoZRMbj2HLvcq_1_pt1eWhFapSOQ2o5wnacJCm3ibkK0hKgCO5eb57rNaEVRm3IW02ETTOM8VOjl4LsU3KrXrU71hkuwSbvq_YeBrIQ_oKLYLsDMG-Xra0LK__SVbnZOSNBYLAYdKqm4EkpWMrAArn7AToWs3uA25Lgki1pRam5HdNFrcMEK0irhYWy6uf-8_QpZ7e0kAM4demI1yE66Tpr8Xg8l6EQmw0PFpMl1pEHRBVfdKX6VhydnOL7UOhj1l5pGtX88hcNblHgolcYsSqpoAXTSmQ",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "non_canonical"
+      }
+    },
+    {
+      "name": "email-not-normal",
+      "why": "email is the base64url of \"Alice@example.org\", which is not normal.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"QWxpY2VAZXhhbXBsZS5vcmc\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "6y3yPwEI_TeClxiqf0BCWHFua2EVRlZetzrbTq4c4xJF1jcvV17I3zbqcpEPToFyQgDLHLChrsnCtUuwDVLxoXpWZ7vLSu8c0P-i6HQ5-pHOuY2bwQgTDZm6pHmU9uTTFlyGQHY-znMfWowpPR7ScuD40FnBBz2YC3Sra_fzoZUv23TQojXzBMVXIL-Ja82IuaXdKSfyxZSnAYrPaV0DNQ-Ic5fvJN8zmGwHHJgui7BlplabV3bVWnGxKhvMDg5D39DxDDANV-PMPw6bZx4KY1HEki5izjvCg2eWj9yhqAtjrZy-pQ4jCdN6UtWTLiJdGV7z8rBA2jug6pJUIlwt7uvllign6ZGPHv4_iz3uwi0xJX29lELbZxlsLsMzNk3MKZg-y_FlguTV8Zpsn_ES9ygMphMMzd-whMNQcKyb_nTgxH427QDPPbti3idRBFe-zx78nBx6RhpwC4fm1Apv04P0ftO-trTAc1a8rfPFEuPghSxacegD1f7EAau3P5Gc5c2_85eGtdfRouNDtE4le3z1iAjsjNIaX1cF28llEW3XzRMlVv5_vvY90lkUzakLpveokAXSlk7rJEQdhM0DAuBsQL9NElF2jHa4tVJSINy2Wd2N3P7QkOA9scCD_Qv8U8jBaV1bnpfyEKGETUufRRy_HOaIdOPbzbVC1FHQrQ67zi0-V_mM8oGut76s2WUwzn0ZJSUYrwYsw_A5_RKD-2IjC0A",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "non_canonical"
+      }
+    },
+    {
+      "name": "commit-of-16-bytes",
+      "why": "commit is 16 bytes: it is a b64_32.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "Jw-989SncB_EtwJwFAUi_fXRb7UqEh53K_xtomEwLjDm_66KO9O7LslYzLKoci8vtX44TZ-3JpSwkCn76STyiF9vqOwwvGCrexhKIaJUb8BYQIMq989veOvj5d_vY4B7k3Z1DniLfHeLKsMxuDPArG1ZIDWKsRjMOMqJXZyIphZos13Vu60Aw_4pL4-vtXJZzNHCnNByih-DO1WOdw8XRzRk3Zyn8CJFB-qnuF1J86SzGS9uamMPNdkcBxb-LCYh3Ku8VmeNTnXh7kuoFsrOREDvhwCI6i94N72R020TVOqMB0yq4MUm3LHsDwrGoYghhIjRxQL4UfZSOCTFURqGIiqgTjsdmB64g_a7bgH79dj_Egs0JZyq304OV_Kz3C25eU7eYdhgXWoMdOfQA4Hi1RXHUxmg5PLShkFFliREKaGdkzjJyrh6AtGhJ3Znr4bC3nmyNCRljZckQU0X1heDalry9IAPTmRuPewih5gLGOBj6METDPicte4YRU-v38iNt1a44rz3CvlG519A6ll-7kzJ7PKiMki_6uVewUij--sMTjXIBxC9Z5OkbEXR3tKOD9MM-Z_K0UpZjYwdWka2mQPakBu9HPL6GDitX4tVdJytCSljjmF1ysVguZMDn0F3JibQZbq28Vx1W578uOLB-WFejRK7YnKnI_uDsMmF0Y0eWxTQp6IC_RPZUb2FMZ4",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "non_canonical"
+      }
+    },
+    {
+      "name": "commit-missing",
+      "why": "The version-3 keys without commit: no template has that key set.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "pczSR-J34-bP-9PnC8wDAswztuDSniFz2_7p1o6m2BsEoNFniBUp7-oBBbRi3PFPOzet8mKxfWcaI_Ku3enluuSrwm_4enszjyT-Vgo_Hk0inBLbZHzVd1CMJkX8CeMlh7T3Uosu6aqSS5hqcx4_GODWsX1YOM2NfGVQf41hFJ-szU6zRBcQBiaKAxMalCcH7QMpvmCI9ep2VxEfKlAkEGyvZGja7UaEBFvtYjbK0h4_TVYg57oio6LjoAVfxuXGEG3qqqpNdnRixlDVOIgHMYvqlN63LbjL-B86NxD2gSbUMYDWzuDyh3-UyuMdedqbTsZbqH6ihKw2WUzf7o0x-LZZ38NRVKK03DZHyV1UC7AiPK_Khk9wKp7F0A0ICLIZXFvXQmCFo6OVowtX52TmJdn8-jDdhCnwsqMcMXkZ2WOQ9HpSFvbK6K9Boa85dv2HrQDmm0g7SBSID7Ejb5PRUxu-dqkEo6Xxd86-ZozapGFEiafjnghnS04cyfLJyiwS80V-xtWmCr4IvwKE0Oc5SZq9sdQO0mArZHzPbroDbY3xD5NQEi5sDUz0aXu3wUnG4vpkbNEPwP-SpsWksjQ1u3AsjHB5m7LF9edXxMBJki-31aiHd1u5OHcGGIbBBTsuEwvxGcWMsmN2b0PG5A",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "non_canonical"
+      }
+    },
+    {
+      "name": "email-missing",
+      "why": "The version-3 keys without email, with commit: no template has that key set.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "GjFK5uQLl8LU5_7oG2dz1TnIrpWyqey7aRrYeVlG_xkok3drbz4eMYnDay_l_za4d-oaiMrW3YcIJRdcql89uxvxlykSrMqLHVlgLNgaQcZBZfs_Kz1y3TINeoNVHhwCry9OCJTRO31msh3hxMJ4iLD444hdj9PT1rdeANItQq--d1NuQNUC7MGFvHdR8dKmt1xNMAv0nL2bg5vmLajy9fVIOaA4Cjx6eeO_bfJOaAwoi5IAK8N9Wj69UmC9BfTA2gERpbECk-ucKMaPWmxSJbrAAZnhJ-PS3xnUhG6Xtn417oQmtZ4SscNfjeVAOvdh1RERwehtXxFUA2oRFBus2xfCWBtRHtRSNbvZkclYm0fVI-W5ohxaFwrwupAe1Oc77jkHCN5nNKDHA45W69Whz7UROOD9ACKLjIoue_G7wFuHK6QGfkHZBtuCwMiXG2cUr8s7vTsMdKxxtcQxcNGp3CaEeYl2LYqIIfWz32ESDyFTOtKT4wTQ33giLojlqb1Bsl5FtBrnKFOPNwLs_OPLrq97Bue1nKTXXeJFUgw0nosk31MDPRxm_TMCsuCbXscFTtz72ulccFJyexwUaAPZO_sq0LK_i0vAHPG3j61zhCMU_p7V652GLuTzxIu7YOEDB1-BndnCZqX4ezmbRI3_1mGqgg9ky6tkpiNxWSh8r6ErBg",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "non_canonical"
+      }
+    },
+    {
+      "name": "old-form",
+      "why": "A genuine answer of the old form (version 2, no email, no commit), signed by the right key for this very request: canonical under the version-2 template, so bad_statement. A device takes only a version-3 answer.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "nVFjKkuf2nb9FvUStoaHwLvFNio5M1nFf2zy38OLh2tBIMrDepC3ecwjyrpg5zdSkJinkHKEbpySyxM9Xf0INA7r3t2-yzakVneM0tHW2-UGOM2Lwb0-a9t_b6fpp29MTPa9TVjkWLRbBdwN8nSeJEIIjpxC3GZzViK8FEhrm_ZIqyT0_BnxRp2OigHjGDi6PQWShiCKqgHF48pz39QZhnoqaOMOLY67QEgtOw3pZ5dPfmylbPRB2Kk9C2d2HVT1dmaqaZ9piCN5q6IcRi8nU84QZbEPFH8i6WuC7pAlQ3xd-hU1d6yeiY3ybUghc0pX5TNkYCMPc5slMKGRvPF5q5PSwxsUUgHn9R6_8kuPC1SXvbVIeZzvU4MluMvCeGTFii4lFJ1hV8uK4o5PQ3l2ivKh9_4M4aFBEka-BLrU-UcWgadlupfzbjuri8TRxz9DYeZ3RKOY-yeegch7gbVgTmjjgo-GUlHGT9UT73xYXKTPOABR6DEh5Nu9_M1n3Xx4PBZw2RpbTmt5QaHdY7y7aRO2gvlVF4425wbQC1-JcUXGuivy7RqaZeQZKKHXtmaE5Ly_FPFRZe1mImJal6OImI8lzuGqpSklFI54",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "bad_statement"
+      }
+    },
+    {
+      "name": "version-3-keys-with-v-2",
+      "why": "The version-3 key set with \"v\":2.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "U2jZxZ7zAdoFbpUkfZgm2k613FA9kg4CWAy-EXey11byzHmS6ZwuPiFoKbCIejX7JtR9D2oIgd3UA5X92qKboEwiitXgIyBkR10wUX1hEU4mmqSMbBQamuUoRGNhRCG3MKhueVoQqA6rzJZHp334e1XOUqPUwQmeb5H3BLyYWtzfDsNloWgVytKga62Kh225z9k4oJoqQuQ8SKtByhaEDdkhMlzbeviIQASUd6RsAThJp9uQ2yGg1vgkvWWFEORu0m_kMUKNdJIwRHtLF-zDyOuVcBCzZYA67GcEEDcL4BPaLTiO_CGsKiuQF9RUJFYHiApqSMyN3qWuAhOExHWWXqoCPluWZVQDDg_O98s9TA47fktQmZ8XSCtIvSrL4Vb1QgQykrwGBxKdGmLlRcClYmasV7-2TKHVC9n_8N3SFi5Nth7b7T_-JHnP6wF31hry3HRCQuPa95IdnpuYz2KrSN8OajdD5m0d3pyitiSu4s8NRPai2Qo5qs7Qsc9P_6s22KHkxWg5g63lZSEqccA6T5QYnYK1aumSrzOvRauyLqHfJelly30Bkqs4Ls23-Snx0CASEGZrUkLRO90sCpRHH-ZpHzzfUyjzfO2mMTDfwf50FYYhPcwCkNoEqfcxlKL-7ug3AhEFrF7yHFOq9gttmeT6SOjaD1t53NExJqXcCzDQrAowXEA2DGqfzBz9S-8x6Kx-68UtkeDTwU6hmJlWuUGbe2g",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "bad_statement"
+      }
+    },
+    {
+      "name": "version-2-keys-with-v-3",
+      "why": "The version-2 key set with \"v\":3: canonical under the version-2 template, which this reader does not accept.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "X6TW8BgKVfcwN1ITBVfST9XEpKZ26TZyFQQzxRE20lUgs0Q-QFQubqB5crLJJJpGRzypsx8dHo5OrLVtLSXpn_3bOqcdM4aPUbFD6h9St5EZDERL-wW-nR087bT9rdfsYX3AYnKxuVQ93KkMBkwUG8ndN5HhkuX7wCISCw886zsNmE9xIS-sglO51dhqbUAnRnsBicQtL8yLHITeEizioZVdYnDzCQKm6IT4L3fLKFlx8mwWNEYWT63qgiSnLB2EIptuPrwEycuRKbVD1r-f5ch1ZYV3VwHV7SkebMSzd3H95YU5uufT3iRF9pB0wXI7IrfuvaUopPoASMBl7XhCtpZ37PA7m_Fq2SeTWTjl-2fmr8if3McV353kfvp25JnTNjj8hkdA1itEFDcUewgVoNV33Vg8WBKlNJs9s_R6Lr5eKwQS-zp1WAwg38PVBXx2RvxV2JH0t9pTx7s8f9JUlDYCi0GdjkdA0FQrXbtUkbH3TO4DByl1U9w5TSsPXIf9uni6roA9YmWXMU1cxZy0tnWu5bxxnd7LKBvFSmR7QXSFv4d9Kg7nmhMeo-PBcEw92MFO1lEZCCqwtkjqdiQ3RVihXDPzG_0kfQjd",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "bad_statement"
+      }
+    },
+    {
+      "name": "signed-by-the-operator-account",
+      "why": "Signed by the operator account's identity key: a server without the recovery key cannot sign an answer.",
+      "signer": "operator",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "pF5e2KyleyU18ToSe0KrMTpLWv5yW0aYp3sYubfRskglLZrOrGCVqXCmXpwz6X2Q6f2sOI3RoLeif9JjyodETIJiFMIMPQtv9JsAAINhRrYygul_pIZxc9aGI6N6AenNIod8F4efKny2Pr7ThDVRNNjrzgBS3mKDLQrKlOHj7fF5XV45N0djZqtZ-8e2WfknZEV5gsXnnmZ_P71EkyL7tZfP63ASoVJx1U5PXrQj1omN9SkCPg-_cdeXcjRxeimiQs71aRraYcFtmGMkd_HCmTSuG5MpRAYMLQP3IyneTIJkWoK4d4NEL1Kwvs2YYR4wVvBF5a1ZmZ7BO5f2UMqM0w9tOaji98HWSbFX6RaJWsP6IIdFJiiGwyVPm5f2ZjUra5w4p5FLkDjrkQI8CB5074YuBcPar9R5kg0lbED5Trzi59sf5CnnwfNsrFwJc1TiFG9x31haljOqW937rzi80vPCGIR_YvRXkj8k840jnxhAidRo5UhyfyPA009mEdQJiuFtJQkWyxOTsssnBTB2vQj0r8DwoqLKe85SE2m87Uy7HUUvMMheu9wZBT74yvJRIY1yjx7xggUlxX0kLKL7ThzHaJD7wfaRdIX_DrBINtFa5zHb4Dm-W6aWiNH-bzj9ZCkxzLlsivsMil79Ce9qLpPxymevzsbScwF2BklW94r1aP14nA9L5exsNMRRpXq88Ls5nelgpO6hK757O1P1sUt4dy0",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "signer_not_pinned_key"
+      }
+    },
+    {
+      "name": "signed-by-another-recovery-seed",
+      "why": "Signed by recovery key B; the pinned card names A.",
+      "signer": "recoveryB",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "NJ10KF489hZ3K4Kb21v3wHMZ7mVO_oZPga8I_rbAMlOdTJg3JMlnrLmIGRULOfaLYw-YOglEjjx0VEwQdLjCJu7f3qeumJBz17kCwBo8_9uUGTIl4KRlXlr_PXAvn0IXvMO-WQ7w7aDQ8SS4z1TI93FicoIjweELGbIXx9n_jcqH1alr5k13MM9CEsKmWeds3_sWXGJtqJFoZannrHwd4Ed4gw-XDx-ZtAORHznS6HwWpT_dM_PRTiAISObfJRpjywP1OKyPBA9KMr6cOBqbCycwby2DZ6vFnx8fxoxQR2_u9cV1Dw6BkJMEHZpZQs32-2TyikTg8jQYn0MZG6nxxENhEal5-9UzQE2pX5BCBXCKRnMkrgnByYGyBY0OQgEYkpC7YDgPzMPLzXf-Y_pWf02TKe7ixUHeTvsWG68eUAOhJ3aq107ZAc4QQszX10GW6h5UTHNt1IZpHueNgXO9fNUGhFHvAW4Mo7-svnpFKNnZFAqJAHFXH9Oxi-oUx2V-ss9Zg0Sg8xw2UwGkHlt3c4jpPE66MDL36er0utQXNwwTBsIyiUtJfMSOWGdLJXQMzsdGAznp4eQpbDfKQgbrIDpO_R9cP04ju-k0oYkuyPsS_ic0ZWEFT0xQRlNiyEm0WyVbgnNCu4zohKJ_qxjLQ4zaKNZ6-zkdQY2Np3OxIYwIC6LLqD_9NohZolZ7XuE34FUhirK0y21phqWRJbmoWLCPano",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "signer_not_pinned_key"
+      }
+    },
+    {
+      "name": "card-names-another-key",
+      "why": "The valid answer, but this device's pinned card names recovery key B.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "cardRecoveryFp": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed",
+      "recoveryPubB64": "cgJW-OUfTMgUpnV4SN-AVkPh2RxcLjnxOn8WbOi4Yzk",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "signer_not_pinned_key"
+      }
+    },
+    {
+      "name": "signature-flipped",
+      "why": "One signature bit flipped.",
+      "signer": "recoveryA, then one signature bit flipped",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "j3FyOCU9TGob_1PVyBa9AOGb0b1QC5GL1QpoMV1GDAkWQ7qLb4FMW0XGytIV8O3Yz44sDUvcRs_6fOSCMbOe9I4NzJUDcQkel7LQUKFTZSFvOYW4KKmtUojJfLu-ojcrzL_b-yQPpYBFUIoolPv5nLr5rvYyDfFCw_5OhyY8acQ4I0h1F86u9V-yN1ZHrR8MKh-j2N9Ku4sCdCaE_weh8Qifnav6h_eOiYeT2_TfiSQ71PHjCFTjzCuYsfAfKMrQAlGPaEU9CtIw84-BJsKPLrKTmxM7JSF_48IDhgYIgPtGQd1eVHOJgrB-dtqFUbZqKjZnu7azeW5qnerFYusGw4-DAA6vwCpEdBUr4ztxTmZAkbWhnhdeKLu7wy_m2M_CmD7wT1aQs2Bjbw5QU5F6rE6jbMAmYw-HcC5JhWXEiVMVGXqrK7va15pq6atxjeMXE0AedPWrDdJ3CY0ciNcLPqWXD9Vo09ccNi8dXo0-FX-lzlw7OVGXBP3q6KJvwktu0nG3s5SebuQQEbZ4LyI-2dQXx02zBya4vlMvwVhzafailEQV8aeaS3icAzDHzZQ8YYw3HABvgWAo17-mSQ14ToDKERFeBKIoXD5mz1j9u6YNqdMn0NO4X9bbkA9yayQHDGmKsS3SYcZdAa7zc33IhSH0RAtJ1UQR_ObVVtyHCh3Pw4d_bzT4yXD_lV1V6qAT8gB2-8Lf7tX5hGPqtyoaJWXVZh0",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "bad_signature"
+      }
+    },
+    {
+      "name": "answer-for-another-address",
+      "why": "The recovery key really signed an answer for this request that names bob's address (the operator was given bob's copy); alice asked with hers.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"Ym9iQGV4YW1wbGUub3Jn\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "QOQXNbb38YhTRvHr46TTeDaeRc-7VP-65qL1GgN5ZjLrZtMAjk-g0Uldnbjq289AP8riVS7DqU6aWXa4vzkMMyrScgMo6LRKduDzNhW1VkWq9xzpYrMYK3F-oEoWGgCeNRmgVuf4ezZ3t2KOC63fuS6K3_k41OrQM_0ukvDm31ML0L5ulVUytILzR6Sn0Tg5CmURzoUo_y09kflAPqdx941JJqkb8anGxQLMAuSET6NeWq1tEy4EIixqw2CYQqfy5tsz_R9g0hvgTT85zaJxfES09k0atYwwEiFaUMQHoTfD9hf3e6qeUdbzpqtqOK8u3lR5yM_iVjgbUpXeZYEqHFjV1GUIYQCR0V_9OqLRrVNPOR6IxZ2uTKaeWmo4Vw10e73sG9x6abF5aS8IRdIGCf6UI1SeE1OGvHMu2xALq91b78DFTEderQUg37IplGtYjTcErDgjUgsVptmNT3XKSrjOxIFiqHdqVjHJwdrgB0l2v1aBFkjQLha_1cgfphvfD6IqnuB9McUTeUfek2M9uL11HulufZm0U-pkfb8LmfTFBmIMSYS-MpFu1B-gKMd4p0zb17RhBi_Q7lA8EjmCvFp07Z8-87tg7wJDkZr4roex87JS-ddUlXT6RQkBnStz_q0rrHaEgtv3WNQrMuF5xMkyrhDnO3ozYrFfMreoYNcsnlnq8IKgsJUfpPj7JXtNNPOQIO4cvij6thHX4I25540",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "request_mismatch"
+      }
+    },
+    {
+      "name": "answer-for-another-address-on-a-fresh-install",
+      "why": "The same on a fresh install, with bob's whole account behind it (his userId, his UVK, the server serving his identity): the address alone refuses it.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"22222222-2222-4222-8222-222222222222\",\"email\":\"Ym9iQGV4YW1wbGUub3Jn\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"zskvwGvbGChqR9gDoqImmxTR5SQpCSJrp2q1MBQHWuE\",\"issuedAt\":1763884800000}",
+      "sealedB64": "f60pKZujixlM0YkuW_4yot1DMyJpP4hIGTUn9IJcGFnkvEfvOxVNSF0S6FgCf7xjLyKrrNvZjptrbyOtHZOKIuyQR7ymZdb3E5Hnvn9qEn37NwIdtBkWIsnjy74CpFh3CmXnFHh-uDx4paPYB4x_yv0NhgXDzoz-wgI8c5ewfC0bHK1Ix0PD_DI7waeTy-LzCxupPZEozbrZfzsOgPhOug4D3eMRSm7oXsya4_G1XM0XUsXh8zp3DD038ffryphsmifSpwwXqG7wPwa9ZPbztCbHFUCubuwNz7VM4U39XahdMwadBMMM6zcoV-1mekJNTzqiBH6hu88TiA6uHe4OarTWDRa8oOJHQ2utgcny7r8j4kmAsVRzO49DDVuZlf4gmm_B4UztWhjrXOQA6tDoypcgzaFO_GAi7roA4gx3oiqGboLVaZjhqpn7grPHWfjFpjGMkPK_pSYkSXxMoLszB2S6JzAIxFZJ5tGjPUs7QlLTA3Q9tK8pgzcAj4OhvaLAbTkyfGQyO2QR-G_x6zuySuy_PyG6gPjSfV70qUkrg_XvZTmK51YtF9SeY3IACtyz9a1HmQOA-fEPkA-Q3A6z74NULe-RfhL1ZVmGYki8qR7IBgIsBXG3Su6Fm1h4rVsBxoQht8Ld8rjsSqtyIsIi4zgUZFRcIAR-i4uUq9u2lA71YySqDzAyf_j1Cjzm8kc0IBAmH6QAG6GDtlSMo5KRr48",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": null,
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdB9MUGly3EZ22fwvKcEHNL5EOUpszN7p6Z0_uytCADvygvyXBatGDqv4R_Xy7HMA-8",
+      "identityPubB64": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM",
+      "expect": {
+        "verdict": "request_mismatch"
+      }
+    },
+    {
+      "name": "request-key-differs",
+      "why": "Made for another request key.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"cMrbMNvJYWVl4VNSpRInL_QmqBQJgOUunvHjlZehDAY\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "HUtt26lfEkpq7gH_uWzhMeMXUOEO8w-R9ypclXCJUhthcOrOaPQpzY3VXmoqC1P-YagsZCFyiOb30mxXiHV511OIjPD8T1YY_7brqrJYr_2CS0Fy7lUIvOHYCkob1XhwjLklfkOWssNKld897_xKg4oBN2ZWWIa9RYnHOdk6IGVeLrDkuapp49UylwxlTVDTwqqtoz61mMr-UMtemjAw-KR1CUs1zZwv9atRyHPpLoE7VLi9yktaeD-XHiOoB2vr22lmmqQ9ORhMQUSm7PvzUtExhcR3pjIM4kNJXRTeJo4LhtWPYUVF1wqM-vAh0QL7wkBgOnZ9GHKXhoN4RVeI0hvQmdWkPH57YTYUDbYbHPjSNVdSKa7HC00X-pXUHWIJ8Img_w4XcIcaUjBPUfQs2DTO4ywlUHEjrOAyjgeZIpR__qg-kdXTOVMcl8QECDrN_fcq96rVkJQe__AmLnAe2-O2fP67wFdhoqajyaIYll364gLUEHEzL5EAXcoSvK76elC1Nmm4eW31XTPoPvb6Gj8FZdSZYdjKirpbJTjq2OgXeEaVf7TwRPWyoPeg2PoNZhgu6D4KlAWjIdcbUUBaFnoxF_RR8RfYmC2M5vZkMaj07DGEm08uCVy_vwVKVkhzB2pC7hIuat-kK6ZQC9h1fJu26em9Acr4QbYqERzmZLZM4QkwDc-ZEanVB-SLf6q_kR9QEB8pmLTZtpKyRylOBc8ZsNA",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "request_mismatch"
+      }
+    },
+    {
+      "name": "request-id-differs",
+      "why": "Made for another request id (an answer uploaded to the wrong row of the same address, sealed to this row's key).",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"requestId\":\"h7QK7pJ1BOq3-NTF4Q7XFg\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "Uq0au_c3_T32xBtovhLMIBeHJL8mtDOaXxHVaBIRMBBBijVWeP7yiZ7DmXKpt8Wo7-vliSpmDpxqQkcKBm1xNrAYqnl9sVsJF7FR7LoM-XN1UfTqAJ1QogLyc_uj9qgXL36qyLmk3aJ_rBK0FGh-PavJ33bTpbXac7ZXBbLvEeDeUiGP1a18Uy1yIN9LfFo2usJEqrCM97ulRdqxElj_FOv3PipgYEH_m_NRXqXB1Gp9JCu_4Gh8z7TcUN3SfSYWjf-Z9JGem-7ePc6GLl6WV6XzunRpCKoceiMWy2bJdxRP6pxZUjLrb0riFvsAAXx5wCNyVog-oz8OjKA3GGaSh0NP6c5uBvA_avFClu_4_xb9NhRFSv29j1rnUHcSeGhhSylDIZcnupL--MCbWE9oi5g1rz3HOcGPYRFsNB7pk4iFnuL3sF2mrXury9U0jyss54em3yUmeN7AYlMhktTaGP88-wqRSs9PrTN0hwT4--J-7eHhDiRc1Jv-Xw-tCIfMDROgE-baZKbsPy3BAtw53qwsoeYUqmHso7jRHK2l1GtQIeoVa3pwPZq8B1_X8PAE8Zu9iOAgPl-xmwwpubvLrV0yufTufMVsia7V0HCmgauvXwLqJBfKUqDtrhDYkyXoAhJFjlzLE0ZM6JsqhqrHOhHywkwhvCS7GFdKGiNdhQWRaRb5yGQM0JijCp8mD8pSCJKvpraTRW72CB4Usy4V-h69jog",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "request_mismatch"
+      }
+    },
+    {
+      "name": "instance-differs",
+      "why": "Made for another instance.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"ffffffff-ffff-4fff-8fff-ffffffffffff\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "zUODZ2xHy70Pmv3CH9GktoIbwXfICwfXol9yhxH-VXXJYUc9r82D-0-agwp5yyUJ6VkGOkw69Zv-mlBA9VGzntXIn_pwoB1jP30SlrPWL3Nb1WZa9I7s84iW142Nqhvie2RVzDKdC9IR_fs64zsd4qIc7AQ4M3TjLDNUOJx5p4WUXCtluWb9SGEXmOmEQoim0A9dpu7ZvoAFlr26zJdwI8zreYrbxnYk7LY_K3CtBGnUM-S3GnYUTn7Lte4MEuARhHk6diCsDlP9ao6bklgNs-jzVgIHIj11EAzvvI07481CaRMki7akVTvhRbO-CO_hpE1zI82_r2n2W4FfrZUkHsgEuI2qfD9aVIphHMj55S0NfOWC5M5tXTUYPTscQh2rRmVtPX6fIwiC1IQD4Ynqt6_DB_Jmb79L14D57a2Rpn9bXAw_ufafdNQ72cFHxVT0BoD3hakygDpZ53kmYkTkeaARMCLKTg72u5__v7B8rcxUmATSUYlvF9rebzgWO56LEECrQGgqhE5U6CJtbyn6kJ1wWmEk7ODWDxTgl8x2U2zO6xcuFPYRwm2ZvZU0bhmodEUIscM8FAXWkYTDMRe1QNVZnCfy7Kh-uFvRozKGpsQ0VPQuLsmFvf0zG6gf2S-xC4YrbFdbJBvbMb3yD1zi9FNIugDko5zgEm0utNwI-iUp8yPGVriV243ecA3zWZiWa42DwFyaN5prwUU7JnwyEmEX2v8",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "request_mismatch"
+      }
+    },
+    {
+      "name": "user-differs",
+      "why": "Names another userId than the device holds.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"22222222-2222-4222-8222-222222222222\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "Bd4lBqdHKw14AQQbuhkSItgN1RI6mQmTSFEsJdE9GmoL5yk-CZFCHzAPJQmMlkH6g0kJiQy8Lmy23PqxZXpaWwoHsv7gB2-9qMw7COO2l76za-0upQutpUsE6V9CqmC14xWX3A8MoNLY0cbBNGuICKP5HLz3YOawOy_r-wWeYYkNWPO1n0pzIkbTbr3JbA1LDvNPMaQ5iBZkP_1p43wVz7XRdN1wfQ3sQksF1eAprFAcWKMxBJ7r6IQ0pHaq8LnaTqW-ZBIhUUwolW_qul9so_5CROwWwWDK7xdtlyV2rwKq1ZCAkeKz-dinU5oib6B5I4ga0QfmRHRIqUVt8c7N6uTDCmsr8SK-MTrP13Yrd129fVZcvfjJhZI1wprukXL7BBcjcPe6qzlALAJ5YfEaPYyvhiNlz14gMguVF3CNsGdlOS3SKS1X0l_OwU8o3jB8oPwO-oRwnAfmlHEFoRwcYIxIF3ngeNSCzjjMxwAU_npF3hqUouwGQsrxJfDptulKGARqLT3YL1k9J5Ln8RrqtgOwmnCJze_YtGW-6kUMLSrhh33DlyZgxqP-0wDLujpm3vfKdEFvvoQwaBr8JTbwJDvUaTqlojdygD9fNT6DML_ZeDLjbJnk5caIEKj30-Fz75szXheQFbTe9lD_aXwaSkBfzx6czSimzpML07SPVxBjnmxKcXE5PSEu64UB1WiJR-kXXq7-qHrmolFqzt7Nqb-LkIQ",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "request_mismatch"
+      }
+    },
+    {
+      "name": "served-identity-is-another",
+      "why": "The seed opens under the delivered UVK, but the served identityPub is bob's.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM",
+      "expect": {
+        "verdict": "identity_mismatch"
+      }
+    },
+    {
+      "name": "seed-does-not-open",
+      "why": "The served identity-seed envelope does not open under the delivered UVK.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdDm69Z1rPid2NwZvNK4i1gMD2XcDTwBQfKEUlev9CWNsW7lwyHMmU17VZhVIEyUX3Y",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "identity_mismatch"
+      }
+    },
+    {
+      "name": "order-parse-before-signer",
+      "why": "An answer of the old form signed by the operator account: the parse decides before the signer.",
+      "signer": "operator",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "b3j1u76QsCcORRBf3JMbRMx0synSaNBajfC_hFhbej-ErouTYz8QYUpwKSQHiB0rFRljU07omu7bDcPq5-Arbd9juIhF9gi3fIl5_tnETBDtd-8Uy3nhDjt7Wbp7_kVacLz99crGfxMmYLTbMqXe2n4hFIQuWLPFeI1I5RV9BmZNCTZPkS57fvyt0glFMNarmHtfHJQo8E4uNULciHP9__2T8Q6wKjIfgqqIpNwZS0bWEBMYgaiaurVfx4Kd4Nzv-0tZsVo1o_k3Mjjqhz1vudo9zza4OVIAn88UvyFwjaGzXD0pagG0KNKpydynf5BjZp2CDUQcqAYmXGnBY0CThx8Or2JtmMZ3yKKR3AxI_7t5vGDS0nQSxyuaBMxZfQEbzPCOLfZkIvWJBVEAAEcgXuvnjtRcxFeftHMn3ft7Ijf-yajwT2vhpzY7qXWRqe1ceoK7JTj2BwdrGZhlssxym28NA_chmjoUEaYLBTpJBJHJmJxidVKGIwZgHDQSbbqiHEqt5Mt6A5nV3jQfISocIKIoG59D-1o0mlK4ocbTeOTwKgrgcIv-qfoopAnCL4_n78rs0vpq9T27q5_9BaGJCvT7lj6O9KntOaSS",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "bad_statement"
+      }
+    },
+    {
+      "name": "order-signer-before-signature",
+      "why": "Signed by recovery key B, then one signature bit flipped.",
+      "signer": "recoveryB, then one signature bit flipped",
+      "sealedB64": "08fm2WzoC8viWFQZLi3CokfiAXuJtYpg1uA-lkcYw0G4IFxU-LafuNGoT9e-NpUlsem_IjXvCfeq7DG2mqIFlby4TaSQfLI-uBHLVH-53CSURVdhLkUageWAxyD-t7KhnpMDzk_ccQ2qYTmDNCdONhsoL2q5VTPhA234NqtvBwhoEs9GBXW5etDKhR-t4bDThIqhCHmS_DNIG_UZOtKfBIO7VntEEcw0kzy1QxGuw1bsPCaabpHacfstBiOXRTVDliCWsvyVEcvCM4yG9NSC_oLiUvo9t7e_BfzyPGiIkgQ_D7Faos_T-LeUF4ZKGHcoPZKtPIK5DMgc86BANQ5nbyfJM1gNM5oYO2Yjj_oi96H7wgyTAB07Fs20nnjHnGnR0n_tx5GvZ__1eUL4uccaITalb24nX42RcUkYJpF9vh2Q_VroEaXVwqEUvspNp5afZ5_eRmIn5xv0qhBiW15lYZJxQxqKfRgWE_RWi9Obn1aLsvyh7feSVQTibYVrXEFoMl-U0vuU5loSMAvuQgfWa3jjKv8OFikd6LTVFtIqFBmnTv3knDZie47WE_p-c5FaO_XONUy7L1QHkFLfe1jpQqNlK7x3YoawSvHQFap9KqZwHy2SQlUmJO8XrHVy1HNOTXV_HeHJNdsF2Jv5pWLDLDRpeHHI_mKFPU04B3VFd8u44G9CdhqPn3izhGH-Kmt5xbte40lSBDS3149Y5HRjE5FZlzs",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "signer_not_pinned_key"
+      }
+    },
+    {
+      "name": "order-signature-before-request",
+      "why": "Names bob's address, then one signature bit flipped.",
+      "signer": "recoveryA, then one signature bit flipped",
+      "sealedB64": "VkPG4ajfDtR3u-M9DJBuWQ8IH1FCXrEa6HtyasLiGylNGs2HgI8Q09yy2HtYOigMgq6GOUhL8jjPc3gLtrqw2xDAHv1HASRfat4guxcSltOOwfocOBOWMib1Xg_I8-D_o6bjHJZ95I8PjFeC5Igu5rDIddFYuXv0bxqsPcbOeTAVQZwRVhz11HWaJRMfjqxRPfs0TpXqfEI-Xm2o8yP9x2O2O3WuDv1omBfoGiAulZcrEUkJsi-ouoescXJTmC_LW4yrGPNAsPUmZ8XfGa6a6VVeVkFu5FZYG8K9FDCoygEvJQlqisgEOhdp0h7E8eS_j5qwcKNVS8Dd77cBnL0vsEdWQ-y7T8otQwcTTrNjIm6PWLfNrMfyV-3KoR8C61ZPeRu6-dGxMlKh0jOszlYt8WYwNeb7LPZMeAQkXYrpdXfUznQeJQU0WccI1M1aec9GgC2RoHb6fKnIoqrkd8SrTl4vIPZSvst4J_9YUH5dLo6mtTu9ynbxvmL2Co8lyfyl3OGphTlktfVKNH3sdK3FG4FVu2EyOfKE9ljSPMESvBq48mTujBWGgAJXsDctlOfPdvz5IjfBqrnDsRYfrI_kWV2mZVmp7n93xBp5OjFHSiCU7Jb-05wwt3SK7_eW-KciONezUPxuLpmjbsoWHshWkD_ALKMi3UVTou1NgSL40YcCCSGQaGhFogSyWdYFXrWOUlDevzFXrn8w8TTbV7qcgrw",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "expect": {
+        "verdict": "bad_signature"
+      }
+    },
+    {
+      "name": "order-request-before-identity",
+      "why": "Names bob's address, and the served identityPub is bob's.",
+      "signer": "recoveryA",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"email\":\"Ym9iQGV4YW1wbGUub3Jn\",\"requestId\":\"kevsyZmgCVPO8TTl-1oqKQ\",\"requestKey\":\"LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\",\"commit\":\"RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk\",\"uvk\":\"vUR1s3OZVF2WKuFVIXbjKsae9vD-j2Wy0FTt8yGTENI\",\"issuedAt\":1763884800000}",
+      "sealedB64": "JK2Au5a7KDlmZvcbmGPf2P1AMN8xdMCK4g97Iix6mVZN0v3fX_kH6Ijv-t2vQHlVrkkyt9WkAD0gcRLCxTf6_kFN9MLsqVQQ6NXk3dDlLJ2NF2KAzBK0uR6yKw-fdHb4VX2r5YWEdRkNRPadu2fzYpVXRuNWm_6jAgBILYmuXY1mWEY0KF9IHIe2RLevY9uWC0L1sxAJtazU0fZUYUJo2-7UpMD5kJVZOvB9-RQp5S_24Rj08XAX-9a5AR111jAoDlBQ-YX4w5LaUxo_fKP5-dMfKeCX22R4tZzOvvitgmmtGBL8KPxg3B61cp0UrqrOuVkFWUARYQ9lv-M6lmrvuMA-jBHsMkfHYjbFe3Xl3IUk4lhJZOyWH7dmor9Q1PSIeseJP1gXUufIze7MgLLKfi9PnBCmaU0w3aIVvtv5tfpkBLmZrpsZUrM3C4UnftaSpNTQLWib5VpdihYJNTnfU4CNtxwyCezsZoJvh1MHfPyn9L8h4bcL9pY_wPtelX1p6TvKIeLHtGbfaB9xRZoJFy5qqop1vWBc_Jawmstt1k6mPuirFGA-MHuAMsnNjfwYNSqnXH-52T-7Z7jB4P4J3BiCaKhMuQex15O9ds_BIvGAgHTGMrzIZZn6b83ns4YBXx0CqiVO1lJjLB3ayBXFDk3lCleG6KpmOQRPqgM0VzLXaBVn7tFm7jFmbNuNgYjIdRj5KV98z--NUGJdqokTkEA",
+      "cardRecoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987",
+      "recoveryPubB64": "IYaZ2mbw6uxdwZJw63Cde9SNZA63NZKcfWok-u1fhzM",
+      "request": {
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "typedEmail": "alice@example.org"
+      },
+      "encryptedIdentitySeedB64": "AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI",
+      "identityPubB64": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM",
+      "expect": {
+        "verdict": "request_mismatch"
+      }
+    }
+  ],
+  "commitCheck": [
+    {
+      "name": "the-value-from-the-answer",
+      "why": "The commit value the device opened: its hash is the stored one.",
+      "commit": "RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk",
+      "storedCommitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+      "expect": {
+        "verdict": "ok"
+      }
+    },
+    {
+      "name": "another-value",
+      "why": "Another 32-byte value.",
+      "commit": "LAlxECMsJQpMto0goatR8YrINqtzBCrYe_n61iZ6KCg",
+      "storedCommitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+      "expect": {
+        "verdict": "commit_mismatch",
+        "wire": "403 commit_mismatch"
+      }
+    },
+    {
+      "name": "the-value-of-an-older-upload",
+      "why": "The operator uploaded again: the stored hash is the newer answer's, so the older answer's value is refused.",
+      "commit": "RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk",
+      "storedCommitHash": "b114a8693c85d81c88f2441b36f5626d51cc1411addd0add9880ab65b486b463",
+      "expect": {
+        "verdict": "commit_mismatch",
+        "wire": "403 commit_mismatch"
+      }
+    },
+    {
+      "name": "the-hash-itself",
+      "why": "The commit hash sent as the value: not a b64_32.",
+      "commit": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+      "storedCommitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+      "expect": {
+        "verdict": "bad_commit",
+        "wire": "400 bad_commit"
+      }
+    },
+    {
+      "name": "absent",
+      "why": "No commit key in the body at all.",
+      "storedCommitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+      "expect": {
+        "verdict": "bad_commit",
+        "wire": "400 bad_commit"
+      }
+    },
+    {
+      "name": "null",
+      "why": "commit is JSON null.",
+      "commit": null,
+      "storedCommitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+      "expect": {
+        "verdict": "bad_commit",
+        "wire": "400 bad_commit"
+      }
+    },
+    {
+      "name": "a-number",
+      "why": "commit is the JSON number 42 (not a string).",
+      "commit": 42,
+      "storedCommitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+      "expect": {
+        "verdict": "bad_commit",
+        "wire": "400 bad_commit"
+      }
+    },
+    {
+      "name": "an-object",
+      "why": "commit is a JSON object holding the right value (not a string).",
+      "commit": {
+        "commit": "RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk"
+      },
+      "storedCommitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+      "expect": {
+        "verdict": "bad_commit",
+        "wire": "400 bad_commit"
+      }
+    },
+    {
+      "name": "31-bytes",
+      "why": "A 31-byte value.",
+      "commit": "RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQA",
+      "storedCommitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+      "expect": {
+        "verdict": "bad_commit",
+        "wire": "400 bad_commit"
+      }
+    },
+    {
+      "name": "padded",
+      "why": "The value with a padding \"=\".",
+      "commit": "RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPk=",
+      "storedCommitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+      "expect": {
+        "verdict": "bad_commit",
+        "wire": "400 bad_commit"
+      }
+    },
+    {
+      "name": "stray-bits-in-the-last-character",
+      "why": "The last character changed so it carries bits past the 32 bytes: not canonical, so not a b64_32.",
+      "commit": "RrIZCIDukzsf2Hy6EISKdbs-bmxxBKQsX2k-AsxUQPB",
+      "storedCommitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+      "expect": {
+        "verdict": "bad_commit",
+        "wire": "400 bad_commit"
+      }
+    }
+  ],
+  "fulfil": [
+    {
+      "name": "the-token-parts",
+      "why": "The three values the reader yields from alice's token, for her row.",
+      "body": {
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9"
+      },
+      "row": {
+        "rPub": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "emailNorm": "alice@example.org"
+      },
+      "expect": {
+        "verdict": "ok"
+      }
+    },
+    {
+      "name": "sealed-padded",
+      "why": "sealed with a padding \"=\": not canonical base64url.",
+      "body": {
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No=",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9"
+      },
+      "row": {
+        "rPub": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "emailNorm": "alice@example.org"
+      },
+      "expect": {
+        "verdict": "bad_sealed",
+        "wire": "400 bad_sealed"
+      }
+    },
+    {
+      "name": "sealed-empty",
+      "why": "sealed \"\": not 1 to 1,024 bytes.",
+      "body": {
+        "sealed": "",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9"
+      },
+      "row": {
+        "rPub": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "emailNorm": "alice@example.org"
+      },
+      "expect": {
+        "verdict": "bad_sealed",
+        "wire": "400 bad_sealed"
+      }
+    },
+    {
+      "name": "sealed-over-1024-bytes",
+      "why": "sealed of 1,025 bytes.",
+      "body": {
+        "sealed": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9"
+      },
+      "row": {
+        "rPub": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "emailNorm": "alice@example.org"
+      },
+      "expect": {
+        "verdict": "bad_sealed",
+        "wire": "400 bad_sealed"
+      }
+    },
+    {
+      "name": "request-key-of-31-bytes",
+      "why": "requestKey is 31 bytes.",
+      "body": {
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdnw",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9"
+      },
+      "row": {
+        "rPub": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "emailNorm": "alice@example.org"
+      },
+      "expect": {
+        "verdict": "bad_request_key",
+        "wire": "400 bad_request_key"
+      }
+    },
+    {
+      "name": "commit-hash-in-capitals",
+      "why": "commitHash in upper-case hex.",
+      "body": {
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078E38CC20F0A91BE98BD147ED93410A8C544DA132AB102A829763AF36E3E4D9"
+      },
+      "row": {
+        "rPub": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "emailNorm": "alice@example.org"
+      },
+      "expect": {
+        "verdict": "bad_commit_hash",
+        "wire": "400 bad_commit_hash"
+      }
+    },
+    {
+      "name": "another-request-key",
+      "why": "An answer made for another request of the same address (its token's key), uploaded to this row.",
+      "body": {
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+        "requestKey": "cMrbMNvJYWVl4VNSpRInL_QmqBQJgOUunvHjlZehDAY",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9"
+      },
+      "row": {
+        "rPub": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "emailNorm": "alice@example.org"
+      },
+      "expect": {
+        "verdict": "request_key_mismatch",
+        "wire": "400 request_key_mismatch"
+      }
+    },
+    {
+      "name": "answer-for-a-shorter-address",
+      "why": "An answer the size of one for bob's 15-octet address (545 bytes) uploaded to alice's row (548).",
+      "body": {
+        "sealed": "7xZrSN64wznj1NjJackrTgEHp9nr-iXRu6todV-nq0JxQtfA_K9jTXA9sRpYzn8LQyxps0P7pq8t8MNVFXNToN73zpvZL0ovdjbG-kihw9hqLO-4-DaOj6gt5Yh3tRQZOIhX9du5QUS-CbdfQQc-EfeR_9v_DlrDBS00wZmJ1iKXbtkDA1snD0Shvx3Ia5nfDzEkiyMZbCHDSI4jVkyotDMJAomgqU8twDH5zEg0sF-O209-GUK3Owo8_tO0dtKqcmiMhEsLKHaoskGzXluefr_aHD9V-AkZF_U7pB9FbashPudbRwK36d9LgJ04cYCgTA_MCaet6SUguFut_OFUrId_Ec9V1COH-882vFVLPM4RjMK2A5b_hgswoLHQ2lFN5CjJeA9NXb9K6D_FR8F1yGHWBk2sL3beohHTnkwmoaEE92sy2pHLvUjl_xMhm7J-FI73phpORL_GTh5s34C59h4mO8c2E_vEQtXW84IM5xdAqgnNzogViBOdOYhTzyIb7Vtz08W_9U7BHUb5r6KVUvairyxWiO71uwGVmTmF99ItJv8Svuk1YPHqaFZMF1e5dHCViyckweRtMr30CJtMkgCHfKfzuuPpAu_LlbWOOqQKc9fh-FFb5911ATMWMLRV-GIMzmxnOAgBoKJolOGPzSaULes3RqPdMkDZQWWbm1OQoP7UCIiyifU8Z9Fx_b2b2dw7BxouYlEfV2uY2eWQhd0",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9"
+      },
+      "row": {
+        "rPub": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "emailNorm": "alice@example.org"
+      },
+      "expect": {
+        "verdict": "bad_sealed",
+        "wire": "400 bad_sealed"
+      }
+    },
+    {
+      "name": "answer-cut-short",
+      "why": "The sealed answer less its last byte.",
+      "body": {
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-A",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9"
+      },
+      "row": {
+        "rPub": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "emailNorm": "alice@example.org"
+      },
+      "expect": {
+        "verdict": "bad_sealed",
+        "wire": "400 bad_sealed"
+      }
+    },
+    {
+      "name": "answer-too-long",
+      "why": "The sealed answer and one byte more.",
+      "body": {
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-NoA",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9"
+      },
+      "row": {
+        "rPub": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "emailNorm": "alice@example.org"
+      },
+      "expect": {
+        "verdict": "bad_sealed",
+        "wire": "400 bad_sealed"
+      }
+    },
+    {
+      "name": "order-sealed-before-request-key",
+      "why": "sealed padded, and a 31-byte request key.",
+      "body": {
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No=",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdnw",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9"
+      },
+      "row": {
+        "rPub": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "emailNorm": "alice@example.org"
+      },
+      "expect": {
+        "verdict": "bad_sealed",
+        "wire": "400 bad_sealed"
+      }
+    },
+    {
+      "name": "order-shape-before-request-key-mismatch",
+      "why": "commitHash in capitals and another request key: the shape comes before anything stored is read.",
+      "body": {
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+        "requestKey": "cMrbMNvJYWVl4VNSpRInL_QmqBQJgOUunvHjlZehDAY",
+        "commitHash": "078E38CC20F0A91BE98BD147ED93410A8C544DA132AB102A829763AF36E3E4D9"
+      },
+      "row": {
+        "rPub": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "emailNorm": "alice@example.org"
+      },
+      "expect": {
+        "verdict": "bad_commit_hash",
+        "wire": "400 bad_commit_hash"
+      }
+    },
+    {
+      "name": "order-request-key-before-size",
+      "why": "Another request key and a cut answer.",
+      "body": {
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-A",
+        "requestKey": "cMrbMNvJYWVl4VNSpRInL_QmqBQJgOUunvHjlZehDAY",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9"
+      },
+      "row": {
+        "rPub": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "emailNorm": "alice@example.org"
+      },
+      "expect": {
+        "verdict": "request_key_mismatch",
+        "wire": "400 request_key_mismatch"
+      }
+    },
+    {
+      "name": "sealed-absent",
+      "why": "No sealed key in the body (absent is that field's refusal).",
+      "body": {
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9"
+      },
+      "row": {
+        "rPub": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "emailNorm": "alice@example.org"
+      },
+      "expect": {
+        "verdict": "bad_sealed",
+        "wire": "400 bad_sealed"
+      }
+    },
+    {
+      "name": "request-key-null",
+      "why": "requestKey is null.",
+      "body": {
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+        "requestKey": null,
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9"
+      },
+      "row": {
+        "rPub": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "emailNorm": "alice@example.org"
+      },
+      "expect": {
+        "verdict": "bad_request_key",
+        "wire": "400 bad_request_key"
+      }
+    },
+    {
+      "name": "request-key-absent",
+      "why": "No requestKey key in the body.",
+      "body": {
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9"
+      },
+      "row": {
+        "rPub": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "emailNorm": "alice@example.org"
+      },
+      "expect": {
+        "verdict": "bad_request_key",
+        "wire": "400 bad_request_key"
+      }
+    },
+    {
+      "name": "commit-hash-a-number",
+      "why": "commitHash is the JSON number 7.",
+      "body": {
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": 7
+      },
+      "row": {
+        "rPub": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "emailNorm": "alice@example.org"
+      },
+      "expect": {
+        "verdict": "bad_commit_hash",
+        "wire": "400 bad_commit_hash"
+      }
+    },
+    {
+      "name": "commit-hash-absent",
+      "why": "No commitHash key in the body.",
+      "body": {
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "row": {
+        "rPub": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "emailNorm": "alice@example.org"
+      },
+      "expect": {
+        "verdict": "bad_commit_hash",
+        "wire": "400 bad_commit_hash"
+      }
+    },
+    {
+      "name": "order-request-key-before-commit-hash",
+      "why": "A 31-byte request key and a commitHash in capitals: the shape refusals in the order listed.",
+      "body": {
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdnw",
+        "commitHash": "078E38CC20F0A91BE98BD147ED93410A8C544DA132AB102A829763AF36E3E4D9"
+      },
+      "row": {
+        "rPub": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "emailNorm": "alice@example.org"
+      },
+      "expect": {
+        "verdict": "bad_request_key",
+        "wire": "400 bad_request_key"
+      }
+    },
+    {
+      "name": "order-sealed-before-commit-hash",
+      "why": "sealed absent and commitHash absent.",
+      "body": {
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E"
+      },
+      "row": {
+        "rPub": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "emailNorm": "alice@example.org"
+      },
+      "expect": {
+        "verdict": "bad_sealed",
+        "wire": "400 bad_sealed"
+      }
+    }
+  ],
+  "workedExample": [
+    {
+      "name": "recovery-2-item-8",
+      "why": "The Kotlin implementation's worked example (identity seed 32 x 0x11, UVK 32 x 0x22, recovery seed 32 x 0x33, request key from the seed 32 x 0x55, commit 32 x 0x66, requestId 16 x 0x44); every key pair is crypto_box_seed_keypair / crypto_sign_seed_keypair of its seed.",
+      "input": {
+        "identitySeedHex": "1111111111111111111111111111111111111111111111111111111111111111",
+        "uvkHex": "2222222222222222222222222222222222222222222222222222222222222222",
+        "recoverySeedHex": "3333333333333333333333333333333333333333333333333333333333333333",
+        "requestSeedHex": "5555555555555555555555555555555555555555555555555555555555555555",
+        "commitHex": "6666666666666666666666666666666666666666666666666666666666666666",
+        "userId": "1b4e28ba-2fa1-4d3b-8a5e-2c3f4d5e6a7b",
+        "address": "alice@example.org",
+        "issuedAt": 1794858966854,
+        "instanceId": "5d1f0c2e-7a3b-4c4d-9e5f-6a7b8c9d0e1f",
+        "requestId": "RERERERERERERERERERERA"
+      },
+      "expect": {
+        "identityPubB64": "ekbhKf2AUEdEhDfkdE8fFXa-jESf31fgxYDTbFz8Zmg",
+        "signerPubB64": "0EqyMnQrtKs6E2i9RhXk5tAiSrcaAWuvhSCjMsl3hzc",
+        "recoveryPubB64": "TrT6_uK9MBiiTjEN6BBjM8KzZOrtApp_Bde0XMx3aDo",
+        "recoveryFp": "e53ece86484df90e868dcdc64c900b5abafec1883c3928e2ede0c7477f5215d1",
+        "recoverySignerPubB64": "F8t5-ytBIPKx7GXkGY1uCLKOgT_rAeSkAIObheGAgM4",
+        "rPubB64": "dzDKJCo4DVYD39-i77M1eqZwAeqpUgnbDMFEwglwdHw",
+        "escrowStatementUtf8": "{\"v\":3,\"purpose\":\"escrow-uvk\",\"userId\":\"1b4e28ba-2fa1-4d3b-8a5e-2c3f4d5e6a7b\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"identityKey\":\"ekbhKf2AUEdEhDfkdE8fFXa-jESf31fgxYDTbFz8Zmg\",\"recoveryFp\":\"e53ece86484df90e868dcdc64c900b5abafec1883c3928e2ede0c7477f5215d1\",\"issuedAt\":1794858966854,\"key\":\"IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI\"}",
+        "escrowFrameHex": "6176730202d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c977873796ce2a424757a9ab28e123d218c6d2432f8c326cb5dd8e5ac5ff3871a6355cc34a25ecb97c82e4a0e82f76ad86625b986ac99b906a3cbf0e58b35b1f898ae3067b2276223a332c22707572706f7365223a22657363726f772d75766b222c22757365724964223a2231623465323862612d326661312d346433622d386135652d326333663464356536613762222c22656d61696c223a2259577870593256415a586868625842735a533576636d63222c226964656e746974794b6579223a22656b62684b663241554564456844666b644538664658612d6a455366333166677859445462467a385a6d67222c227265636f766572794670223a2265353365636538363438346466393065383638646364633634633930306235616261666563313838336333393238653265646530633734373766353231356431222c226973737565644174223a313739343835383936363835342c226b6579223a2249694969496949694969496949694969496949694969496949694969496949694969496949694969496949227d",
+        "escrowSealedBytes": 478,
+        "answerStatementUtf8": "{\"v\":3,\"purpose\":\"assisted-recovery\",\"instanceId\":\"5d1f0c2e-7a3b-4c4d-9e5f-6a7b8c9d0e1f\",\"userId\":\"1b4e28ba-2fa1-4d3b-8a5e-2c3f4d5e6a7b\",\"email\":\"YWxpY2VAZXhhbXBsZS5vcmc\",\"requestId\":\"RERERERERERERERERERERA\",\"requestKey\":\"dzDKJCo4DVYD39-i77M1eqZwAeqpUgnbDMFEwglwdHw\",\"commit\":\"ZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmY\",\"uvk\":\"IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI\",\"issuedAt\":1794858966854}",
+        "answerFrameHex": "617673020917cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce79188cec32d19bd17265397adc1ea7b1172770a7e485ffe099cf8f7ed88d2c41baddb8a2a2d47962a7ad6ed2dc1cd3e035ba825d40e2690229f11c869089ef0f7b2276223a332c22707572706f7365223a2261737369737465642d7265636f76657279222c22696e7374616e63654964223a2235643166306332652d376133622d346334642d396535662d366137623863396430653166222c22757365724964223a2231623465323862612d326661312d346433622d386135652d326333663464356536613762222c22656d61696c223a2259577870593256415a586868625842735a533576636d63222c22726571756573744964223a2252455245524552455245524552455245524552455241222c22726571756573744b6579223a22647a444b4a436f344456594433392d6937374d3165715a774165717055676e62444d464577676c77644877222c22636f6d6d6974223a225a6d5a6d5a6d5a6d5a6d5a6d5a6d5a6d5a6d5a6d5a6d5a6d5a6d5a6d5a6d5a6d5a6d5a6d5a6d5a6d5a6d59222c2275766b223a2249694969496949694969496949694969496949694969496949694969496949694969496949694969496949222c226973737565644174223a313739343835383936363835347d",
+        "answerSealedBytes": 548,
+        "commitHash": "c2d2e4d7f1afd2be2644f076a305a9365c4628a96dccc61bd8ad165e1f9cd593",
+        "tokenHead": "andvari-answer:3:RERERERERERERERERERERA:dzDKJCo4DVYD39-i77M1eqZwAeqpUgnbDMFEwglwdHw:c2d2e4d7f1afd2be2644f076a305a9365c4628a96dccc61bd8ad165e1f9cd593:"
+      }
+    }
+  ]
+}

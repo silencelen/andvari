@@ -1,3 +1,4 @@
+import { requireSigningKey } from "./keyfloor";
 import { CryptoError, sodium } from "./sodium";
 
 /**
@@ -164,6 +165,8 @@ export function signKeypairFromSeed(seed: Uint8Array): KeyPairBytes {
 export function signDetached(secretKey: Uint8Array, message: Uint8Array): Uint8Array {
   const s = sodium();
   if (secretKey.length !== s.crypto_sign_SECRETKEYBYTES) throw new CryptoError("sign secret key must be 64 bytes");
+  // Spec 01 rule 4: nothing is signed with a seed of zeros (signed frames and signed statements): KeysGoneError.
+  requireSigningKey(secretKey);
   return s.crypto_sign_detached(message, secretKey);
 }
 

@@ -297,6 +297,25 @@ class UnlockLadderTest {
 
     // ---- the password rung ----
 
+    /**
+     * Design §2.2, strict decoding, on the older account road: keys served at an online unlock in another form than the
+     * canonical one (the wrap with padding) are neither kept nor opened, and the unlock fails, never falling back to the
+     * cached keys. Before, the tolerant decoder opened them and they were kept for offline unlock.
+     */
+    @Test
+    fun keysServedNotInCanonicalFormAreNeitherKeptNorOpened() = runBlocking<Unit> {
+        store.origin(homeKey).accountKeys = cached
+        val wrap = served.wrappedUvk
+        assertTrue(wrap.length % 4 != 0, "a text whose length padding can change")
+        val padded = wrap + "=".repeat(4 - wrap.length % 4)
+        assertNull(io.silencelen.andvari.core.crypto.Bytes.fromB64Canonical(padded), "not canonical")
+        keysAnswer = ok(json.encodeToString(AccountKeys.serializer(), served.copy(wrappedUvk = padded)))
+        val r = assertIs<UnlockResult.Failed>(ladder.unlockWithPassword(stored, PASSWORD))
+        assertIs<io.silencelen.andvari.core.client.onboard.ServedKeysNotCanonical>(r.cause)
+        assertEquals(cached, store.origin(homeKey).accountKeys, "the kept keys are unchanged")
+        assertNull(session.get())
+    }
+
     @Test
     fun anOfflinePasswordUnlockOpensOnTheCachedKeysAndStampsTheWindow() = runBlocking<Unit> {
         store.origin(homeKey).accountKeys = cached

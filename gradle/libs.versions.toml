@@ -6,7 +6,7 @@ kotlinx-serialization = "1.7.3"
 kotlinx-datetime = "0.6.1"
 atomicfu = "0.33.0"
 lazysodium-java = "5.1.4"
-lazysodium-android = "5.1.0"
+lazysodium-android = "5.2.0"
 jna = "5.14.0"
 ktor = "3.0.3"
 sqlite-jdbc = "3.53.2.1"
@@ -25,6 +25,13 @@ androidx-fragment = "1.8.5"
 lifecycle = "2.8.7"
 compose-multiplatform = "1.7.3"
 androidx-autofill = "1.1.0"
+# The Android in-app QR scanner (onboarding and trust design §12.1 "three scanners, three jobs"): camera frames only,
+# decoded by zxing-core above. No ML Kit, no Google Play services. Approved by the owner on 2026-11-15.
+camerax = "1.4.2"
+# The Android module's screen images, drawn in its JVM unit tests (owner-approved 2026-11-16: "Paparazzi, tests only").
+# The Gradle plugin adds the library to testImplementation only, plus the layout renderer it runs with; nothing of it
+# reaches the app.
+paparazzi = "1.3.5"
 
 [libraries]
 kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
@@ -57,6 +64,7 @@ logback-classic = { group = "ch.qos.logback", name = "logback-classic", version.
 angus-mail = { group = "org.eclipse.angus", name = "angus-mail", version.ref = "angus-mail" }
 micrometer-prometheus = { group = "io.micrometer", name = "micrometer-registry-prometheus", version.ref = "micrometer" }
 zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxing" }
+jna-platform = { group = "net.java.dev.jna", name = "jna-platform", version.ref = "jna" }
 compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "compose-bom" }
 compose-ui = { group = "androidx.compose.ui", name = "ui" }
 compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
@@ -76,6 +84,10 @@ androidx-browser = { group = "androidx.browser", name = "browser", version = "1.
 # Explicit modern fragment overriding the 1.2.5 biometric drags in (see the version note above).
 androidx-fragment = { group = "androidx.fragment", name = "fragment", version.ref = "androidx-fragment" }
 androidx-autofill = { group = "androidx.autofill", name = "autofill", version.ref = "androidx-autofill" }
+androidx-camera-core = { group = "androidx.camera", name = "camera-core", version.ref = "camerax" }
+androidx-camera-camera2 = { group = "androidx.camera", name = "camera-camera2", version.ref = "camerax" }
+androidx-camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "camerax" }
+androidx-camera-view = { group = "androidx.camera", name = "camera-view", version.ref = "camerax" }
 
 [plugins]
 kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
@@ -87,3 +99,4 @@ kotlinAndroid = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlinCompose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 composeMultiplatform = { id = "org.jetbrains.compose", version.ref = "compose-multiplatform" }
 shadow = { id = "com.gradleup.shadow", version.ref = "shadow" }
+paparazzi = { id = "app.cash.paparazzi", version.ref = "paparazzi" }

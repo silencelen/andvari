@@ -1,3 +1,5 @@
+import { REUSED_MANY, REUSED_ONE } from "./copy.ts";
+
 /**
  * Signup reuse alert — the decision half (owner ask 2026-08-22).
  *
@@ -70,9 +72,7 @@ export function shouldAskReuse(i: ReuseAskInput): boolean {
  */
 export function reuseWarning(count: number, locked = false): string | null {
   if (locked || count <= 0) return null;
-  return count === 1
-    ? "The password you just typed on this page is already used for another login — a unique one is safer."
-    : `The password you just typed on this page is already used for ${count} other logins — a unique one is safer.`;
+  return count === 1 ? REUSED_ONE : REUSED_MANY.replace("{0}", String(count));
 }
 
 /** The field state a trusted keydown sees, read by our capture listener before the browser edits. */

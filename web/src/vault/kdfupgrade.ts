@@ -1,16 +1,23 @@
-import type { AccountKeys, PasswordChangeRequest } from "../api/types";
 import { KDF_MAX_MEM_BYTES, KDF_MAX_OPS, KDF_MIN_MEM_BYTES, KDF_MIN_OPS, type KdfParams } from "../crypto/keys";
-import { Account } from "./account";
 
 /**
- * F61 silent KDF upgrade (spec 01 §7, design 2026-07-10 §4) — the web + desktop mirror of the Android
- * post-unlock re-key (app-android KdfReKey + AndvariViewModel.runKdfUpgrade). After EVERY successful
- * full-master-password unlock WITH server connectivity, if the org policy raised the Argon2id cost,
- * transparently re-key with the SAME password (same UVK, new KDF params) — off the unlock path,
- * best-effort, NEVER blocking or failing the unlock. Only Android implemented it before this; web's
- * Settings changePassword was user-initiated only. NEVER on a quick-unlock/biometric or offline unlock
- * (web has neither), and never under a pending recovery-capture gate (enforced by the callers).
+ * F61's upgrade decision (spec 01 §7, "KDF upgrade"). The quiet re-key after a full-password unlock that reached the
+ * server is vault/rekey.ts ({@link quietReKey}), which re-keys through the web's one password change; a password change
+ * the person makes takes the policy's cost by the same decision (settingsflow.newPasswordCost).
  */
+
+/**
+ * The fence a re-key target must pass (spec 01 §7), also asked of a served wrap that is neither this browser's own nor a
+ * pending one before the password is tried against it: the one scheme this client knows, never below the floor, never
+ * above the ceiling, whole numbers only, and a memory cost that is a whole number of KiB.
+ */
+export function passesReKeyFence(p: KdfParams): boolean {
+  if (p.v !== 1 || p.alg !== "argon2id13") return false;
+  if (!Number.isInteger(p.ops) || !Number.isInteger(p.memBytes)) return false;
+  if (p.memBytes < KDF_MIN_MEM_BYTES || p.ops < KDF_MIN_OPS) return false;
+  if (p.memBytes > KDF_MAX_MEM_BYTES || p.ops > KDF_MAX_OPS) return false;
+  return p.memBytes % 1024 === 0;
+}
 
 /**
  * PURE upgrade-decision — a verbatim TS replica of core `KdfUpgrade.shouldUpgrade`
@@ -36,91 +43,11 @@ export function shouldUpgrade(account: KdfParams, policy: KdfParams): boolean {
   // weakening disguised as an upgrade (never-below-64-MiB), above the ceiling is cost-inflation DoS.
   if (policy.memBytes < KDF_MIN_MEM_BYTES || policy.ops < KDF_MIN_OPS) return false;
   if (policy.memBytes > KDF_MAX_MEM_BYTES || policy.ops > KDF_MAX_OPS) return false;
+  // Spec 01 §7: a memory cost that is not a whole number of KiB is never a target (argon2id counts memory in KiB; the
+  // shared code's re-key refuses it too).
+  if (policy.memBytes % 1024 !== 0) return false;
   // Upgrade-only: the policy must dominate the account on BOTH axes...
   if (policy.memBytes < account.memBytes || policy.ops < account.ops) return false;
   // ...and be strictly greater on at least one (else it is an equal-params no-op).
   return policy.memBytes > account.memBytes || policy.ops > account.ops;
-}
-
-/** The two collaborators {@link maybeKdfUpgrade} needs — narrowed (the recovery-capture.ts house
- *  pattern) so a test can drive the orchestration with plain mocks, not a full ApiClient/Account. */
-interface KdfUpgradeClient {
-  changePassword(req: PasswordChangeRequest): Promise<unknown>;
-}
-interface KdfUpgradeAccount {
-  /**
-   * A9 (M-1): the one fenced in-session derivation (KDF fence + the session's salt) for the CURRENT password's proof.
-   * Security review 2026-10 plugin scan F3 (A10): the proof OPENS the served `wrappedUvk` to this session's UVK, so the
-   * keys object must carry it — declared as a function PROPERTY with the real `Account.reauthAuthKey` parameter type,
-   * so TypeScript checks it contravariantly (a method signature is bivariant and hid the missing field, which made the
-   * call throw inside the catch-all and the upgrade silently never run).
-   */
-  reauthAuthKey: (password: string, keys: Pick<AccountKeys, "kdfSalt" | "kdfParams" | "wrappedUvk">) => Promise<string>;
-  buildPasswordChange: (
-    newPassword: string,
-    params: KdfParams,
-  ) => Promise<{ newKdfSalt: string; newKdfParams: KdfParams; newAuthKey: string; newWrappedUvk: string }>;
-}
-
-export interface KdfUpgradeInputs {
-  client: KdfUpgradeClient;
-  account: KdfUpgradeAccount;
-  /** The master password the caller just verified this unlock — re-derived under the new params. */
-  password: string;
-  /** The account's CURRENT server salt/params/wrap (the same accountKeys values this unlock used). The wrap is what
-   *  the reauth proof opens (F3): without it the proof cannot run and no re-key ever happens. */
-  currentKdfSalt: string;
-  currentKdfParams: KdfParams;
-  currentWrappedUvk: string;
-  /** The LIVE-fetched org policy's target params — never a stale/persisted value (App.loadPolicy). */
-  policyKdfParams: KdfParams;
-  /** A5: an admin recovery left a temporary password live — never silently re-key it (Android parity). */
-  mustChangePassword: boolean;
-  /**
-   * CR-07 (compliance 2026-07-15): after a successful silent re-key, the web durable offline cache
-   * still holds the PRE-upgrade wrappedUvk/kdfParams, so an offline unlock keeps accepting the old
-   * (cheaper-to-crack) wrap until the next ONLINE unlock — the spec 05 T3 stale-wrap window this
-   * upgrade exists to close (WC-13 §E.4 wipe table: "password change → cached accountKeys REPLACED";
-   * F61 design §4 step 3 mandates the post-re-key persist). The caller passes a hook that re-caches
-   * the post-change accountKeys (session.refreshCachedAccountKeys), mirroring the user-initiated
-   * Settings change (Settings.tsx). Invoked ONLY after changePassword resolves; best-effort like the
-   * rest of this driver — a re-cache failure is swallowed. Optional so the pure unit tests may omit it.
-   */
-  onUpgraded?: () => void | Promise<void>;
-}
-
-/**
- * Best-effort silent re-key (design §4). Gate on {@link shouldUpgrade}; if it fires, re-derive the
- * SAME password under the policy's params and PUT /account/password with the fresh derivation (new
- * salt / authKey / re-wrapped UVK — the UVK itself is INVARIANT across a KDF upgrade, so the vault
- * keys, identity seed and escrow all stay valid). ZK-preserving: only the derived authKey and the
- * re-wrapped UVK cross the wire, via the EXISTING changePassword. ANY failure is swallowed — the
- * unlock already succeeded and the check re-runs at the next online full-password unlock. The gate
- * runs BEFORE any argon2id, so a no-op unlock (the common case) pays nothing. Callers run this
- * DETACHED (never awaited on the unlock path) and only when the unlock reached the server and did NOT
- * route to the recovery-capture gate (a verifier rotation would strand that gate's reauth proof).
- */
-export async function maybeKdfUpgrade(inputs: KdfUpgradeInputs): Promise<void> {
-  if (inputs.mustChangePassword) return;
-  if (!shouldUpgrade(inputs.currentKdfParams, inputs.policyKdfParams)) return;
-  try {
-    // currentAuthKey proves the caller knows the present password (the server re-verifies it, exactly
-    // like a user-initiated change) — derived from the CURRENT salt/params the login already used.
-    // A9 (M-1): through the one fenced in-session derivation (the unlock KDF fence, and only the salt this session
-    // unlocked with); a stale session derives nothing and the re-key simply waits for the next unlock.
-    const currentAuthKey = await inputs.account.reauthAuthKey(inputs.password, {
-      kdfSalt: inputs.currentKdfSalt,
-      kdfParams: inputs.currentKdfParams,
-      wrappedUvk: inputs.currentWrappedUvk,
-    });
-    const change = await inputs.account.buildPasswordChange(inputs.password, inputs.policyKdfParams);
-    await inputs.client.changePassword({ currentAuthKey, ...change });
-    // CR-07: replace the cached accountKeys with the post-upgrade wrappedUvk/params so an offline
-    // unlock uses the NEW (stronger) wrap — the whole point of the re-key. Best-effort (swallowed
-    // by the catch below); runs only after the server-side change committed.
-    await inputs.onUpgraded?.();
-  } catch {
-    // Best-effort by design: a transient failure (offline, 5xx, a concurrent change) just leaves the
-    // account on the old params; the next online full-password unlock re-attempts.
-  }
 }

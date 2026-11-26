@@ -31,8 +31,10 @@ import {
   settledOutcome,
   stepDeletionWatch,
 } from "./account-delete";
-import { DeleteAccountBody, deleteFormReady, DeletionOutcomeUnknownCard, type DeleteAccountView } from "./DeleteAccount";
+import { DeleteAccountBody, deleteFormReady, DeletionOutcomeUnknownCard, type DeleteAccountView, recentlyDeletedOf } from "./DeleteAccount";
+import { DELETE_ALREADY_DELETED, DELETE_ALREADY_DELETED_UNNAMED, fill, SERVER_REFUSED_PROOF, SIGNIN_BACKOFF } from "./copy";
 import { UNREACHABLE } from "./errors";
+import { fmtDay } from "./format";
 
 /**
  * Settings → Delete account (spec 03 §13; design 2026-11-10 §11): the flow's pure half — the typed-address check, the
@@ -86,10 +88,7 @@ describe("blockerLines — one sentence per blocker, with where to resolve it", 
     expect(line!.text).toContain("1 other person has an account on it.");
     expect(line!.text).toContain("andvari can't make an existing account an admin — an account is an admin only if it was invited as one.");
     expect(line!.text).toContain("Invite a new admin first (Administration → Users → Invite a user, with “Admin” ticked, for an address that has no account yet)");
-    // There is no promote route (spec 03 §11), so neither surface may point at a "make admin" control that does not exist.
-    const admin = readFileSync(fileURLToPath(new URL("./Admin.tsx", import.meta.url)), "utf8");
-    expect(admin).toContain("andvari can't make an existing account an admin: invite a new admin first");
-    for (const text of [line!.text, admin]) expect(text).not.toMatch(/make (another|one of them|someone|a member) (account )?an admin/i);
+    expect(line!.text).not.toMatch(/make (another|one of them|someone|a member) (account )?an admin/i);
   });
 
   it("an unknown kind is a blocker it cannot explain — listed, never dropped, in the server's order", () => {
@@ -127,6 +126,36 @@ describe("deletionSummary — what goes for good, and what the member leaves", (
   it("says nothing about leaving when there is nothing to leave", () => {
     expect(deletionSummary(preview({ leftVaults: [] }), vaultName, V_PERSONAL).leaves).toEqual([]);
   });
+
+  it("spec 03 §13 (2026-11-16): a vault already deleted and still restorable is named from the deleted list, not counted as only-you-hold, and said apart", () => {
+    const OLD = "12121212-1212-4212-8212-121212121212";
+    const DIM = "13131313-1313-4313-8313-131313131313";
+    const LOST = "14141414-1414-4414-8414-141414141414";
+    const purgeAt = Date.UTC(2026, 10, 23, 12);
+    const p = preview({ deletedVaults: [V_PERSONAL, V_TRIPS, OLD, DIM, LOST] });
+    // Before: the two deleted vaults (no longer in the live list) were counted with the unknown one.
+    expect(deletionSummary(p, vaultName, V_PERSONAL).deletes[1]).toContain("3 other vaults only you hold");
+    const s = deletionSummary(p, vaultName, V_PERSONAL, [
+      { vaultId: OLD, name: "Old stuff", purgeAt },
+      { vaultId: DIM, name: null, purgeAt },
+      { vaultId: "abababab-abab-4bab-8bab-abababababab", name: "Not in this preview", purgeAt },
+    ]);
+    expect(s.deletes[1]).toBe("Your Personal vault, the vault only you use, “Trips” and 1 other vault only you hold — every item, attachment and earlier version in them.");
+    expect(s.deletes[2]).toBe(fill(DELETE_ALREADY_DELETED, "Old stuff", fmtDay(purgeAt)));
+    expect(s.deletes[3]).toBe(fill(DELETE_ALREADY_DELETED_UNNAMED, fmtDay(purgeAt)));
+    expect(s.deletes.join(" ")).not.toContain("Not in this preview");
+    expect(s.deletes[2]).toContain("goes for good with your account now");
+  });
+
+  it("the card reads the deleted list beside the preview; a list that cannot be read changes nothing", async () => {
+    expect(await recentlyDeletedOf({})).toEqual([]);
+    expect(await recentlyDeletedOf({ listDeleted: async () => { throw new TypeError("fetch failed"); } })).toEqual([]);
+    const listed = await recentlyDeletedOf({ listDeleted: async () => [{ vaultId: "v1", name: "Old", deletedAt: 1, purgeAt: 2, deleteId: "d" }, { vaultId: "v2", name: "(vault)", deletedAt: 1, purgeAt: 3, deleteId: "d" }] });
+    expect(listed).toEqual([{ vaultId: "v1", name: "Old", purgeAt: 2 }, { vaultId: "v2", name: null, purgeAt: 3 }]);
+    const src = readFileSync(fileURLToPath(new URL("./DeleteAccount.tsx", import.meta.url)), "utf8");
+    expect(src).toContain("deletionSummary(preview, vaultName, account.personalVaultId || null, recentlyDeleted)");
+    expect(src).toMatch(/Promise\.all\(\[settings \? settings\.wire\.deletePreview\(\)\.then\(previewOfV2\) : client\.accountDeletePreview\(\), recentlyDeletedOf\(store\)\]\)/);
+  });
 });
 
 describe("deleteErrorText — one sentence per refusal, none of them claiming a deletion", () => {
@@ -134,14 +163,15 @@ describe("deleteErrorText — one sentence per refusal, none of them claiming a 
 
   it("maps every refusal the route answers", () => {
     expect(deleteErrorText(new ReauthFailedError())).toBe("That master password isn't right.");
-    expect(deleteErrorText(api(403, "reauth_failed"))).toBe("That master password isn't right.");
+    // The server's refusal of a proof made here is never a wrong password (spec 01 §7).
+    expect(deleteErrorText(api(403, "reauth_failed"))).toBe(SERVER_REFUSED_PROOF);
     expect(deleteErrorText(new ReauthStaleSessionError())).toBe("Lock and unlock andvari, then try again.");
     expect(deleteErrorText(api(400, "totp_code_required"))).toBe("Enter the code from your authenticator app.");
     expect(deleteErrorText(api(400, "bad_totp_code"))).toContain("wrong or was already used");
     expect(deleteErrorText(api(400, "confirm_email_mismatch"))).toBe("That isn't this account's email address.");
     expect(deleteErrorText(api(403, "account_delete_public_disabled"))).toContain("emergency address");
     expect(deleteErrorText(api(401, "credential_changed"))).toContain("nothing was deleted");
-    expect(deleteErrorText(api(429, "rate_limited"))).toContain("Too many attempts");
+    expect(deleteErrorText(api(429, "rate_limited"))).toBe(SIGNIN_BACKOFF); // the sign-in back-off's own sentence (server 2026-11-16)
     expect(deleteErrorText(api(401, "invalid_credentials"))).toContain("nothing was deleted");
     expect(deleteErrorText(new TypeError("Failed to fetch"))).toBe(UNREACHABLE);
     expect(deleteErrorText(api(500, "internal"))).toBe("Something went wrong and your account was not deleted — try again.");
@@ -149,24 +179,21 @@ describe("deleteErrorText — one sentence per refusal, none of them claiming a 
 });
 
 describe("runAccountDeletion — the submit", () => {
-  const keys = { kdfSalt: "s", kdfParams: { v: 1, alg: "argon2id13", ops: 3, memBytes: 67_108_864 }, wrappedUvk: "w" };
-
-  function fakes(opts: { reauth?: () => Promise<string>; del?: () => Promise<{ deletedAt: number }>; keys?: () => Promise<unknown> } = {}) {
+  function fakes(opts: { reauth?: () => Promise<string>; del?: () => Promise<{ deletedAt: number }> } = {}) {
     const order: string[] = [];
     const client = {
-      accountKeys: vi.fn(async () => { order.push("keys"); return (opts.keys ? await opts.keys() : keys) as never; }),
       deleteAccount: vi.fn(async (req: unknown) => { order.push("delete"); void req; return opts.del ? opts.del() : { deletedAt: 7 }; }),
     };
     const account = { reauthAuthKey: vi.fn(async () => { order.push("reauth"); return opts.reauth ? opts.reauth() : "AUTHKEY"; }) };
     return { client, account, order };
   }
 
-  it("proves the password locally first, then sends one request with the typed address and the code's digits", async () => {
+  it("proves the password locally first (nothing fetched: spec 01 §7), then sends one request with the typed address and the code's digits", async () => {
     const f = fakes();
     const out = await runAccountDeletion(f.client, f.account, { email: "  me@x.com ", password: "pw", totp: "123 456", totpRequired: true });
     expect(out).toEqual({ kind: "deleted", deletedAt: 7 });
-    expect(f.order).toEqual(["keys", "reauth", "delete"]);
-    expect(f.account.reauthAuthKey).toHaveBeenCalledWith("pw", keys);
+    expect(f.order).toEqual(["reauth", "delete"]);
+    expect(f.account.reauthAuthKey).toHaveBeenCalledWith("pw");
     expect(f.client.deleteAccount).toHaveBeenCalledWith({ confirmEmail: "me@x.com", currentAuthKey: "AUTHKEY", totp: "123456" });
   });
 
@@ -192,8 +219,8 @@ describe("runAccountDeletion — the submit", () => {
   it("a lost answer to the deletion itself is UNKNOWN — but a failure before it was sent is an ordinary error", async () => {
     const lost = fakes({ del: async () => { throw new TypeError("Failed to fetch"); } });
     expect(await runAccountDeletion(lost.client, lost.account, { email: "me@x.com", password: "pw", totp: "", totpRequired: false })).toEqual({ kind: "unknown" });
-    const early = fakes({ keys: async () => { throw new TypeError("Failed to fetch"); } });
-    expect(await runAccountDeletion(early.client, early.account, { email: "me@x.com", password: "pw", totp: "", totpRequired: false })).toEqual({ kind: "error", message: UNREACHABLE, unanswered: true });
+    const early = fakes({ reauth: async () => { throw new ReauthStaleSessionError(); } });
+    expect(await runAccountDeletion(early.client, early.account, { email: "me@x.com", password: "pw", totp: "", totpRequired: false })).toEqual({ kind: "error", message: new ReauthStaleSessionError().message });
     expect(early.client.deleteAccount).not.toHaveBeenCalled();
   });
 
@@ -202,22 +229,19 @@ describe("runAccountDeletion — the submit", () => {
     expect(await runAccountDeletion(proxy.client, proxy.account, { email: "me@x.com", password: "pw", totp: "", totpRequired: false })).toEqual({ kind: "unknown" });
   });
 
-  it("a 401 — on the request, or on the keys fetch before it — is session_gone, not an error sentence", async () => {
+  it("a 401 on the request is session_gone, not an error sentence", async () => {
     const onDelete = fakes({ del: async () => { throw new ApiError(401, "invalid_credentials", "authentication failed"); } });
     expect(await runAccountDeletion(onDelete.client, onDelete.account, { email: "me@x.com", password: "pw", totp: "", totpRequired: false })).toEqual({ kind: "session_gone" });
-    const onKeys = fakes({ keys: async () => { throw new ApiError(401, "invalid_credentials", "authentication failed"); } });
-    expect(await runAccountDeletion(onKeys.client, onKeys.account, { email: "me@x.com", password: "pw", totp: "", totpRequired: false })).toEqual({ kind: "session_gone" });
-    expect(onKeys.client.deleteAccount).not.toHaveBeenCalled();
   });
 
   it("onSend fires just before the request, and never when the password is refused locally", async () => {
     const sent: string[] = [];
     const ok = fakes();
     await runAccountDeletion(ok.client, ok.account, { email: "me@x.com", password: "pw", totp: "", totpRequired: false }, () => sent.push(ok.order.join(",")));
-    expect(sent).toEqual(["keys,reauth"]);
+    expect(sent).toEqual(["reauth"]);
     const wrong = fakes({ reauth: async () => { throw new ReauthFailedError(); } });
     await runAccountDeletion(wrong.client, wrong.account, { email: "me@x.com", password: "no", totp: "", totpRequired: false }, () => sent.push("sent"));
-    expect(sent).toEqual(["keys,reauth"]);
+    expect(sent).toEqual(["reauth"]);
   });
 
   it("a server refusal carries its code, so the card can tell 'a code is needed' from any other refusal", async () => {
@@ -556,7 +580,7 @@ describe("wiring", () => {
     const start = app.indexOf("const onAccountDeleted = useCallback(");
     expect(start, "App.onAccountDeleted moved — update the pin").toBeGreaterThan(-1);
     const body = app.slice(start, app.indexOf("}, []);", start));
-    expect(body).toContain("wipeLocalAccountState(userId, email)");
+    expect(body).toContain('wipeLocalAccountState(userId, email, end === "confirmed" ? "confirmed" : "unconfirmed")');
     expect(body).toContain("setTokens(null)");
     expect(body).toContain("clearBreachCache()");
     expect(body).toContain('notice: end === "confirmed" ? ACCOUNT_DELETED_NOTICE : ACCOUNT_FORGOTTEN_NOTICE');

@@ -50,36 +50,74 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import io.silencelen.andvari.app.AndvariTheme
 import io.silencelen.andvari.app.BrandSigil
-import io.silencelen.andvari.app.Session
-import io.silencelen.andvari.app.SessionStore
 import io.silencelen.andvari.app.SigilMark
-import io.silencelen.andvari.app.VaultSession
-import io.silencelen.andvari.core.client.ApiException
-import io.silencelen.andvari.core.client.HouseholdCopy
-import kotlinx.coroutines.Dispatchers
+import io.silencelen.andvari.app.trust.TrustModel
+import io.silencelen.andvari.app.trust.TrustSeam
+import io.silencelen.andvari.app.trust.UiText
+import io.silencelen.andvari.app.trust.quickUnlockWords
+import io.silencelen.andvari.core.app.AppApi
+import io.silencelen.andvari.core.app.AppPhase
+import io.silencelen.andvari.core.app.FastUnlock
+import io.silencelen.andvari.core.app.LockedScreen
+import io.silencelen.andvari.core.app.QuickUnlockResult
+import io.silencelen.andvari.core.app.UnlockForFilling
+import io.silencelen.andvari.core.app.VaultUnlockResult
+import io.silencelen.andvari.core.app.content.VaultContent
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.io.IOException
+import kotlinx.coroutines.withTimeoutOrNull
+
+/**
+ * The overlay's unlock with the master password: the shared code's unlock for filling ([UnlockForFilling]), since this
+ * window cannot show a recovery kit. For an account whose kit was never confirmed it opens the vault for filling and
+ * makes no kit (nothing is sent about one); the kit is left to andvari's own next opening
+ * ([io.silencelen.andvari.core.app.AccountSnapshot.kitDueAtOpening], [io.silencelen.andvari.app.trust.TrustModel.openedAsTheApp]).
+ * It is also fast: the quiet raise of the account's password-hashing cost is put off to the next full unlock in the
+ * app. Where the app interface has no such unlock, [FastUnlock] or the plain unlock.
+ */
+internal suspend fun overlayUnlock(api: AppApi, locked: LockedScreen, password: String): VaultUnlockResult =
+    (api as? UnlockForFilling)?.unlockForFilling(locked, password)
+        ?: (api as? FastUnlock)?.unlockPuttingOffReKey(locked, password)
+        ?: api.unlock(locked, password)
+
+/**
+ * What the unlock window says when an unlock threw: the lock as the lock, anything else as a fault
+ * the app contained, in the general line: nothing is open while an unlock fails, so the vault's line ("your other vaults
+ * and the rest of andvari still work") would claim what nobody knows. Never the exception's class or message: either
+ * can say what it was working on.
+ *
+ * "The keys are gone" here is not a lock the person could undo by unlocking: the shared code answers a lock or an end
+ * that came during the unlock with STALE ([io.silencelen.andvari.core.app.VaultUnlockResult.STALE]), and the throw
+ * reaches this window only when the keys the unlock had just opened went before it finished, which the session's end by
+ * its server does too ([io.silencelen.andvari.core.client.AccountWipedException]). So [now], the snapshot after the
+ * throw, decides: the lock screen of a session the server ended, or no lock screen at all, is that end; otherwise the
+ * unlock did not finish and can be tried again. Never "do it again once you've unlocked": the thing to do again was the
+ * unlock.
+ */
+internal fun unlockFaultWords(t: Throwable, now: io.silencelen.andvari.core.app.AppSnapshot): UiText = when {
+    !io.silencelen.andvari.app.Overtaken.isLock(t) -> UiText.ph(io.silencelen.andvari.app.trust.Placeholder.WENT_WRONG)
+    now.phase == io.silencelen.andvari.core.app.AppPhase.ENTRY || now.locked?.signedOutByServer == true ->
+        UiText.ph(io.silencelen.andvari.app.trust.Placeholder.SESSION_ENDED_OVERTOOK)
+    else -> UiText.ph(io.silencelen.andvari.app.trust.Placeholder.UNLOCK_NOT_FINISHED)
+}
 
 /**
  * Translucent activity for the LOCKED autofill path. The platform launches it from the
  * service's `setAuthentication` PendingIntent (adding, on API 30+, the inline request). It prompts
- * for the master password, unlocks the vault into [VaultSession], builds datasets for the form the
- * SERVICE parsed and baked into that PendingIntent ([FillBinding]), and returns them via
- * EXTRA_AUTHENTICATION_RESULT.
+ * for the master password (or offers quick unlock), unlocks the app's OWN session on the new code
+ * ([TrustSeam]'s app API: `unlock` / `quickUnlock`), builds datasets from the vault content's working
+ * set ([ContentFill]) for the form the SERVICE parsed and baked into that PendingIntent
+ * ([FillBinding]), and returns them via EXTRA_AUTHENTICATION_RESULT.
  *
  * Security review 2026-10 (root cause G): the launch also carries an EXTRA_ASSIST_STRUCTURE, but it
  * arrives through the HOST app's process, which can replace it with one claiming to be a trusted
  * browser on any domain. It is never parsed here — only cross-checked against the baked package, and
  * a disagreement refuses the fill.
  *
- * Single token-holder invariant (binding blocker): the api is built EXACTLY like
- * AndvariViewModel.newApi — with an HttpClient engine AND the SessionStore.updateTokens
- * persistence callback — and bound into VaultSession so the main app reuses the SAME
- * token-holder. Building a token-carrying api without the onTokens callback would rotate
- * the refresh token in memory only; the next main-app unlock would reuse the consumed token
- * and revoke the whole device. If a session is already bound (a race), we reuse it and never
- * mint a second token-holder.
+ * Single token-holder invariant (binding blocker): this activity opens no session of its own. It
+ * unlocks the ONE process-wide app API the main app uses, so the session it opens is the app's, and
+ * the main app finds it open; there is never a second token-holder. The session stays open for the
+ * policy's idle window only ([ContentFillSession.HardLock]), as it did on the old code.
  */
 class AutofillUnlockActivity : FragmentActivity() {
 
@@ -92,11 +130,17 @@ class AutofillUnlockActivity : FragmentActivity() {
     /** Per-launch diagnostic trace (see AutofillDebugLog) — terminal events only, no values. */
     private val trace = AutofillDebugLog.FillTrace(origin = "unlock")
 
+    private val model: TrustModel by lazy { TrustSeam.model(applicationContext) }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // This overlay takes the master password — keep it out of screen recordings/casts
         // (it is already excludeFromRecents, so no thumbnail concern).
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
+        // Other apps' overlays are hidden while the unlock card is shown (API 31+).
+        if (Build.VERSION.SDK_INT >= 31) window.setHideOverlayWindows(true)
+        // Touches through another window are dropped here too ([FillWindow]); the window is opaque.
+        window.decorView.filterTouchesWhenObscured = true
         // Default result is CANCELED (back / dismiss returns cleanly with no fill).
         setResult(RESULT_CANCELED)
 
@@ -114,30 +158,44 @@ class AutofillUnlockActivity : FragmentActivity() {
             finish(); return
         }
         val inlineRequest = intent.inlineRequest()
+        // Quick unlock's prompt is shown over this activity (the main activity attaches itself the same way).
+        TrustSeam.keyWrap(applicationContext).attach(this)
 
-        // Cold-process safety: arm the auto-lock gate with the persisted policy window
-        // before consulting it (this activity never fetches policy itself).
-        VaultSession.setAutoLockSeconds(SessionStore(applicationContext).autoLockSeconds)
-
-        // Fast path: already unlocked in this process (e.g. the main app unlocked first) —
-        // reuse it, build datasets immediately, no password prompt, no second token-holder.
-        // getIfFresh enforces the inactivity window (spec 01 §8): an idle-expired vault is
-        // locked and falls through to the master-password prompt below.
-        VaultSession.getIfFresh()?.let { unlocked ->
-            // F12: (re)arm the autofill-process hard-lock — this serve may be the last thing
-            // that ever looks at the session in this process (no-op when auto-lock is off).
-            AutofillHardLock.arm()
-            // Any throwable building the response must degrade to CANCELED, never crash the
-            // host app's fill flow (an uncaught throw in this callback path kills the process).
-            finishAfterUnlock(runCatching {
-                DatasetBuilder.responseForUnlocked(this, form, unlocked.engine.items(), inlineRequest, trace)
-            }.onFailure { recordException(it) }.getOrNull())
-            return
+        // A cold process started for this fill reads its stored state first (STARTING); wait for it, bounded.
+        lifecycleScope.launch {
+            withTimeoutOrNull(STARTING_WAIT_MS) { model.api.snapshots.first { it.phase != AppPhase.STARTING } }
+            begin(form, inlineRequest)
         }
+    }
 
-        val store = SessionStore(applicationContext)
-        val session = store.load()
-        if (session == null || session.accessToken.isEmpty()) { // signed out
+    override fun onDestroy() {
+        runCatching { TrustSeam.keyWrap(applicationContext).detach(this) }
+        super.onDestroy()
+    }
+
+    private val obscuredTold = BooleanArray(1)
+
+    /** On Android 10 and 11 a touch while the window is partly covered is dropped ([FillWindow]). */
+    override fun dispatchTouchEvent(ev: android.view.MotionEvent): Boolean = FillWindow.dispatch(this, ev, obscuredTold) { super.dispatchTouchEvent(it) }
+
+    private fun begin(form: ParsedForm, inlineRequest: InlineSuggestionsRequest?) {
+        // Fast path: already unlocked in this process (e.g. the main app unlocked first) — no prompt.
+        // The access is read after the idle lock (spec 01 §8): an idle-expired vault was locked
+        // there and falls through to the master-password prompt below.
+        when (val access = ContentFillSession.access(applicationContext)) {
+            is ContentFillSession.Access.Open -> {
+                ContentFillSession.HardLock.arm(applicationContext)
+                finishFromContent(access.content, form, inlineRequest)
+                return
+            }
+            ContentFillSession.Access.SignedOut -> {
+                trace.finish(applicationContext, AutofillDebugLog.FillReason.SIGNED_OUT)
+                finish(); return
+            }
+            ContentFillSession.Access.Locked -> Unit
+        }
+        val locked = model.api.snapshot.locked
+        if (locked == null) { // still starting after the wait, or signed out meanwhile
             trace.finish(applicationContext, AutofillDebugLog.FillReason.SIGNED_OUT)
             finish(); return
         }
@@ -146,20 +204,15 @@ class AutofillUnlockActivity : FragmentActivity() {
         // Android 15 edge-to-edge) — insets must be dispatched and consumed in Compose instead,
         // or the IME simply covers the centered card and Unlock stays unreachable.
         androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
-        // §7.1: computed ONCE, before the composition, off the same gates the auto-prompt below
-        // uses — so the hint appears exactly when a fingerprint was possible and simply is not
-        // set up, and never when the org forbids it or the hardware cannot do it. Gap 6: they are
-        // the gates the shared ladder itself enforces (§4.2: in the CURRENT origin's namespace).
-        val quick = AutofillUnlock.quickStatus(applicationContext, store, session.userId)
-        val couldUseBiometrics = quick.eligible && !quick.enrolled
         setContent {
             AndvariTheme {
                 UnlockCard(
-                    email = session.email,
+                    email = locked.prompt.email.orEmpty(),
                     busy = busy,
                     error = errorText,
-                    offerBiometricHint = couldUseBiometrics,
-                    onUnlock = { pw -> unlockAndFinish(store, session, pw, form, inlineRequest) },
+                    offerBiometricHint = false,
+                    notice = fillUnlockNoticeText(locked),
+                    onUnlock = { pw -> unlockAndFinish(locked, pw, form, inlineRequest) },
                     onCancel = { finish() },
                 )
             }
@@ -169,54 +222,30 @@ class AutofillUnlockActivity : FragmentActivity() {
         window.decorView.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO_EXCLUDE_DESCENDANTS
 
         // Quick unlock (spec 01 §8 / design §3): over the still-rendered password card, auto-show
-        // the BiometricPrompt when eligible + enrolled + within the 30-day window. Any
-        // failure/cancel leaves the password card in place (never neither, design §5).
-        if (quick.usable) {
-            tryBiometricUnlock(store, session, form, inlineRequest)
-        }
+        // the prompt when the lock screen offers it. Any failure/cancel leaves the password card in
+        // place (never neither, design §5).
+        if (locked.quickUnlock) tryQuickUnlock(locked, form, inlineRequest)
     }
 
-    /** The shared ladder recovers the UVK behind a BiometricPrompt, then unlocks via the UVK path; this
-     *  finishes exactly like the password path. Never crashes the fill callback (runCatching rails). */
-    private fun tryBiometricUnlock(
-        store: SessionStore,
-        session: Session,
-        form: ParsedForm,
-        inlineRequest: InlineSuggestionsRequest?,
-    ) {
+    /** The app's quick unlock, over the password card; a refusal says why in the API's words, a cancel says nothing. */
+    private fun tryQuickUnlock(locked: LockedScreen, form: ParsedForm, inlineRequest: InlineSuggestionsRequest?) {
         if (busy) return
         lifecycleScope.launch {
-            val result = runCatching {
-                withContext(Dispatchers.IO) {
-                    // §4.2: the prompt, the recover and any wipe stay inside the CURRENT origin's namespace.
-                    AutofillUnlock.unlockWithQuick(this@AutofillUnlockActivity, store, session) {
-                        runOnUiThread { busy = true; errorText = null } // the prompt released the key
-                    }
-                }
+            val r = runCatching { model.api.quickUnlock(locked) }.getOrElse { t ->
+                recordException(t)
+                errorText = unlockFaultWords(t, model.api.snapshot).shown()
+                return@launch
             }
-            result.onSuccess { quick ->
-                when (quick) {
-                    is AutofillUnlock.Quick.Unlocked -> finishAfterUnlock(runCatching {
-                        DatasetBuilder.responseForUnlocked(
-                            this@AutofillUnlockActivity, form, quick.unlocked.engine.items(), inlineRequest, trace,
-                        )
-                    }.onFailure { recordException(it) }.getOrNull())
-                    // Card is already on screen; surface the mapped reason (wipe-class events already
-                    // deleted the enrollment).
-                    is AutofillUnlock.Quick.Stay -> quick.message?.let { errorText = it }
-                }
-            }.onFailure { t ->
-                busy = false
-                // design §5: the ladder already wiped a stale/foreign UVK's enrollment; an identityPub
-                // MISMATCH is a hard fault that keeps it (evidence). Either way the banner says why.
-                errorText = friendly(t)
+            if (r == QuickUnlockResult.DONE) {
+                unlocked(form, inlineRequest)
+            } else {
+                quickUnlockWords(r, model.api.retryAfterSeconds())?.let { errorText = it.shown() }
             }
         }
     }
 
     private fun unlockAndFinish(
-        store: SessionStore,
-        session: Session,
+        locked: LockedScreen,
         password: String,
         form: ParsedForm,
         inlineRequest: InlineSuggestionsRequest?,
@@ -225,22 +254,54 @@ class AutofillUnlockActivity : FragmentActivity() {
         busy = true
         errorText = null
         lifecycleScope.launch {
-            val result = runCatching {
-                withContext(Dispatchers.IO) { AutofillUnlock.unlock(this@AutofillUnlockActivity, store, session, password) }
-            }
-            result.onSuccess { unlocked ->
-                // Rebuild datasets exactly as the service would, from the durable cache.
-                // Any throwable here degrades to CANCELED rather than crashing the host app.
-                finishAfterUnlock(runCatching {
-                    DatasetBuilder.responseForUnlocked(
-                        this@AutofillUnlockActivity, form, unlocked.engine.items(), inlineRequest, trace,
-                    )
-                }.onFailure { recordException(it) }.getOrNull())
-            }.onFailure { t ->
+            val r = runCatching { overlayUnlock(model.api, locked, password) }.getOrElse { t ->
+                recordException(t)
                 busy = false
-                errorText = friendly(t)
+                errorText = unlockFaultWords(t, model.api.snapshot).shown()
+                return@launch
+            }
+            if (r == VaultUnlockResult.DONE) {
+                unlocked(form, inlineRequest)
+            } else {
+                busy = false
+                // The API's own sentence for what it answered (a wrong password, a blocked server, ...).
+                errorText = (UiText.forResult(r, model.api.retryAfterSeconds()) ?: UiText.ph(io.silencelen.andvari.app.trust.Placeholder.REFUSAL)).shown()
             }
         }
+    }
+
+    /** The session is open: the person just acted, the idle window starts now, and the hard lock is armed for it. */
+    private suspend fun unlocked(form: ParsedForm, inlineRequest: InlineSuggestionsRequest?) {
+        busy = true
+        model.touched()
+        // This window opened the vault, so its own close (and the chooser's or a confirm's after it)
+        // is not the person leaving andvari: the vault holds for the idle window. The fast path never says so.
+        io.silencelen.andvari.app.InProcessOverlays.noteVaultOpenedByFillWindow()
+        ContentFillSession.HardLock.arm(applicationContext)
+        val access = ContentFillSession.access(applicationContext)
+        if (access !is ContentFillSession.Access.Open) {
+            // DONE but no open vault to fill from (the unlock for filling opens one even where the kit was never
+            // confirmed; this stays for an app interface without it): nothing is offered.
+            trace.finish(applicationContext, AutofillDebugLog.FillReason.SIGNED_OUT)
+            finishWithResponse(null)
+            return
+        }
+        // The first sync after the unlock, bounded, so the fill offers the vault and not an empty list.
+        ContentFillSession.ready(access.content)
+        finishFromContent(access.content, form, inlineRequest)
+    }
+
+    private fun finishFromContent(content: VaultContent, form: ParsedForm, inlineRequest: InlineSuggestionsRequest?) {
+        // Any throwable building the response must degrade to CANCELED, never crash the
+        // host app's fill flow (an uncaught throw in this callback path kills the process).
+        finishAfterUnlock(runCatching {
+            val trusted = TrustedBrowsers.isTrusted(this, form.appPackage)
+            if (!form.fillable) {
+                null
+            } else {
+                DatasetBuilder.responseForUnlocked(this, form, ContentFill.offersFor(content, form, trusted), inlineRequest, trace) { id -> ContentFill.release(content, id) }
+            }
+        }.onFailure { recordException(it) }.getOrNull())
     }
 
     /** Terminal EXCEPTION event for a throw while (re)building datasets; trace records
@@ -290,16 +351,6 @@ class AutofillUnlockActivity : FragmentActivity() {
         finish()
     }
 
-    /** #23: this overlay pre-maps its two lane-specific contexts — it renders inside ANOTHER
-     *  app (so a dead session must say "open andvari"), and [AutofillUnlock.unlock] only
-     *  throws IO when there are NO cached keys — then delegates everything else to the shared
-     *  household canon. Never the exception's raw message (the old `t.message ?: …`). */
-    private fun friendly(t: Throwable): String = when {
-        t is ApiException && t.status == 401 -> HouseholdCopy.SESSION_EXPIRED_AUTOFILL
-        t is IOException -> HouseholdCopy.UNLOCK_OFFLINE_NO_KEYS
-        else -> HouseholdCopy.forUnlockError(t)
-    }
-
     @Suppress("DEPRECATION")
     private fun Intent.inlineRequest(): InlineSuggestionsRequest? {
         if (Build.VERSION.SDK_INT < 30) return null
@@ -309,10 +360,40 @@ class AutofillUnlockActivity : FragmentActivity() {
             getParcelableExtra(AutofillManager.EXTRA_INLINE_SUGGESTIONS_REQUEST)
         }
     }
+
+    private companion object {
+        /** How long a cold process may take to read its stored state before the fill gives up. */
+        const val STARTING_WAIT_MS = 5_000L
+    }
 }
 
+/**
+ * The fill unlock's notice: under a session the server ended ([LockedScreen.signedOutByServer]) the password opens this
+ * device's copy read-only, a fill may come from it, and nothing is saved (design §4.4); the card says so before the
+ * person types. Under a server policy that forbids keeping data on the phone there is no copy to fill from: the shared
+ * code's line that the account's keys are kept at the server ([LockedScreen.keysAtServerLine]) stands there instead, as
+ * handed. Null for an ordinary lock.
+ */
+internal fun fillUnlockNotice(locked: LockedScreen): UiText? = when {
+    locked.keysAtServerLine != null -> io.silencelen.andvari.app.trust.lockKeysAtServerLine(locked)
+    locked.signedOutByServer -> UiText.ph(io.silencelen.andvari.app.trust.Placeholder.FILL_FROM_COPY)
+    else -> null
+}
+
+/**
+ * Above the fill unlock's notice, where the account's keys are kept at the server and the session has ended: the shared
+ * code's line for that end ([LockedScreen.endLine]), as the lock screen says it, so the person reads before typing that
+ * nothing opens here until they sign in again. Null otherwise (the notice alone says the rest).
+ */
+internal fun fillUnlockEndLine(locked: LockedScreen): UiText? =
+    locked.endLine?.takeIf { locked.keysAtServerLine != null }?.let { UiText.of(it) }
+
+/** What the fill unlock's card says above the field: [fillUnlockEndLine], then [fillUnlockNotice], one per line; null for an ordinary lock. */
+internal fun fillUnlockNoticeText(locked: LockedScreen): String? =
+    listOfNotNull(fillUnlockEndLine(locked), fillUnlockNotice(locked)).takeIf { it.isNotEmpty() }?.joinToString("\n") { it.shown() }
+
 @androidx.compose.runtime.Composable
-private fun UnlockCard(
+internal fun UnlockCard(
     email: String,
     busy: Boolean,
     error: String?,
@@ -326,6 +407,8 @@ private fun UnlockCard(
      * a possibility.
      */
     offerBiometricHint: Boolean,
+    /** What the card says above the field, when the session is not an ordinary one ([fillUnlockNotice]). */
+    notice: String?,
     onUnlock: (String) -> Unit,
     onCancel: () -> Unit,
 ) {
@@ -344,6 +427,10 @@ private fun UnlockCard(
                 SigilMark(BrandSigil, 40.dp)
                 Text("Unlock andvari", style = MaterialTheme.typography.titleLarge)
                 Text(email, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (notice != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(notice, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center)
+                }
                 Spacer(Modifier.height(16.dp))
                 // a11yand-07: this overlay is a ONE-field password form rendered over another
                 // app — reaching the Unlock button is the whole interaction, so the IME's Done

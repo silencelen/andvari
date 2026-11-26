@@ -1,0 +1,1471 @@
+{
+  "_about": [
+    "The instance card of design 2026-11-15-onboarding-trust \u00a74: template (\u00a74.1), chain (\u00a74.2), pinning (\u00a74.4).",
+    "Hand-authored from the independent oracle in tools/vector-gen/oracle (Node WebCrypto and @noble; no andvari code). Regenerate with `npm run generate` there; `npm run check` fails on any difference.",
+    "chains: every card must verify in order. cards[i].record is the pin record of \u00a74.4 for that card ({instanceId, card0Hash, seq, hash, origin, name, kind, operator, operatorSignKey, recoveryFp}); hash is H(frame) and card0Hash is the hash of the chain's card 0. Card 0's signerPub must equal its own operatorSignKey, card n's must equal card n-1's operatorSignKey, BYTE FOR BYTE (the Ed25519 form of \u00a72.1), so a verifier without a Montgomery map can check the chain.",
+    "reject: verify the first `after` cards of chain `base` (all valid), then `frameB64`. The verdict must be expect.verdict, raised at that card. Order per \u00a72.4 (VR-10): the parse verdicts (bad_frame, unknown_format, non_canonical, bad_statement); instance_mismatch (an instanceId other than the first card's); bad_seq; bad_prev; not_authorized (signerPub is not byte-equal to the key that must sign); bad_signature. Cards have no precondition.",
+    "pinned: a served chain that verifies (`frames`, from card 0) against a pinned card `pin` = {card0Hash, seq, hash} (\u00a74.4, \u00a72.4). fork: card 0 of the served chain does not hash to pin.card0Hash, however short the chain is, or another hash stands at the pinned seq (the client stops using the instance). withheld: the SAME chain ends below the pinned seq, or no card is served (a state, not a stop). ok: expect.newest is the last verified card.",
+    "roots: the first pin of \u00a74.4, on a device that holds no pin for the origin yet, for a served chain that verifies, in \u00a72.4's pinning order. `dialedOrigin` is the origin the client dialed to fetch the chain. For every root an empty chain is withheld, and origin_mismatch comes FIRST of the mismatches: the newest verified card's origin is not the dialed origin (cards are public, so any server can serve another instance's genuine chain; this holds at an instance's old address after a move too, where the app may offer to dial the origin the card names and every check runs again there). Then, root baked {card0Hash, instanceId}: card0_mismatch if card 0 does not hash to card0Hash; then instance_mismatch for the baked instanceId. root kit {card0Hash}: card0_mismatch (the CLI's --trust-card is this root). root link_offer {cardHash, instanceId}: card_not_in_chain if no served card has that hash; instance_mismatch if the card with that hash is under another instanceId. root typed {}: a hand-typed address behind the Trust Gate, trust on first use. On ok, expect.pinned is the record of the NEWEST verified card. Under an existing pin a changed origin is a move, not a mismatch: the `pinned` rows are that side.",
+    "operatorDevice (VR-11, \u00a74.1): the chain verified on a device of an operator account, which is handed `self` = {userId, signPubB64}: its account, and the Ed25519 signing key it derives from its own identity seed. For a card that names that account as `operator`, operatorSignKey must equal self.signPub BYTE FOR BYTE, else operator_key_mismatch, checked after bad_signature. The comparison is on the Ed25519 key itself, never through its X25519 image: a key and its negation have the same image, the key's holder can sign under either, and a card naming the negation would pass an image check and then lock the real key out of every later card. Rows with self = null are any other client, which does not make this check; nor does the extension (\u00a717). (The server makes the same byte comparison on a card it is sent, for the account that card names, against the signerPub of that account's stored genesis, and answers 400 bad_card; these rows are the device's.)",
+    "Changed on 2026-11-15, with \u00a74.1: in operatorDevice `self` was {userId, identityPubB64}, the X25519 identity key, and the check was ed25519_pk_to_curve25519(operatorSignKey) == self.identityPub. `self` is now {userId, signPubB64} and the check is byte equality. The verdict of each of the seven rows that were there is unchanged: `self` changed shape on the six that have one, and the `why` of the first three was reworded. The two handover-names-the-negated-key rows are new. No other section changed.",
+    "The extension grades every row of this file except operatorDevice and the `roots` rows whose root is kit or link_offer: it handles no kits and no links, so those rows are another client's (\u00a717, \u00a712.2). It grades the baked and the typed-address roots."
+  ],
+  "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+  "keys": {
+    "operator": {
+      "userId": "99999999-9999-4999-8999-999999999999",
+      "seedB64": "vuBjPWkq66XorPwQ29EhCLqdhrrWV7r1SjUZm8gwgpY",
+      "identityPubB64": "9bCo4oYJda6IeG04WiJHGhYmWlcEvU-WeCMEpXVpaxo",
+      "signPubB64": "veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc"
+    },
+    "operator2": {
+      "userId": "88888888-8888-4888-8888-888888888888",
+      "seedB64": "pEEU_c3MZu-MGledi4DuwKqtfGiAZ4Znx5_Sok_93Vo",
+      "identityPubB64": "dWgOgT-wDK1ki05pq6O4uNm0LYZiO1k8RPvxKj3g5Uo",
+      "signPubB64": "HSFXYf6iFCVQ80YCM1AakILaDDD07v-pPmlYrLQomKo"
+    },
+    "alice": {
+      "userId": "11111111-1111-4111-8111-111111111111",
+      "seedB64": "DRQbIikwNz5FTFNaYWhvdn2Ei5KZoKeutbzDytHY3-Y",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "signPubB64": "nHq6JH1Lmot5tW6rGCV05fjNlUAomh-JWgaeAFtYs8o"
+    },
+    "recoveryA": {
+      "fingerprint": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987"
+    },
+    "recoveryB": {
+      "fingerprint": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed"
+    }
+  },
+  "chains": [
+    {
+      "name": "base",
+      "why": "One instance through a rename, a move, operator recovery turned on, a recovery-key rotation, a handover and a kind change.",
+      "cards": [
+        {
+          "why": "card 0: a private instance with no operator recovery; signerPub is its own operatorSignKey",
+          "signer": "operator",
+          "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":0,\"prev\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"origin\":\"https://vault.example.org\",\"name\":\"RXhhbXBsZSBWYXVsdA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763164800000}",
+          "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+          "hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+          "record": {
+            "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+            "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+            "seq": 0,
+            "hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+            "origin": "https://vault.example.org",
+            "name": "RXhhbXBsZSBWYXVsdA",
+            "kind": "private",
+            "operator": "99999999-9999-4999-8999-999999999999",
+            "operatorSignKey": "veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc",
+            "recoveryFp": "none"
+          }
+        },
+        {
+          "why": "a rename",
+          "signer": "operator",
+          "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":1,\"prev\":\"dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82\",\"origin\":\"https://vault.example.org\",\"name\":\"RXhhbXBsZSBGYW1pbHkgVmF1bHQ\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763168400000}",
+          "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0",
+          "hash": "0222d0617d4be8f11b380910429fb0d3506b8a52f2d82ed77c26c6f4e804a764",
+          "record": {
+            "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+            "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+            "seq": 1,
+            "hash": "0222d0617d4be8f11b380910429fb0d3506b8a52f2d82ed77c26c6f4e804a764",
+            "origin": "https://vault.example.org",
+            "name": "RXhhbXBsZSBGYW1pbHkgVmF1bHQ",
+            "kind": "private",
+            "operator": "99999999-9999-4999-8999-999999999999",
+            "operatorSignKey": "veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc",
+            "recoveryFp": "none"
+          }
+        },
+        {
+          "why": "a move: the origin changes",
+          "signer": "operator",
+          "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":2,\"prev\":\"0222d0617d4be8f11b380910429fb0d3506b8a52f2d82ed77c26c6f4e804a764\",\"origin\":\"https://vault2.example.org:8443\",\"name\":\"RXhhbXBsZSBGYW1pbHkgVmF1bHQ\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763172000000}",
+          "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xzWUv7tQtmEiO8BwD6wCkzU_HyuXAJzXVCZeCMYjskk-2rXMn9bsJ8YstljOj4DikqgC40e9NfUgzXr3bzfstQZ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MiwicHJldiI6IjAyMjJkMDYxN2Q0YmU4ZjExYjM4MDkxMDQyOWZiMGQzNTA2YjhhNTJmMmQ4MmVkNzdjMjZjNmY0ZTgwNGE3NjQiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE3MjAwMDAwMH0",
+          "hash": "af3284c96858856eadab869a2e836e3068dd0dd95f2ccd9067b0ec7848946c4a",
+          "record": {
+            "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+            "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+            "seq": 2,
+            "hash": "af3284c96858856eadab869a2e836e3068dd0dd95f2ccd9067b0ec7848946c4a",
+            "origin": "https://vault2.example.org:8443",
+            "name": "RXhhbXBsZSBGYW1pbHkgVmF1bHQ",
+            "kind": "private",
+            "operator": "99999999-9999-4999-8999-999999999999",
+            "operatorSignKey": "veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc",
+            "recoveryFp": "none"
+          }
+        },
+        {
+          "why": "operator recovery is turned on: recoveryFp goes from none to a key fingerprint",
+          "signer": "operator",
+          "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":3,\"prev\":\"af3284c96858856eadab869a2e836e3068dd0dd95f2ccd9067b0ec7848946c4a\",\"origin\":\"https://vault2.example.org:8443\",\"name\":\"RXhhbXBsZSBGYW1pbHkgVmF1bHQ\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987\",\"issuedAt\":1763175600000}",
+          "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x8fZCD9NwaIoiNPTwjUoCjLYkPmOwif7LcOIdjdS2HmOeXx0db8CpDSJvNLS59zEk04h3zsVH8gPEpa3OXAmuAB7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MywicHJldiI6ImFmMzI4NGM5Njg1ODg1NmVhZGFiODY5YTJlODM2ZTMwNjhkZDBkZDk1ZjJjY2Q5MDY3YjBlYzc4NDg5NDZjNGEiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImE3Nzc5ZTQzZThiN2Q5MWUwYjRhYTY5MjZkMDg2NTk0ZDk1NzhlNTE2NjZlY2ViY2U1OGE3NWZmMDY0MGU5ODciLCJpc3N1ZWRBdCI6MTc2MzE3NTYwMDAwMH0",
+          "hash": "8d77b53ce83632404241c211f2411bc12c836e27b87730a06629d35b13ee7dbb",
+          "record": {
+            "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+            "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+            "seq": 3,
+            "hash": "8d77b53ce83632404241c211f2411bc12c836e27b87730a06629d35b13ee7dbb",
+            "origin": "https://vault2.example.org:8443",
+            "name": "RXhhbXBsZSBGYW1pbHkgVmF1bHQ",
+            "kind": "private",
+            "operator": "99999999-9999-4999-8999-999999999999",
+            "operatorSignKey": "veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc",
+            "recoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987"
+          }
+        },
+        {
+          "why": "a recovery-key rotation: recoveryFp changes (whether a 0x08 statement covers the change is recovery.json's matter, not the chain's)",
+          "signer": "operator",
+          "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":4,\"prev\":\"8d77b53ce83632404241c211f2411bc12c836e27b87730a06629d35b13ee7dbb\",\"origin\":\"https://vault2.example.org:8443\",\"name\":\"RXhhbXBsZSBGYW1pbHkgVmF1bHQ\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed\",\"issuedAt\":1763179200000}",
+          "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2APB3pvcjl_mSaLJKJHXC-q0bjqaIINNUNLcg1TyHTORDJGhjXj6edXw7-5qOYwwLlNxWFDCBmBU97ljisLgA97InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6NCwicHJldiI6IjhkNzdiNTNjZTgzNjMyNDA0MjQxYzIxMWYyNDExYmMxMmM4MzZlMjdiODc3MzBhMDY2MjlkMzViMTNlZTdkYmIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzE3OTIwMDAwMH0",
+          "hash": "545221f446ace87cad18f6253bb17755de558af2085cd4a3623419b7fc06c6a3",
+          "record": {
+            "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+            "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+            "seq": 4,
+            "hash": "545221f446ace87cad18f6253bb17755de558af2085cd4a3623419b7fc06c6a3",
+            "origin": "https://vault2.example.org:8443",
+            "name": "RXhhbXBsZSBGYW1pbHkgVmF1bHQ",
+            "kind": "private",
+            "operator": "99999999-9999-4999-8999-999999999999",
+            "operatorSignKey": "veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc",
+            "recoveryFp": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed"
+          }
+        },
+        {
+          "why": "a handover: the card names operator2 and its key, and is signed by the PREVIOUS card's key (the old operator)",
+          "signer": "operator",
+          "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":5,\"prev\":\"545221f446ace87cad18f6253bb17755de558af2085cd4a3623419b7fc06c6a3\",\"origin\":\"https://vault2.example.org:8443\",\"name\":\"RXhhbXBsZSBGYW1pbHkgVmF1bHQ\",\"kind\":\"private\",\"operator\":\"88888888-8888-4888-8888-888888888888\",\"operatorSignKey\":\"HSFXYf6iFCVQ80YCM1AakILaDDD07v-pPmlYrLQomKo\",\"recoveryFp\":\"db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed\",\"issuedAt\":1763182800000}",
+          "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xzdUsi5_BYm6LJW81dzpa1p27orN-krQvF3PvowFezfvNXxZzirx2phpHOEqBnZEuizY7IOCXJ73JxTUVXhjVAN7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6NSwicHJldiI6IjU0NTIyMWY0NDZhY2U4N2NhZDE4ZjYyNTNiYjE3NzU1ZGU1NThhZjIwODVjZDRhMzYyMzQxOWI3ZmMwNmM2YTMiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI4ODg4ODg4OC04ODg4LTQ4ODgtODg4OC04ODg4ODg4ODg4ODgiLCJvcGVyYXRvclNpZ25LZXkiOiJIU0ZYWWY2aUZDVlE4MFlDTTFBYWtJTGFEREQwN3YtcFBtbFlyTFFvbUtvIiwicmVjb3ZlcnlGcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzE4MjgwMDAwMH0",
+          "hash": "d642fc0848976fb57c3c8ac8c3b4b8c0a1d9afced40ca5fd57d331572fe5b1e2",
+          "record": {
+            "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+            "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+            "seq": 5,
+            "hash": "d642fc0848976fb57c3c8ac8c3b4b8c0a1d9afced40ca5fd57d331572fe5b1e2",
+            "origin": "https://vault2.example.org:8443",
+            "name": "RXhhbXBsZSBGYW1pbHkgVmF1bHQ",
+            "kind": "private",
+            "operator": "88888888-8888-4888-8888-888888888888",
+            "operatorSignKey": "HSFXYf6iFCVQ80YCM1AakILaDDD07v-pPmlYrLQomKo",
+            "recoveryFp": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed"
+          }
+        },
+        {
+          "why": "the first card the new operator signs",
+          "signer": "operator2",
+          "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":6,\"prev\":\"d642fc0848976fb57c3c8ac8c3b4b8c0a1d9afced40ca5fd57d331572fe5b1e2\",\"origin\":\"https://vault2.example.org:8443\",\"name\":\"RXhhbXBsZSBWYXVsdA\",\"kind\":\"private\",\"operator\":\"88888888-8888-4888-8888-888888888888\",\"operatorSignKey\":\"HSFXYf6iFCVQ80YCM1AakILaDDD07v-pPmlYrLQomKo\",\"recoveryFp\":\"db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed\",\"issuedAt\":1763186400000}",
+          "frameB64": "YXZzAgQdIVdh_qIUJVDzRgIzUBqQgtoMMPTu_6k-aVistCiYqu7DZsyFi5rYR_PI01tkslg9dOTV1pj9rtRw2a9lA9xQBExsKviO-wdPzW44V2URtcuOM3L-GN-lmONl1oSwCQx7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6NiwicHJldiI6ImQ2NDJmYzA4NDg5NzZmYjU3YzNjOGFjOGMzYjRiOGMwYTFkOWFmY2VkNDBjYTVmZDU3ZDMzMTU3MmZlNWIxZTIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI4ODg4ODg4OC04ODg4LTQ4ODgtODg4OC04ODg4ODg4ODg4ODgiLCJvcGVyYXRvclNpZ25LZXkiOiJIU0ZYWWY2aUZDVlE4MFlDTTFBYWtJTGFEREQwN3YtcFBtbFlyTFFvbUtvIiwicmVjb3ZlcnlGcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzE4NjQwMDAwMH0",
+          "hash": "a56484f17b94c15bde416fe0fe7f57a2a01eb6f7ed3fb7705cd2a9ff067f78e8",
+          "record": {
+            "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+            "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+            "seq": 6,
+            "hash": "a56484f17b94c15bde416fe0fe7f57a2a01eb6f7ed3fb7705cd2a9ff067f78e8",
+            "origin": "https://vault2.example.org:8443",
+            "name": "RXhhbXBsZSBWYXVsdA",
+            "kind": "private",
+            "operator": "88888888-8888-4888-8888-888888888888",
+            "operatorSignKey": "HSFXYf6iFCVQ80YCM1AakILaDDD07v-pPmlYrLQomKo",
+            "recoveryFp": "db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed"
+          }
+        },
+        {
+          "why": "a kind change, with operator recovery turned off: any field but instanceId may change",
+          "signer": "operator2",
+          "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":7,\"prev\":\"a56484f17b94c15bde416fe0fe7f57a2a01eb6f7ed3fb7705cd2a9ff067f78e8\",\"origin\":\"https://vault2.example.org:8443\",\"name\":\"RXhhbXBsZSBWYXVsdA\",\"kind\":\"public\",\"operator\":\"88888888-8888-4888-8888-888888888888\",\"operatorSignKey\":\"HSFXYf6iFCVQ80YCM1AakILaDDD07v-pPmlYrLQomKo\",\"recoveryFp\":\"none\",\"issuedAt\":1763190000000}",
+          "frameB64": "YXZzAgQdIVdh_qIUJVDzRgIzUBqQgtoMMPTu_6k-aVistCiYqpPPA7fo4qW_vekDat3GarEu9njjV5HvjftYs9Moc98SC9Xhc3nj0N3Rc5vIB_0E7PppDFvSsvUe8I2S56xUeQZ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6NywicHJldiI6ImE1NjQ4NGYxN2I5NGMxNWJkZTQxNmZlMGZlN2Y1N2EyYTAxZWI2ZjdlZDNmYjc3MDVjZDJhOWZmMDY3Zjc4ZTgiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwdWJsaWMiLCJvcGVyYXRvciI6Ijg4ODg4ODg4LTg4ODgtNDg4OC04ODg4LTg4ODg4ODg4ODg4OCIsIm9wZXJhdG9yU2lnbktleSI6IkhTRlhZZjZpRkNWUTgwWUNNMUFha0lMYURERDA3di1wUG1sWXJMUW9tS28iLCJyZWNvdmVyeUZwIjoibm9uZSIsImlzc3VlZEF0IjoxNzYzMTkwMDAwMDAwfQ",
+          "hash": "3bc1ae8593c0a9c549bd37e58dfcd4d5a515cc9c62f68699fe21d2902b5c5e0b",
+          "record": {
+            "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+            "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+            "seq": 7,
+            "hash": "3bc1ae8593c0a9c549bd37e58dfcd4d5a515cc9c62f68699fe21d2902b5c5e0b",
+            "origin": "https://vault2.example.org:8443",
+            "name": "RXhhbXBsZSBWYXVsdA",
+            "kind": "public",
+            "operator": "88888888-8888-4888-8888-888888888888",
+            "operatorSignKey": "HSFXYf6iFCVQ80YCM1AakILaDDD07v-pPmlYrLQomKo",
+            "recoveryFp": "none"
+          }
+        }
+      ]
+    },
+    {
+      "name": "public",
+      "why": "A public instance, as baked into store builds.",
+      "cards": [
+        {
+          "why": "card 0 of a public instance",
+          "signer": "operator",
+          "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"ffffffff-ffff-4fff-8fff-ffffffffffff\",\"seq\":0,\"prev\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"origin\":\"https://vault.andvaripass.com\",\"name\":\"YW5kdmFyaQ\",\"kind\":\"public\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763164800000}",
+          "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xwUMYfSxxh_bU8yAkBOvL8hI1Yyzj3TACckj_SayxXgQ2-4g6K7JokatHaigvlTqqmlKpr890-Iq7N5JR3N8Cwx7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImZmZmZmZmZmLWZmZmYtNGZmZi04ZmZmLWZmZmZmZmZmZmZmZiIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmFuZHZhcmlwYXNzLmNvbSIsIm5hbWUiOiJZVzVrZG1GeWFRIiwia2luZCI6InB1YmxpYyIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjMxNjQ4MDAwMDB9",
+          "hash": "7e9828734bdb8b8207e20e2323ff341871217658f41c4338ec15286e753fe904",
+          "record": {
+            "instanceId": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+            "card0Hash": "7e9828734bdb8b8207e20e2323ff341871217658f41c4338ec15286e753fe904",
+            "seq": 0,
+            "hash": "7e9828734bdb8b8207e20e2323ff341871217658f41c4338ec15286e753fe904",
+            "origin": "https://vault.andvaripass.com",
+            "name": "YW5kdmFyaQ",
+            "kind": "public",
+            "operator": "99999999-9999-4999-8999-999999999999",
+            "operatorSignKey": "veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc",
+            "recoveryFp": "none"
+          }
+        },
+        {
+          "why": "a card that changes nothing but issuedAt",
+          "signer": "operator",
+          "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"ffffffff-ffff-4fff-8fff-ffffffffffff\",\"seq\":1,\"prev\":\"7e9828734bdb8b8207e20e2323ff341871217658f41c4338ec15286e753fe904\",\"origin\":\"https://vault.andvaripass.com\",\"name\":\"YW5kdmFyaQ\",\"kind\":\"public\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763251200000}",
+          "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xxgWQhUH26N-5uK4VUUQdUKPV35F6011ld8CqiscMH28cNkTHLXluWbhdh9EW7G7vabqFAHo50wgXn4cJ6f49QV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImZmZmZmZmZmLWZmZmYtNGZmZi04ZmZmLWZmZmZmZmZmZmZmZiIsInNlcSI6MSwicHJldiI6IjdlOTgyODczNGJkYjhiODIwN2UyMGUyMzIzZmYzNDE4NzEyMTc2NThmNDFjNDMzOGVjMTUyODZlNzUzZmU5MDQiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmFuZHZhcmlwYXNzLmNvbSIsIm5hbWUiOiJZVzVrZG1GeWFRIiwia2luZCI6InB1YmxpYyIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjMyNTEyMDAwMDB9",
+          "hash": "e14327a6b9a9949251b3e024a83c0cf8610990e71fd2d378894d1048ebc8598b",
+          "record": {
+            "instanceId": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+            "card0Hash": "7e9828734bdb8b8207e20e2323ff341871217658f41c4338ec15286e753fe904",
+            "seq": 1,
+            "hash": "e14327a6b9a9949251b3e024a83c0cf8610990e71fd2d378894d1048ebc8598b",
+            "origin": "https://vault.andvaripass.com",
+            "name": "YW5kdmFyaQ",
+            "kind": "public",
+            "operator": "99999999-9999-4999-8999-999999999999",
+            "operatorSignKey": "veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc",
+            "recoveryFp": "none"
+          }
+        }
+      ]
+    }
+  ],
+  "reject": [
+    {
+      "name": "signed-by-another-key",
+      "why": "Signed by the wrong key: operator2 signs card 1 before any handover. signerPub is operator2's key, not card 0's operatorSignKey.",
+      "chain": "base",
+      "after": 1,
+      "signer": "operator2",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":1,\"prev\":\"dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82\",\"origin\":\"https://vault.example.org\",\"name\":\"UmVuYW1lZA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763524800000}",
+      "frameB64": "YXZzAgQdIVdh_qIUJVDzRgIzUBqQgtoMMPTu_6k-aVistCiYqr0TuSFOyIvIelAwCIAg6b-7FbWKHMSmXCIwRDQNzE4WycsPjiMuSz6s3hTzg7z1T6Wkfk6e01BIKfqa1Vr93Q97InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlVtVnVZVzFsWkEiLCJraW5kIjoicHJpdmF0ZSIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjM1MjQ4MDAwMDB9",
+      "expect": {
+        "verdict": "not_authorized"
+      }
+    },
+    {
+      "name": "signer-negated-point",
+      "why": "A signerPub that is not byte-equal to the previous operatorSignKey: -A, the operator key with the sign bit of x flipped. It has the same X25519 image, which is why the card chain compares bytes.",
+      "chain": "base",
+      "after": 1,
+      "signer": "operator; signerPub then replaced by -A",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":1,\"prev\":\"dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82\",\"origin\":\"https://vault.example.org\",\"name\":\"UmVuYW1lZA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763524800000}",
+      "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1R6EJkE2HolpGPgdlgXpL3zxXMowT3xDEMggVZ6LZagsGa6cFGLnZUS0IyGse4S7ksvtSH3NMMgnk3921DvgDpwp7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlVtVnVZVzFsWkEiLCJraW5kIjoicHJpdmF0ZSIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjM1MjQ4MDAwMDB9",
+      "expect": {
+        "verdict": "not_authorized"
+      }
+    },
+    {
+      "name": "signer-is-the-x25519-key",
+      "why": "signerPub replaced by the operator's X25519 identity key: the card names and compares the Ed25519 key.",
+      "chain": "base",
+      "after": 1,
+      "signer": "operator; signerPub then replaced by the X25519 key",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":1,\"prev\":\"dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82\",\"origin\":\"https://vault.example.org\",\"name\":\"UmVuYW1lZA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763524800000}",
+      "frameB64": "YXZzAgT1sKjihgl1roh4bThaIkcaFiZaVwS9T5Z4IwSldWlrGqEJkE2HolpGPgdlgXpL3zxXMowT3xDEMggVZ6LZagsGa6cFGLnZUS0IyGse4S7ksvtSH3NMMgnk3921DvgDpwp7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlVtVnVZVzFsWkEiLCJraW5kIjoicHJpdmF0ZSIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjM1MjQ4MDAwMDB9",
+      "expect": {
+        "verdict": "not_authorized"
+      }
+    },
+    {
+      "name": "signature-by-another-key",
+      "why": "signerPub is the right key, but the signature was made by operator2's key.",
+      "chain": "base",
+      "after": 1,
+      "signer": "operator2's signature under the operator's signerPub",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":1,\"prev\":\"dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82\",\"origin\":\"https://vault.example.org\",\"name\":\"UmVuYW1lZA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763524800000}",
+      "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x70TuSFOyIvIelAwCIAg6b-7FbWKHMSmXCIwRDQNzE4WycsPjiMuSz6s3hTzg7z1T6Wkfk6e01BIKfqa1Vr93Q97InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlVtVnVZVzFsWkEiLCJraW5kIjoicHJpdmF0ZSIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjM1MjQ4MDAwMDB9",
+      "expect": {
+        "verdict": "bad_signature"
+      }
+    },
+    {
+      "name": "signature-flipped",
+      "why": "A valid card 1 with one signature bit flipped.",
+      "chain": "base",
+      "after": 1,
+      "signer": "operator, then one signature bit flipped",
+      "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x6EJkE2HolpGPgdkgXpL3zxXMowT3xDEMggVZ6LZagsGa6cFGLnZUS0IyGse4S7ksvtSH3NMMgnk3921DvgDpwp7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlVtVnVZVzFsWkEiLCJraW5kIjoicHJpdmF0ZSIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjM1MjQ4MDAwMDB9",
+      "expect": {
+        "verdict": "bad_signature"
+      }
+    },
+    {
+      "name": "statement-changed-after-signing",
+      "why": "The operator signed one origin; the statement in the frame names another (still canonical).",
+      "chain": "base",
+      "after": 1,
+      "signer": "operator signed another statement",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":1,\"prev\":\"dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82\",\"origin\":\"https://vault.example.org:9443\",\"name\":\"RXhhbXBsZSBWYXVsdA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763524800000}",
+      "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x4ZV8WKpQR2ygVKepEXdwbSHEYW19FMflrIgL6h_te97FH9AK8IFhr_k5YfbZ4smuUTjJXyKzd4relTTXSsLfgx7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnOjk0NDMiLCJuYW1lIjoiUlhoaGJYQnNaU0JXWVhWc2RBIiwia2luZCI6InByaXZhdGUiLCJvcGVyYXRvciI6Ijk5OTk5OTk5LTk5OTktNDk5OS04OTk5LTk5OTk5OTk5OTk5OSIsIm9wZXJhdG9yU2lnbktleSI6InZlQlJacU84MUtxTUY0aHFQNGhWbk9rMHFWMkNsWTZ0bHl3T1RZSzVkY2MiLCJyZWNvdmVyeUZwIjoibm9uZSIsImlzc3VlZEF0IjoxNzYzNTI0ODAwMDAwfQ",
+      "expect": {
+        "verdict": "bad_signature"
+      }
+    },
+    {
+      "name": "card-0-signed-by-another-key",
+      "why": "Card 0 names the operator's key but operator2 signed it: card 0's signerPub must equal its own operatorSignKey.",
+      "chain": "base",
+      "after": 0,
+      "signer": "operator2",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":0,\"prev\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"origin\":\"https://vault.example.org\",\"name\":\"RXhhbXBsZSBWYXVsdA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763164800000}",
+      "frameB64": "YXZzAgQdIVdh_qIUJVDzRgIzUBqQgtoMMPTu_6k-aVistCiYqhZIFnCApOSY25wj9WqGykMIPM3J9bvQo6cP9u5Nu96SiiWhmuTapGG-SaE1AKYOafigkHC8-Q8N3FOPj6RibAl7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+      "expect": {
+        "verdict": "not_authorized"
+      }
+    },
+    {
+      "name": "card-0-names-another-key",
+      "why": "Card 0 signed by the operator but naming operator2's key as operatorSignKey.",
+      "chain": "base",
+      "after": 0,
+      "signer": "operator",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":0,\"prev\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"origin\":\"https://vault.example.org\",\"name\":\"RXhhbXBsZSBWYXVsdA\",\"kind\":\"private\",\"operator\":\"88888888-8888-4888-8888-888888888888\",\"operatorSignKey\":\"HSFXYf6iFCVQ80YCM1AakILaDDD07v-pPmlYrLQomKo\",\"recoveryFp\":\"none\",\"issuedAt\":1763164800000}",
+      "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x7aiA3v9N6GkbfZNhwEErPrlaYuysBX3GbeAQ1PcVbt8o-qPXCyWA_KExhGCifDCjJWtQ-YXS-fGA9yShlTNeAJ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI4ODg4ODg4OC04ODg4LTQ4ODgtODg4OC04ODg4ODg4ODg4ODgiLCJvcGVyYXRvclNpZ25LZXkiOiJIU0ZYWWY2aUZDVlE4MFlDTTFBYWtJTGFEREQwN3YtcFBtbFlyTFFvbUtvIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+      "expect": {
+        "verdict": "not_authorized"
+      }
+    },
+    {
+      "name": "handover-signed-by-the-new-operator",
+      "why": "A handover card signed by the account it hands over TO: the previous card's key must sign it.",
+      "chain": "base",
+      "after": 5,
+      "signer": "operator2",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":5,\"prev\":\"545221f446ace87cad18f6253bb17755de558af2085cd4a3623419b7fc06c6a3\",\"origin\":\"https://vault2.example.org:8443\",\"name\":\"RXhhbXBsZSBGYW1pbHkgVmF1bHQ\",\"kind\":\"private\",\"operator\":\"88888888-8888-4888-8888-888888888888\",\"operatorSignKey\":\"HSFXYf6iFCVQ80YCM1AakILaDDD07v-pPmlYrLQomKo\",\"recoveryFp\":\"db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed\",\"issuedAt\":1763524800000}",
+      "frameB64": "YXZzAgQdIVdh_qIUJVDzRgIzUBqQgtoMMPTu_6k-aVistCiYqvvj9_um5cK6Sk_5PGbS0mcNYa2IkvP4r8s6wyc63gQbg3tVXirsWjwdsMotsvSa_HzXyO366QkKCPX19M6AgwZ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6NSwicHJldiI6IjU0NTIyMWY0NDZhY2U4N2NhZDE4ZjYyNTNiYjE3NzU1ZGU1NThhZjIwODVjZDRhMzYyMzQxOWI3ZmMwNmM2YTMiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI4ODg4ODg4OC04ODg4LTQ4ODgtODg4OC04ODg4ODg4ODg4ODgiLCJvcGVyYXRvclNpZ25LZXkiOiJIU0ZYWWY2aUZDVlE4MFlDTTFBYWtJTGFEREQwN3YtcFBtbFlyTFFvbUtvIiwicmVjb3ZlcnlGcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzUyNDgwMDAwMH0",
+      "expect": {
+        "verdict": "not_authorized"
+      }
+    },
+    {
+      "name": "old-operator-after-handover",
+      "why": "After the handover the old operator signs another card: the previous card names operator2's key.",
+      "chain": "base",
+      "after": 6,
+      "signer": "operator",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":6,\"prev\":\"d642fc0848976fb57c3c8ac8c3b4b8c0a1d9afced40ca5fd57d331572fe5b1e2\",\"origin\":\"https://vault2.example.org:8443\",\"name\":\"UmVuYW1lZA\",\"kind\":\"private\",\"operator\":\"88888888-8888-4888-8888-888888888888\",\"operatorSignKey\":\"HSFXYf6iFCVQ80YCM1AakILaDDD07v-pPmlYrLQomKo\",\"recoveryFp\":\"db874944da06eac5dd19d3523722d47299717de359c72a50364598fb3aa698ed\",\"issuedAt\":1763524800000}",
+      "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x0wXY_9sef-AueP8tUVVBXszQeqnIg5jWc0p8kJKOjFQ6G1RTBmZ7hbaPmOiNUnmEGZDVrrwarIJiAn7Vk2BhgV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6NiwicHJldiI6ImQ2NDJmYzA4NDg5NzZmYjU3YzNjOGFjOGMzYjRiOGMwYTFkOWFmY2VkNDBjYTVmZDU3ZDMzMTU3MmZlNWIxZTIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlVtVnVZVzFsWkEiLCJraW5kIjoicHJpdmF0ZSIsIm9wZXJhdG9yIjoiODg4ODg4ODgtODg4OC00ODg4LTg4ODgtODg4ODg4ODg4ODg4Iiwib3BlcmF0b3JTaWduS2V5IjoiSFNGWFlmNmlGQ1ZRODBZQ00xQWFrSUxhREREMDd2LXBQbWxZckxRb21LbyIsInJlY292ZXJ5RnAiOiJkYjg3NDk0NGRhMDZlYWM1ZGQxOWQzNTIzNzIyZDQ3Mjk5NzE3ZGUzNTljNzJhNTAzNjQ1OThmYjNhYTY5OGVkIiwiaXNzdWVkQXQiOjE3NjM1MjQ4MDAwMDB9",
+      "expect": {
+        "verdict": "not_authorized"
+      }
+    },
+    {
+      "name": "prev-zero",
+      "why": "A broken prev: card 1 with prev = 64 zeros.",
+      "chain": "base",
+      "after": 1,
+      "signer": "operator",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":1,\"prev\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"origin\":\"https://vault.example.org\",\"name\":\"UmVuYW1lZA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763524800000}",
+      "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x-Xu_TPOg9LDccaZ84ZZ7_r1XJvbySs2i_uGIi3kiuvapYr0W7HMnrx-eiHP9HbFATNqq4GqHTtX2j3KyU0cWAB7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlVtVnVZVzFsWkEiLCJraW5kIjoicHJpdmF0ZSIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjM1MjQ4MDAwMDB9",
+      "expect": {
+        "verdict": "bad_prev"
+      }
+    },
+    {
+      "name": "prev-names-older-card",
+      "why": "A broken prev: card 2 names the hash of card 0.",
+      "chain": "base",
+      "after": 2,
+      "signer": "operator",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":2,\"prev\":\"dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82\",\"origin\":\"https://vault.example.org\",\"name\":\"UmVuYW1lZA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763524800000}",
+      "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x4Kf8-ZUF105UUwP6_Rf8c3mirh4ClnquyWcgMh1JwLGw8E4gqh12RzbqLhrMs1efxEorw03yD-n_tjIrD86HgZ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MiwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlVtVnVZVzFsWkEiLCJraW5kIjoicHJpdmF0ZSIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjM1MjQ4MDAwMDB9",
+      "expect": {
+        "verdict": "bad_prev"
+      }
+    },
+    {
+      "name": "seq-skips",
+      "why": "seq 2 where card 1 belongs.",
+      "chain": "base",
+      "after": 1,
+      "signer": "operator",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":2,\"prev\":\"dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82\",\"origin\":\"https://vault.example.org\",\"name\":\"UmVuYW1lZA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763524800000}",
+      "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x4Kf8-ZUF105UUwP6_Rf8c3mirh4ClnquyWcgMh1JwLGw8E4gqh12RzbqLhrMs1efxEorw03yD-n_tjIrD86HgZ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MiwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlVtVnVZVzFsWkEiLCJraW5kIjoicHJpdmF0ZSIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjM1MjQ4MDAwMDB9",
+      "expect": {
+        "verdict": "bad_seq"
+      }
+    },
+    {
+      "name": "seq-repeats",
+      "why": "seq 0 again, with prev naming card 0.",
+      "chain": "base",
+      "after": 1,
+      "signer": "operator",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":0,\"prev\":\"dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82\",\"origin\":\"https://vault.example.org\",\"name\":\"UmVuYW1lZA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763524800000}",
+      "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2gpI7usYjUbKOOcRCtRE1ID-faYKPlAZZdjy-32fXbli5jnEmAlAjdJwj_3ppLwIuxko0MMIQwty_MJ6jZfPgN7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlVtVnVZVzFsWkEiLCJraW5kIjoicHJpdmF0ZSIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjM1MjQ4MDAwMDB9",
+      "expect": {
+        "verdict": "bad_seq"
+      }
+    },
+    {
+      "name": "first-card-seq-1",
+      "why": "A self-signed first card with seq 1.",
+      "chain": "base",
+      "after": 0,
+      "signer": "operator",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":1,\"prev\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"origin\":\"https://vault.example.org\",\"name\":\"RXhhbXBsZSBWYXVsdA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763164800000}",
+      "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x7JdUWCyVH25YL782vLMoH11nvLPxMoQ_e1h239Gz5JZyNdSTItnCR8OU3O1JF-MNBHAENMKgB893S-d18OpYAN7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+      "expect": {
+        "verdict": "bad_seq"
+      }
+    },
+    {
+      "name": "first-card-prev-not-zero",
+      "why": "A self-signed first card whose prev is not 64 zeros.",
+      "chain": "base",
+      "after": 0,
+      "signer": "operator",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":0,\"prev\":\"a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987\",\"origin\":\"https://vault.example.org\",\"name\":\"RXhhbXBsZSBWYXVsdA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763164800000}",
+      "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x3a4NBbczLKM_Fz_CNUuDhN2LaQRg-ZuekykiywVW_QfBayZhIVG6aEGaLG9w4t4YGObEOedS43T6XsID8PwZwd7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6ImE3Nzc5ZTQzZThiN2Q5MWUwYjRhYTY5MjZkMDg2NTk0ZDk1NzhlNTE2NjZlY2ViY2U1OGE3NWZmMDY0MGU5ODciLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+      "expect": {
+        "verdict": "bad_prev"
+      }
+    },
+    {
+      "name": "instance-id-changed",
+      "why": "A changed instanceId: card 1, otherwise valid and signed by the operator, names another instance.",
+      "chain": "base",
+      "after": 1,
+      "signer": "operator",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"ffffffff-ffff-4fff-8fff-ffffffffffff\",\"seq\":1,\"prev\":\"dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82\",\"origin\":\"https://vault.example.org\",\"name\":\"UmVuYW1lZA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763524800000}",
+      "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x1ZTS-bZWquNLfXQQv9qxTiOCKkB5gY86n1JfGVuymw7QVx-WhJ5MXsj8Xkh9EsArRXFdyQAPnv-8MUWeArwUwF7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImZmZmZmZmZmLWZmZmYtNGZmZi04ZmZmLWZmZmZmZmZmZmZmZiIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlVtVnVZVzFsWkEiLCJraW5kIjoicHJpdmF0ZSIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjM1MjQ4MDAwMDB9",
+      "expect": {
+        "verdict": "instance_mismatch"
+      }
+    },
+    {
+      "name": "order-parse-before-instance",
+      "why": "Not canonical and naming another instance: the parse comes first.",
+      "chain": "base",
+      "after": 1,
+      "signer": "operator",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"ffffffff-ffff-4fff-8fff-ffffffffffff\",\"seq\": 1,\"prev\":\"dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82\",\"origin\":\"https://vault.example.org\",\"name\":\"UmVuYW1lZA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763524800000}",
+      "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xxvEM1aSK9T3xt38_l-68GYcikiHaXr1YEA7IRcBdnkNNAdVD5podkYgMrLqATppSVk961vVVoAD81Ki9V82Hgt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImZmZmZmZmZmLWZmZmYtNGZmZi04ZmZmLWZmZmZmZmZmZmZmZiIsInNlcSI6IDEsInByZXYiOiJkZDI5MmJkYmEwMzJmYTFiMjBiNDJmOGJlYmI4OGIyNjcyNDJjNWM4MmNlMGRjNzY3MmI0MjRmNGQ0NTdiYzgyIiwib3JpZ2luIjoiaHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZyIsIm5hbWUiOiJVbVZ1WVcxbFpBIiwia2luZCI6InByaXZhdGUiLCJvcGVyYXRvciI6Ijk5OTk5OTk5LTk5OTktNDk5OS04OTk5LTk5OTk5OTk5OTk5OSIsIm9wZXJhdG9yU2lnbktleSI6InZlQlJacU84MUtxTUY0aHFQNGhWbk9rMHFWMkNsWTZ0bHl3T1RZSzVkY2MiLCJyZWNvdmVyeUZwIjoibm9uZSIsImlzc3VlZEF0IjoxNzYzNTI0ODAwMDAwfQ",
+      "expect": {
+        "verdict": "non_canonical"
+      }
+    },
+    {
+      "name": "order-instance-before-seq",
+      "why": "Another instanceId and a wrong seq: instance_mismatch comes first, where the log has wrong_vault (VR-10).",
+      "chain": "base",
+      "after": 1,
+      "signer": "operator",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"ffffffff-ffff-4fff-8fff-ffffffffffff\",\"seq\":5,\"prev\":\"dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82\",\"origin\":\"https://vault.example.org\",\"name\":\"UmVuYW1lZA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763524800000}",
+      "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x10BYNtzqWRPMj-pfoq9EgySQFSCW04m5mwFbR_dGLitAv4os4FF6eTvwammcW8R0XWCQgi1YdfughC6sVj9Tgd7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImZmZmZmZmZmLWZmZmYtNGZmZi04ZmZmLWZmZmZmZmZmZmZmZiIsInNlcSI6NSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlVtVnVZVzFsWkEiLCJraW5kIjoicHJpdmF0ZSIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjM1MjQ4MDAwMDB9",
+      "expect": {
+        "verdict": "instance_mismatch"
+      }
+    },
+    {
+      "name": "order-instance-before-signer",
+      "why": "Another instanceId, signed by another key.",
+      "chain": "base",
+      "after": 1,
+      "signer": "operator2",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"ffffffff-ffff-4fff-8fff-ffffffffffff\",\"seq\":1,\"prev\":\"dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82\",\"origin\":\"https://vault.example.org\",\"name\":\"UmVuYW1lZA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763524800000}",
+      "frameB64": "YXZzAgQdIVdh_qIUJVDzRgIzUBqQgtoMMPTu_6k-aVistCiYquThwv9LxyKytck1_SPIr2Dx2cklCn-KyE2oT_LcjiaFgNG4w717NFJja9rEc_oUJFkiH-P8psFehLDEBORpcAJ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImZmZmZmZmZmLWZmZmYtNGZmZi04ZmZmLWZmZmZmZmZmZmZmZiIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlVtVnVZVzFsWkEiLCJraW5kIjoicHJpdmF0ZSIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjM1MjQ4MDAwMDB9",
+      "expect": {
+        "verdict": "instance_mismatch"
+      }
+    },
+    {
+      "name": "order-seq-before-prev",
+      "why": "Wrong seq and wrong prev: bad_seq comes first.",
+      "chain": "base",
+      "after": 1,
+      "signer": "operator",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":5,\"prev\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"origin\":\"https://vault.example.org\",\"name\":\"UmVuYW1lZA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763524800000}",
+      "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x8XECWViFgOZXKKzlWLCpjxhCGzgSJB2UtAkiC_PK53T7lRoZjeKnA41nd7nmyJ5GIrSfFLkHi1zRsZEbmKiaQx7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6NSwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlVtVnVZVzFsWkEiLCJraW5kIjoicHJpdmF0ZSIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjM1MjQ4MDAwMDB9",
+      "expect": {
+        "verdict": "bad_seq"
+      }
+    },
+    {
+      "name": "order-prev-before-signer",
+      "why": "Wrong prev, signed by another key: bad_prev comes first.",
+      "chain": "base",
+      "after": 1,
+      "signer": "operator2",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":1,\"prev\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"origin\":\"https://vault.example.org\",\"name\":\"UmVuYW1lZA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763524800000}",
+      "frameB64": "YXZzAgQdIVdh_qIUJVDzRgIzUBqQgtoMMPTu_6k-aVistCiYqhc1VYR95GUJ2OqD2FY0K6zvXcNbz7PXN0zH6u8C2eiJLg0QuTG1XKs4C7mxmzJF_9hPWJOxf_DiwTCBiriJIAF7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlVtVnVZVzFsWkEiLCJraW5kIjoicHJpdmF0ZSIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjM1MjQ4MDAwMDB9",
+      "expect": {
+        "verdict": "bad_prev"
+      }
+    },
+    {
+      "name": "order-signer-before-signature",
+      "why": "Signed by another key and the signature broken as well: not_authorized comes first.",
+      "chain": "base",
+      "after": 1,
+      "signer": "operator2, then one signature bit flipped",
+      "frameB64": "YXZzAgQdIVdh_qIUJVDzRgIzUBqQgtoMMPTu_6k-aVistCiYqr0TuSFOyIvIelAxCIAg6b-7FbWKHMSmXCIwRDQNzE4WycsPjiMuSz6s3hTzg7z1T6Wkfk6e01BIKfqa1Vr93Q97InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlVtVnVZVzFsWkEiLCJraW5kIjoicHJpdmF0ZSIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjM1MjQ4MDAwMDB9",
+      "expect": {
+        "verdict": "not_authorized"
+      }
+    },
+    {
+      "name": "other-purpose-frame",
+      "why": "A well-formed account-genesis frame (purpose 0x05) where a card is expected.",
+      "chain": "base",
+      "after": 1,
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"personalVaultId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"createdAt\":1763164800000}",
+      "frameB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyou5SIFcajOZ7o7P8CEf3NwoOZoLeARo6VdYTlz3QpRbyeBgXm4mjZjg3Qh_9_yBarreAcGe8PxrxdPB1Tgjsgh7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpZGVudGl0eUtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "expect": {
+        "verdict": "bad_frame"
+      }
+    },
+    {
+      "name": "truncated",
+      "why": "Card 1 cut off inside its signature.",
+      "chain": "base",
+      "after": 1,
+      "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x6EJkE2HolpGPgdlgXpL3zxXMowT3xDEMggVZ6LZagsGaw",
+      "expect": {
+        "verdict": "bad_frame"
+      }
+    },
+    {
+      "name": "unknown-format",
+      "why": "Card 1 with format byte 0x03 in the magic.",
+      "chain": "base",
+      "after": 1,
+      "frameB64": "YXZzAwS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x6EJkE2HolpGPgdlgXpL3zxXMowT3xDEMggVZ6LZagsGa6cFGLnZUS0IyGse4S7ksvtSH3NMMgnk3921DvgDpwp7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlVtVnVZVzFsWkEiLCJraW5kIjoicHJpdmF0ZSIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjM1MjQ4MDAwMDB9",
+      "expect": {
+        "verdict": "unknown_format"
+      }
+    },
+    {
+      "name": "white-space",
+      "why": "Card 1, signed, with a space after a colon.",
+      "chain": "base",
+      "after": 1,
+      "signer": "operator",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\": 1,\"prev\":\"dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82\",\"origin\":\"https://vault.example.org\",\"name\":\"UmVuYW1lZA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763524800000}",
+      "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x1dn4oJQsqny0DOo7Rb_k77KrciEY7-PW7-v9kVi-6oUdi3t9vxl56a9nCo5luCdUeiRzARrXXdI3wQ1mhyeig17InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6IDEsInByZXYiOiJkZDI5MmJkYmEwMzJmYTFiMjBiNDJmOGJlYmI4OGIyNjcyNDJjNWM4MmNlMGRjNzY3MmI0MjRmNGQ0NTdiYzgyIiwib3JpZ2luIjoiaHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZyIsIm5hbWUiOiJVbVZ1WVcxbFpBIiwia2luZCI6InByaXZhdGUiLCJvcGVyYXRvciI6Ijk5OTk5OTk5LTk5OTktNDk5OS04OTk5LTk5OTk5OTk5OTk5OSIsIm9wZXJhdG9yU2lnbktleSI6InZlQlJacU84MUtxTUY0aHFQNGhWbk9rMHFWMkNsWTZ0bHl3T1RZSzVkY2MiLCJyZWNvdmVyeUZwIjoibm9uZSIsImlzc3VlZEF0IjoxNzYzNTI0ODAwMDAwfQ",
+      "expect": {
+        "verdict": "non_canonical"
+      }
+    },
+    {
+      "name": "kind-family",
+      "why": "kind \"family\" is neither public nor private.",
+      "chain": "base",
+      "after": 1,
+      "signer": "operator",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":1,\"prev\":\"dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82\",\"origin\":\"https://vault.example.org\",\"name\":\"UmVuYW1lZA\",\"kind\":\"family\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763524800000}",
+      "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xys1tM6DYojgn6lb5MgyIkiG4JqsbC6EsNSYyj5zc_mAGE63CobHdK_eDBacPADgIT8OgoZ96WVCw5JEBcxJzgp7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlVtVnVZVzFsWkEiLCJraW5kIjoiZmFtaWx5Iiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzUyNDgwMDAwMH0",
+      "expect": {
+        "verdict": "non_canonical"
+      }
+    },
+    {
+      "name": "origin-plain-http-lan",
+      "why": "A move to a plain-http LAN address: the origin grammar cannot carry it (R4).",
+      "chain": "base",
+      "after": 1,
+      "signer": "operator",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":1,\"prev\":\"dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82\",\"origin\":\"http://192.168.1.10:8080\",\"name\":\"UmVuYW1lZA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763524800000}",
+      "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x7Moj5Xj1toreTzTrihcAZP6JnWwnOI3EONL6epoqrblC48mDteIH2n4kQaK5BNazlZLMSVifAgfzbZ4A49AcQh7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwOi8vMTkyLjE2OC4xLjEwOjgwODAiLCJuYW1lIjoiVW1WdVlXMWxaQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzUyNDgwMDAwMH0",
+      "expect": {
+        "verdict": "non_canonical"
+      }
+    },
+    {
+      "name": "version-3",
+      "why": "Card 1, signed and canonical, with \"v\":3.",
+      "chain": "base",
+      "after": 1,
+      "signer": "operator",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":1,\"prev\":\"dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82\",\"origin\":\"https://vault.example.org\",\"name\":\"UmVuYW1lZA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763524800000}",
+      "frameB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x-6hyR1QuTEXClcrdx8EebGBeLdGE6QNckpITkHv2D9Pfe1IM4oA1RvflOcVg1iKNY4IunYbxzoqXeIAouqAVwx7InYiOjMsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlVtVnVZVzFsWkEiLCJraW5kIjoicHJpdmF0ZSIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjM1MjQ4MDAwMDB9",
+      "expect": {
+        "verdict": "bad_statement"
+      }
+    }
+  ],
+  "pinned": [
+    {
+      "name": "pin-is-the-newest-card",
+      "why": "The served chain ends at the pinned card.",
+      "pin": {
+        "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+        "seq": 1,
+        "hash": "0222d0617d4be8f11b380910429fb0d3506b8a52f2d82ed77c26c6f4e804a764"
+      },
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "ok",
+        "newest": {
+          "seq": 1,
+          "hash": "0222d0617d4be8f11b380910429fb0d3506b8a52f2d82ed77c26c6f4e804a764"
+        }
+      }
+    },
+    {
+      "name": "chain-extends-the-pin",
+      "why": "Two verified cards follow the pinned one; the newest verified card is card 3.",
+      "pin": {
+        "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+        "seq": 1,
+        "hash": "0222d0617d4be8f11b380910429fb0d3506b8a52f2d82ed77c26c6f4e804a764"
+      },
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xzWUv7tQtmEiO8BwD6wCkzU_HyuXAJzXVCZeCMYjskk-2rXMn9bsJ8YstljOj4DikqgC40e9NfUgzXr3bzfstQZ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MiwicHJldiI6IjAyMjJkMDYxN2Q0YmU4ZjExYjM4MDkxMDQyOWZiMGQzNTA2YjhhNTJmMmQ4MmVkNzdjMjZjNmY0ZTgwNGE3NjQiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE3MjAwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x8fZCD9NwaIoiNPTwjUoCjLYkPmOwif7LcOIdjdS2HmOeXx0db8CpDSJvNLS59zEk04h3zsVH8gPEpa3OXAmuAB7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MywicHJldiI6ImFmMzI4NGM5Njg1ODg1NmVhZGFiODY5YTJlODM2ZTMwNjhkZDBkZDk1ZjJjY2Q5MDY3YjBlYzc4NDg5NDZjNGEiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImE3Nzc5ZTQzZThiN2Q5MWUwYjRhYTY5MjZkMDg2NTk0ZDk1NzhlNTE2NjZlY2ViY2U1OGE3NWZmMDY0MGU5ODciLCJpc3N1ZWRBdCI6MTc2MzE3NTYwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "ok",
+        "newest": {
+          "seq": 3,
+          "hash": "8d77b53ce83632404241c211f2411bc12c836e27b87730a06629d35b13ee7dbb"
+        }
+      }
+    },
+    {
+      "name": "withheld-shorter-chain",
+      "why": "Rollback: the chain ends below the pinned seq. Nothing stops; the client keeps its newer pinned card.",
+      "pin": {
+        "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+        "seq": 2,
+        "hash": "af3284c96858856eadab869a2e836e3068dd0dd95f2ccd9067b0ec7848946c4a"
+      },
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "withheld"
+      }
+    },
+    {
+      "name": "withheld-empty-chain",
+      "why": "FC-4: no card is served at all (for example between an operator reset and the new card 0). The empty chain is withheld.",
+      "pin": {
+        "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+        "seq": 1,
+        "hash": "0222d0617d4be8f11b380910429fb0d3506b8a52f2d82ed77c26c6f4e804a764"
+      },
+      "frames": [],
+      "expect": {
+        "verdict": "withheld"
+      }
+    },
+    {
+      "name": "fork-at-the-pinned-seq",
+      "why": "The chain holds a different, validly signed card at the pinned seq: the client stops using the instance.",
+      "pin": {
+        "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+        "seq": 1,
+        "hash": "0222d0617d4be8f11b380910429fb0d3506b8a52f2d82ed77c26c6f4e804a764"
+      },
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x-ILJGc5g7UQfgFRQBaQquYeAT0YgF9ODak2l9zDsxFa_VQKyWnAUYGZ2bHL2i0e3d_y4cu6k4CnZdbOV4rnJAN7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlFXNXZkR2hsY2lCT1lXMWwiLCJraW5kIjoicHJpdmF0ZSIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjMxNjg0MDAwMDB9"
+      ],
+      "expect": {
+        "verdict": "fork"
+      }
+    },
+    {
+      "name": "fork-after-an-operator-reset",
+      "why": "\u00a74.6: reset-instance-identity starts a new chain with the SAME instanceId. A device that pinned the old card 0 sees the new card 0 as a fork.",
+      "pin": {
+        "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+        "seq": 0,
+        "hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82"
+      },
+      "frames": [
+        "YXZzAgQdIVdh_qIUJVDzRgIzUBqQgtoMMPTu_6k-aVistCiYqgcKAlAy3FLQExydadKTxwvfYzNBM_iVDLA_JL0KhaXTmtS8ixtxgqSVXpV_Q1RG5CZpPNYSnaoLjbpaGmVskwp7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI4ODg4ODg4OC04ODg4LTQ4ODgtODg4OC04ODg4ODg4ODg4ODgiLCJvcGVyYXRvclNpZ25LZXkiOiJIU0ZYWWY2aUZDVlE4MFlDTTFBYWtJTGFEREQwN3YtcFBtbFlyTFFvbUtvIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2Mzg4NDgwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "fork"
+      }
+    },
+    {
+      "name": "fork-new-chain-reaches-the-pinned-seq",
+      "why": "A device that pinned card 1 of the old chain, once the new chain has a card 1.",
+      "pin": {
+        "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+        "seq": 1,
+        "hash": "0222d0617d4be8f11b380910429fb0d3506b8a52f2d82ed77c26c6f4e804a764"
+      },
+      "frames": [
+        "YXZzAgQdIVdh_qIUJVDzRgIzUBqQgtoMMPTu_6k-aVistCiYqgcKAlAy3FLQExydadKTxwvfYzNBM_iVDLA_JL0KhaXTmtS8ixtxgqSVXpV_Q1RG5CZpPNYSnaoLjbpaGmVskwp7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI4ODg4ODg4OC04ODg4LTQ4ODgtODg4OC04ODg4ODg4ODg4ODgiLCJvcGVyYXRvclNpZ25LZXkiOiJIU0ZYWWY2aUZDVlE4MFlDTTFBYWtJTGFEREQwN3YtcFBtbFlyTFFvbUtvIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2Mzg4NDgwMDAwMH0",
+        "YXZzAgQdIVdh_qIUJVDzRgIzUBqQgtoMMPTu_6k-aVistCiYqq4ceujdblQthn5JTgKkCxMQkOz6Sr1tEfxZ5iwf6kGgh53OzyK4s0t3QX5wjuZyqCxO_LRthPPPdsLE4B9nUw57InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6IjY0OTU0NjNkYmY1ZjdiYmI1Nzc2YTFiNzBkYjljYjYzMjQyZjdjYzYyODQyNGRhMzQ3NTYzNDZiMWU0ZTZiY2IiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQ3dnWVdkaGFXNCIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI4ODg4ODg4OC04ODg4LTQ4ODgtODg4OC04ODg4ODg4ODg4ODgiLCJvcGVyYXRvclNpZ25LZXkiOiJIU0ZYWWY2aUZDVlE4MFlDTTFBYWtJTGFEREQwN3YtcFBtbFlyTFFvbUtvIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2Mzg4ODQwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "fork"
+      }
+    },
+    {
+      "name": "fork-reset-chain-below-the-pin",
+      "why": "A device that pinned card 1 of the old chain while the new chain has only its card 0. The served card 0 does not hash to the pin's card0Hash, so this is a fork at once, however short the chain is: a replaced chain is never mistaken for one that is merely withheld.",
+      "pin": {
+        "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+        "seq": 1,
+        "hash": "0222d0617d4be8f11b380910429fb0d3506b8a52f2d82ed77c26c6f4e804a764"
+      },
+      "frames": [
+        "YXZzAgQdIVdh_qIUJVDzRgIzUBqQgtoMMPTu_6k-aVistCiYqgcKAlAy3FLQExydadKTxwvfYzNBM_iVDLA_JL0KhaXTmtS8ixtxgqSVXpV_Q1RG5CZpPNYSnaoLjbpaGmVskwp7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI4ODg4ODg4OC04ODg4LTQ4ODgtODg4OC04ODg4ODg4ODg4ODgiLCJvcGVyYXRvclNpZ25LZXkiOiJIU0ZYWWY2aUZDVlE4MFlDTTFBYWtJTGFEREQwN3YtcFBtbFlyTFFvbUtvIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2Mzg4NDgwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "fork"
+      }
+    },
+    {
+      "name": "fork-chain-of-another-instance",
+      "why": "A pinned card against a served chain of another instanceId: its card 0 differs, so it is a fork.",
+      "pin": {
+        "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+        "seq": 1,
+        "hash": "0222d0617d4be8f11b380910429fb0d3506b8a52f2d82ed77c26c6f4e804a764"
+      },
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xwUMYfSxxh_bU8yAkBOvL8hI1Yyzj3TACckj_SayxXgQ2-4g6K7JokatHaigvlTqqmlKpr890-Iq7N5JR3N8Cwx7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImZmZmZmZmZmLWZmZmYtNGZmZi04ZmZmLWZmZmZmZmZmZmZmZiIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmFuZHZhcmlwYXNzLmNvbSIsIm5hbWUiOiJZVzVrZG1GeWFRIiwia2luZCI6InB1YmxpYyIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjMxNjQ4MDAwMDB9",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xxgWQhUH26N-5uK4VUUQdUKPV35F6011ld8CqiscMH28cNkTHLXluWbhdh9EW7G7vabqFAHo50wgXn4cJ6f49QV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImZmZmZmZmZmLWZmZmYtNGZmZi04ZmZmLWZmZmZmZmZmZmZmZiIsInNlcSI6MSwicHJldiI6IjdlOTgyODczNGJkYjhiODIwN2UyMGUyMzIzZmYzNDE4NzEyMTc2NThmNDFjNDMzOGVjMTUyODZlNzUzZmU5MDQiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmFuZHZhcmlwYXNzLmNvbSIsIm5hbWUiOiJZVzVrZG1GeWFRIiwia2luZCI6InB1YmxpYyIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjMyNTEyMDAwMDB9"
+      ],
+      "expect": {
+        "verdict": "fork"
+      }
+    },
+    {
+      "name": "withheld-only-card-0",
+      "why": "The same chain, served up to card 0 only, against a pin at card 2: card 0 matches the pin's card0Hash, so the chain is withheld, not forked.",
+      "pin": {
+        "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+        "seq": 2,
+        "hash": "af3284c96858856eadab869a2e836e3068dd0dd95f2ccd9067b0ec7848946c4a"
+      },
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "withheld"
+      }
+    }
+  ],
+  "roots": [
+    {
+      "name": "baked-card-0-only",
+      "why": "Card 0 hashes to the baked card0Hash and names the baked instanceId: it is pinned.",
+      "root": {
+        "root": "baked",
+        "origin": "https://vault.andvaripass.com",
+        "instanceId": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "card0Hash": "7e9828734bdb8b8207e20e2323ff341871217658f41c4338ec15286e753fe904",
+        "kind": "public"
+      },
+      "dialedOrigin": "https://vault.andvaripass.com",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xwUMYfSxxh_bU8yAkBOvL8hI1Yyzj3TACckj_SayxXgQ2-4g6K7JokatHaigvlTqqmlKpr890-Iq7N5JR3N8Cwx7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImZmZmZmZmZmLWZmZmYtNGZmZi04ZmZmLWZmZmZmZmZmZmZmZiIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmFuZHZhcmlwYXNzLmNvbSIsIm5hbWUiOiJZVzVrZG1GeWFRIiwia2luZCI6InB1YmxpYyIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjMxNjQ4MDAwMDB9"
+      ],
+      "expect": {
+        "verdict": "ok",
+        "pinned": {
+          "instanceId": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+          "card0Hash": "7e9828734bdb8b8207e20e2323ff341871217658f41c4338ec15286e753fe904",
+          "seq": 0,
+          "hash": "7e9828734bdb8b8207e20e2323ff341871217658f41c4338ec15286e753fe904",
+          "origin": "https://vault.andvaripass.com",
+          "name": "YW5kdmFyaQ",
+          "kind": "public",
+          "operator": "99999999-9999-4999-8999-999999999999",
+          "operatorSignKey": "veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc",
+          "recoveryFp": "none"
+        }
+      }
+    },
+    {
+      "name": "baked-newest-card-is-pinned",
+      "why": "Card 0 matches the baked constants and a verified card follows: the newest verified card is pinned.",
+      "root": {
+        "root": "baked",
+        "origin": "https://vault.andvaripass.com",
+        "instanceId": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "card0Hash": "7e9828734bdb8b8207e20e2323ff341871217658f41c4338ec15286e753fe904",
+        "kind": "public"
+      },
+      "dialedOrigin": "https://vault.andvaripass.com",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xwUMYfSxxh_bU8yAkBOvL8hI1Yyzj3TACckj_SayxXgQ2-4g6K7JokatHaigvlTqqmlKpr890-Iq7N5JR3N8Cwx7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImZmZmZmZmZmLWZmZmYtNGZmZi04ZmZmLWZmZmZmZmZmZmZmZiIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmFuZHZhcmlwYXNzLmNvbSIsIm5hbWUiOiJZVzVrZG1GeWFRIiwia2luZCI6InB1YmxpYyIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjMxNjQ4MDAwMDB9",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xxgWQhUH26N-5uK4VUUQdUKPV35F6011ld8CqiscMH28cNkTHLXluWbhdh9EW7G7vabqFAHo50wgXn4cJ6f49QV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImZmZmZmZmZmLWZmZmYtNGZmZi04ZmZmLWZmZmZmZmZmZmZmZiIsInNlcSI6MSwicHJldiI6IjdlOTgyODczNGJkYjhiODIwN2UyMGUyMzIzZmYzNDE4NzEyMTc2NThmNDFjNDMzOGVjMTUyODZlNzUzZmU5MDQiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmFuZHZhcmlwYXNzLmNvbSIsIm5hbWUiOiJZVzVrZG1GeWFRIiwia2luZCI6InB1YmxpYyIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjMyNTEyMDAwMDB9"
+      ],
+      "expect": {
+        "verdict": "ok",
+        "pinned": {
+          "instanceId": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+          "card0Hash": "7e9828734bdb8b8207e20e2323ff341871217658f41c4338ec15286e753fe904",
+          "seq": 1,
+          "hash": "e14327a6b9a9949251b3e024a83c0cf8610990e71fd2d378894d1048ebc8598b",
+          "origin": "https://vault.andvaripass.com",
+          "name": "YW5kdmFyaQ",
+          "kind": "public",
+          "operator": "99999999-9999-4999-8999-999999999999",
+          "operatorSignKey": "veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc",
+          "recoveryFp": "none"
+        }
+      }
+    },
+    {
+      "name": "baked-card-0-differs",
+      "why": "The served card 0 names the baked instanceId and the baked origin but does not hash to the baked card0Hash (a new chain after an operator reset, or another server answering for the address).",
+      "root": {
+        "root": "baked",
+        "origin": "https://vault.andvaripass.com",
+        "instanceId": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "card0Hash": "7e9828734bdb8b8207e20e2323ff341871217658f41c4338ec15286e753fe904",
+        "kind": "public"
+      },
+      "dialedOrigin": "https://vault.andvaripass.com",
+      "frames": [
+        "YXZzAgQdIVdh_qIUJVDzRgIzUBqQgtoMMPTu_6k-aVistCiYqly8tmsLYSpuqoBZbaDjsnwqNtt3uOT6pCMg6q3IuavuX-bxrRgFdj5sAEIssTnxLCG8uGMN9DCSYLywHQa_Cgt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImZmZmZmZmZmLWZmZmYtNGZmZi04ZmZmLWZmZmZmZmZmZmZmZiIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmFuZHZhcmlwYXNzLmNvbSIsIm5hbWUiOiJZVzVrZG1GeWFRIiwia2luZCI6InB1YmxpYyIsIm9wZXJhdG9yIjoiODg4ODg4ODgtODg4OC00ODg4LTg4ODgtODg4ODg4ODg4ODg4Iiwib3BlcmF0b3JTaWduS2V5IjoiSFNGWFlmNmlGQ1ZRODBZQ00xQWFrSUxhREREMDd2LXBQbWxZckxRb21LbyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjQyNDQ4MDAwMDB9"
+      ],
+      "expect": {
+        "verdict": "card0_mismatch"
+      }
+    },
+    {
+      "name": "baked-instance-id-differs",
+      "why": "Card 0 hashes to the baked card0Hash, but the baked instanceId is another: the two baked constants must both match.",
+      "root": {
+        "root": "baked",
+        "origin": "https://vault.andvaripass.com",
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "card0Hash": "7e9828734bdb8b8207e20e2323ff341871217658f41c4338ec15286e753fe904",
+        "kind": "public"
+      },
+      "dialedOrigin": "https://vault.andvaripass.com",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xwUMYfSxxh_bU8yAkBOvL8hI1Yyzj3TACckj_SayxXgQ2-4g6K7JokatHaigvlTqqmlKpr890-Iq7N5JR3N8Cwx7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImZmZmZmZmZmLWZmZmYtNGZmZi04ZmZmLWZmZmZmZmZmZmZmZiIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmFuZHZhcmlwYXNzLmNvbSIsIm5hbWUiOiJZVzVrZG1GeWFRIiwia2luZCI6InB1YmxpYyIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjMxNjQ4MDAwMDB9"
+      ],
+      "expect": {
+        "verdict": "instance_mismatch"
+      }
+    },
+    {
+      "name": "baked-both-differ",
+      "why": "The served chain is another instance that names the baked origin as its own: neither card 0's hash nor its instanceId matches. card0_mismatch comes before instance_mismatch in the pinning order.",
+      "root": {
+        "root": "baked",
+        "origin": "https://vault.andvaripass.com",
+        "instanceId": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "card0Hash": "7e9828734bdb8b8207e20e2323ff341871217658f41c4338ec15286e753fe904",
+        "kind": "public"
+      },
+      "dialedOrigin": "https://vault.andvaripass.com",
+      "frames": [
+        "YXZzAgQdIVdh_qIUJVDzRgIzUBqQgtoMMPTu_6k-aVistCiYql5c08S-_V_FNzM_REmeMn2YCAqiUqYODxrOJJ1kPySKjI_EdxhG6NRsmZ9Zx_nR79lYUJO16q9SbZ4tGyEBzgJ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmFuZHZhcmlwYXNzLmNvbSIsIm5hbWUiOiJSWGhoYlhCc1pTQldZWFZzZEEiLCJraW5kIjoicHJpdmF0ZSIsIm9wZXJhdG9yIjoiODg4ODg4ODgtODg4OC00ODg4LTg4ODgtODg4ODg4ODg4ODg4Iiwib3BlcmF0b3JTaWduS2V5IjoiSFNGWFlmNmlGQ1ZRODBZQ00xQWFrSUxhREREMDd2LXBQbWxZckxRb21LbyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjQyNDg0MDAwMDB9"
+      ],
+      "expect": {
+        "verdict": "card0_mismatch"
+      }
+    },
+    {
+      "name": "baked-empty-chain",
+      "why": "No card is served: a baked root against an empty chain is withheld.",
+      "root": {
+        "root": "baked",
+        "origin": "https://vault.andvaripass.com",
+        "instanceId": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "card0Hash": "7e9828734bdb8b8207e20e2323ff341871217658f41c4338ec15286e753fe904",
+        "kind": "public"
+      },
+      "dialedOrigin": "https://vault.andvaripass.com",
+      "frames": [],
+      "expect": {
+        "verdict": "withheld"
+      }
+    },
+    {
+      "name": "baked-another-instance-served-at-the-baked-origin",
+      "why": "The baked address serves another instance's genuine chain, whose cards name that instance's own origin. origin_mismatch comes first, before card0_mismatch and instance_mismatch, which this chain would also fail.",
+      "root": {
+        "root": "baked",
+        "origin": "https://vault.andvaripass.com",
+        "instanceId": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "card0Hash": "7e9828734bdb8b8207e20e2323ff341871217658f41c4338ec15286e753fe904",
+        "kind": "public"
+      },
+      "dialedOrigin": "https://vault.andvaripass.com",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "origin_mismatch"
+      }
+    },
+    {
+      "name": "baked-newest-card-names-another-origin",
+      "why": "The genuine public chain: card 0 matches both baked constants, but its newest card names another origin than the baked one the client dialed. A first pin never follows a card to another address.",
+      "root": {
+        "root": "baked",
+        "origin": "https://vault.andvaripass.com",
+        "instanceId": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+        "card0Hash": "7e9828734bdb8b8207e20e2323ff341871217658f41c4338ec15286e753fe904",
+        "kind": "public"
+      },
+      "dialedOrigin": "https://vault.andvaripass.com",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xwUMYfSxxh_bU8yAkBOvL8hI1Yyzj3TACckj_SayxXgQ2-4g6K7JokatHaigvlTqqmlKpr890-Iq7N5JR3N8Cwx7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImZmZmZmZmZmLWZmZmYtNGZmZi04ZmZmLWZmZmZmZmZmZmZmZiIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmFuZHZhcmlwYXNzLmNvbSIsIm5hbWUiOiJZVzVrZG1GeWFRIiwia2luZCI6InB1YmxpYyIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjMxNjQ4MDAwMDB9",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xxgWQhUH26N-5uK4VUUQdUKPV35F6011ld8CqiscMH28cNkTHLXluWbhdh9EW7G7vabqFAHo50wgXn4cJ6f49QV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImZmZmZmZmZmLWZmZmYtNGZmZi04ZmZmLWZmZmZmZmZmZmZmZiIsInNlcSI6MSwicHJldiI6IjdlOTgyODczNGJkYjhiODIwN2UyMGUyMzIzZmYzNDE4NzEyMTc2NThmNDFjNDMzOGVjMTUyODZlNzUzZmU5MDQiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmFuZHZhcmlwYXNzLmNvbSIsIm5hbWUiOiJZVzVrZG1GeWFRIiwia2luZCI6InB1YmxpYyIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjMyNTEyMDAwMDB9",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x4lntjG3AqGPNKC0NHkqNqdtJ_-HwItHAG2s6siAygOYO2cX6dUq-1Jhc0IFNYKpDggIkq60OQURZBuos6UrGw97InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImZmZmZmZmZmLWZmZmYtNGZmZi04ZmZmLWZmZmZmZmZmZmZmZiIsInNlcSI6MiwicHJldiI6ImUxNDMyN2E2YjlhOTk0OTI1MWIzZTAyNGE4M2MwY2Y4NjEwOTkwZTcxZmQyZDM3ODg5NGQxMDQ4ZWJjODU5OGIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmFuZHZhcmkuZXhhbXBsZSIsIm5hbWUiOiJZVzVrZG1GeWFRIiwia2luZCI6InB1YmxpYyIsIm9wZXJhdG9yIjoiOTk5OTk5OTktOTk5OS00OTk5LTg5OTktOTk5OTk5OTk5OTk5Iiwib3BlcmF0b3JTaWduS2V5IjoidmVCUlpxTzgxS3FNRjRocVA0aFZuT2swcVYyQ2xZNnRseXdPVFlLNWRjYyIsInJlY292ZXJ5RnAiOiJub25lIiwiaXNzdWVkQXQiOjE3NjMzMzc2MDAwMDB9"
+      ],
+      "expect": {
+        "verdict": "origin_mismatch"
+      }
+    },
+    {
+      "name": "kit-card-0-matches",
+      "why": "Recovering with a kit: card 0 hashes to the kit's card0Hash, and the newest verified card names the dialed origin (the instance moved there in card 2); it is pinned.",
+      "root": {
+        "root": "kit",
+        "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82"
+      },
+      "dialedOrigin": "https://vault2.example.org:8443",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xzWUv7tQtmEiO8BwD6wCkzU_HyuXAJzXVCZeCMYjskk-2rXMn9bsJ8YstljOj4DikqgC40e9NfUgzXr3bzfstQZ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MiwicHJldiI6IjAyMjJkMDYxN2Q0YmU4ZjExYjM4MDkxMDQyOWZiMGQzNTA2YjhhNTJmMmQ4MmVkNzdjMjZjNmY0ZTgwNGE3NjQiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE3MjAwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "ok",
+        "pinned": {
+          "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+          "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+          "seq": 2,
+          "hash": "af3284c96858856eadab869a2e836e3068dd0dd95f2ccd9067b0ec7848946c4a",
+          "origin": "https://vault2.example.org:8443",
+          "name": "RXhhbXBsZSBGYW1pbHkgVmF1bHQ",
+          "kind": "private",
+          "operator": "99999999-9999-4999-8999-999999999999",
+          "operatorSignKey": "veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc",
+          "recoveryFp": "none"
+        }
+      }
+    },
+    {
+      "name": "kit-card-0-differs",
+      "why": "A kit made before an operator reset: the served card 0 is the new chain's. The client falls back to the Trust Gate with its warning (\u00a74.4).",
+      "root": {
+        "root": "kit",
+        "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82"
+      },
+      "dialedOrigin": "https://vault.example.org",
+      "frames": [
+        "YXZzAgQdIVdh_qIUJVDzRgIzUBqQgtoMMPTu_6k-aVistCiYqgcKAlAy3FLQExydadKTxwvfYzNBM_iVDLA_JL0KhaXTmtS8ixtxgqSVXpV_Q1RG5CZpPNYSnaoLjbpaGmVskwp7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI4ODg4ODg4OC04ODg4LTQ4ODgtODg4OC04ODg4ODg4ODg4ODgiLCJvcGVyYXRvclNpZ25LZXkiOiJIU0ZYWWY2aUZDVlE4MFlDTTFBYWtJTGFEREQwN3YtcFBtbFlyTFFvbUtvIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2Mzg4NDgwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "card0_mismatch"
+      }
+    },
+    {
+      "name": "kit-empty-chain",
+      "why": "No card is served: a kit root against an empty chain is withheld.",
+      "root": {
+        "root": "kit",
+        "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82"
+      },
+      "dialedOrigin": "https://vault.example.org",
+      "frames": [],
+      "expect": {
+        "verdict": "withheld"
+      }
+    },
+    {
+      "name": "kit-genuine-chain-at-another-origin",
+      "why": "A look-alike address serves the real instance's genuine chain. Card 0 hashes to the kit's card0Hash, but the newest card names the real origin, not the one dialed: without this check the kit would vouch for the look-alike.",
+      "root": {
+        "root": "kit",
+        "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82"
+      },
+      "dialedOrigin": "https://vau1t.example.org",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "origin_mismatch"
+      }
+    },
+    {
+      "name": "kit-dialed-the-old-origin-after-a-move",
+      "why": "The instance moved in card 2. The old address still serves the chain; its newest card names the new origin. A device with no pin dialed the old one: origin_mismatch. (Only under an existing pin is a changed origin a move.)",
+      "root": {
+        "root": "kit",
+        "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82"
+      },
+      "dialedOrigin": "https://vault.example.org",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xzWUv7tQtmEiO8BwD6wCkzU_HyuXAJzXVCZeCMYjskk-2rXMn9bsJ8YstljOj4DikqgC40e9NfUgzXr3bzfstQZ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MiwicHJldiI6IjAyMjJkMDYxN2Q0YmU4ZjExYjM4MDkxMDQyOWZiMGQzNTA2YjhhNTJmMmQ4MmVkNzdjMjZjNmY0ZTgwNGE3NjQiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE3MjAwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "origin_mismatch"
+      }
+    },
+    {
+      "name": "order-origin-before-card-0",
+      "why": "A look-alike address serves a chain whose card 0 does not hash to the kit's card0Hash either: origin_mismatch comes first.",
+      "root": {
+        "root": "kit",
+        "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82"
+      },
+      "dialedOrigin": "https://vau1t.example.org",
+      "frames": [
+        "YXZzAgQdIVdh_qIUJVDzRgIzUBqQgtoMMPTu_6k-aVistCiYqgcKAlAy3FLQExydadKTxwvfYzNBM_iVDLA_JL0KhaXTmtS8ixtxgqSVXpV_Q1RG5CZpPNYSnaoLjbpaGmVskwp7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI4ODg4ODg4OC04ODg4LTQ4ODgtODg4OC04ODg4ODg4ODg4ODgiLCJvcGVyYXRvclNpZ25LZXkiOiJIU0ZYWWY2aUZDVlE4MFlDTTFBYWtJTGFEREQwN3YtcFBtbFlyTFFvbUtvIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2Mzg4NDgwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "origin_mismatch"
+      }
+    },
+    {
+      "name": "offer-card-is-the-newest",
+      "why": "The offer names the newest card of the served chain.",
+      "root": {
+        "root": "link_offer",
+        "cardHash": "af3284c96858856eadab869a2e836e3068dd0dd95f2ccd9067b0ec7848946c4a",
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+      },
+      "dialedOrigin": "https://vault2.example.org:8443",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xzWUv7tQtmEiO8BwD6wCkzU_HyuXAJzXVCZeCMYjskk-2rXMn9bsJ8YstljOj4DikqgC40e9NfUgzXr3bzfstQZ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MiwicHJldiI6IjAyMjJkMDYxN2Q0YmU4ZjExYjM4MDkxMDQyOWZiMGQzNTA2YjhhNTJmMmQ4MmVkNzdjMjZjNmY0ZTgwNGE3NjQiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE3MjAwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "ok",
+        "pinned": {
+          "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+          "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+          "seq": 2,
+          "hash": "af3284c96858856eadab869a2e836e3068dd0dd95f2ccd9067b0ec7848946c4a",
+          "origin": "https://vault2.example.org:8443",
+          "name": "RXhhbXBsZSBGYW1pbHkgVmF1bHQ",
+          "kind": "private",
+          "operator": "99999999-9999-4999-8999-999999999999",
+          "operatorSignKey": "veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc",
+          "recoveryFp": "none"
+        }
+      }
+    },
+    {
+      "name": "offer-card-is-older",
+      "why": "The offer names card 1; the chain has moved on. The NEWEST verified card is pinned, not the one the offer names.",
+      "root": {
+        "root": "link_offer",
+        "cardHash": "0222d0617d4be8f11b380910429fb0d3506b8a52f2d82ed77c26c6f4e804a764",
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+      },
+      "dialedOrigin": "https://vault2.example.org:8443",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xzWUv7tQtmEiO8BwD6wCkzU_HyuXAJzXVCZeCMYjskk-2rXMn9bsJ8YstljOj4DikqgC40e9NfUgzXr3bzfstQZ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MiwicHJldiI6IjAyMjJkMDYxN2Q0YmU4ZjExYjM4MDkxMDQyOWZiMGQzNTA2YjhhNTJmMmQ4MmVkNzdjMjZjNmY0ZTgwNGE3NjQiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE3MjAwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x8fZCD9NwaIoiNPTwjUoCjLYkPmOwif7LcOIdjdS2HmOeXx0db8CpDSJvNLS59zEk04h3zsVH8gPEpa3OXAmuAB7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MywicHJldiI6ImFmMzI4NGM5Njg1ODg1NmVhZGFiODY5YTJlODM2ZTMwNjhkZDBkZDk1ZjJjY2Q5MDY3YjBlYzc4NDg5NDZjNGEiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImE3Nzc5ZTQzZThiN2Q5MWUwYjRhYTY5MjZkMDg2NTk0ZDk1NzhlNTE2NjZlY2ViY2U1OGE3NWZmMDY0MGU5ODciLCJpc3N1ZWRBdCI6MTc2MzE3NTYwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "ok",
+        "pinned": {
+          "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+          "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+          "seq": 3,
+          "hash": "8d77b53ce83632404241c211f2411bc12c836e27b87730a06629d35b13ee7dbb",
+          "origin": "https://vault2.example.org:8443",
+          "name": "RXhhbXBsZSBGYW1pbHkgVmF1bHQ",
+          "kind": "private",
+          "operator": "99999999-9999-4999-8999-999999999999",
+          "operatorSignKey": "veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc",
+          "recoveryFp": "a7779e43e8b7d91e0b4aa6926d086594d9578e51666ecebce58a75ff0640e987"
+        }
+      }
+    },
+    {
+      "name": "offer-card-is-card-0",
+      "why": "The offer names card 0.",
+      "root": {
+        "root": "link_offer",
+        "cardHash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+      },
+      "dialedOrigin": "https://vault.example.org",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "ok",
+        "pinned": {
+          "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+          "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+          "seq": 1,
+          "hash": "0222d0617d4be8f11b380910429fb0d3506b8a52f2d82ed77c26c6f4e804a764",
+          "origin": "https://vault.example.org",
+          "name": "RXhhbXBsZSBGYW1pbHkgVmF1bHQ",
+          "kind": "private",
+          "operator": "99999999-9999-4999-8999-999999999999",
+          "operatorSignKey": "veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc",
+          "recoveryFp": "none"
+        }
+      }
+    },
+    {
+      "name": "offer-card-not-served-yet",
+      "why": "The offer names card 3, but the served chain ends at card 1.",
+      "root": {
+        "root": "link_offer",
+        "cardHash": "8d77b53ce83632404241c211f2411bc12c836e27b87730a06629d35b13ee7dbb",
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+      },
+      "dialedOrigin": "https://vault.example.org",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "card_not_in_chain"
+      }
+    },
+    {
+      "name": "offer-card-from-another-chain",
+      "why": "The served chain is another chain for the same instanceId; it does not contain the offer's card.",
+      "root": {
+        "root": "link_offer",
+        "cardHash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+      },
+      "dialedOrigin": "https://vault.example.org",
+      "frames": [
+        "YXZzAgQdIVdh_qIUJVDzRgIzUBqQgtoMMPTu_6k-aVistCiYqgcKAlAy3FLQExydadKTxwvfYzNBM_iVDLA_JL0KhaXTmtS8ixtxgqSVXpV_Q1RG5CZpPNYSnaoLjbpaGmVskwp7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI4ODg4ODg4OC04ODg4LTQ4ODgtODg4OC04ODg4ODg4ODg4ODgiLCJvcGVyYXRvclNpZ25LZXkiOiJIU0ZYWWY2aUZDVlE4MFlDTTFBYWtJTGFEREQwN3YtcFBtbFlyTFFvbUtvIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2Mzg4NDgwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "card_not_in_chain"
+      }
+    },
+    {
+      "name": "offer-card-and-no-chain",
+      "why": "No card is served at all: an empty chain is withheld for every root, a link offer included. (card_not_in_chain is for a served chain that lacks the offer's card.)",
+      "root": {
+        "root": "link_offer",
+        "cardHash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+      },
+      "dialedOrigin": "https://vault.example.org",
+      "frames": [],
+      "expect": {
+        "verdict": "withheld"
+      }
+    },
+    {
+      "name": "offer-card-under-another-instance",
+      "why": "The offer's cardHash is in the served chain, but the offer names another instanceId than that card.",
+      "root": {
+        "root": "link_offer",
+        "cardHash": "0222d0617d4be8f11b380910429fb0d3506b8a52f2d82ed77c26c6f4e804a764",
+        "instanceId": "ffffffff-ffff-4fff-8fff-ffffffffffff"
+      },
+      "dialedOrigin": "https://vault2.example.org:8443",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xzWUv7tQtmEiO8BwD6wCkzU_HyuXAJzXVCZeCMYjskk-2rXMn9bsJ8YstljOj4DikqgC40e9NfUgzXr3bzfstQZ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MiwicHJldiI6IjAyMjJkMDYxN2Q0YmU4ZjExYjM4MDkxMDQyOWZiMGQzNTA2YjhhNTJmMmQ4MmVkNzdjMjZjNmY0ZTgwNGE3NjQiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE3MjAwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "instance_mismatch"
+      }
+    },
+    {
+      "name": "offer-genuine-chain-at-another-origin",
+      "why": "A look-alike address serves the real instance's genuine chain, which holds the offer's card under the offer's instanceId. The newest card names the real origin, not the one dialed.",
+      "root": {
+        "root": "link_offer",
+        "cardHash": "0222d0617d4be8f11b380910429fb0d3506b8a52f2d82ed77c26c6f4e804a764",
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+      },
+      "dialedOrigin": "https://vau1t.example.org",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "origin_mismatch"
+      }
+    },
+    {
+      "name": "order-origin-before-card-not-in-chain",
+      "why": "The dialed address serves a chain that names another origin and does not hold the offer's card: origin_mismatch comes first.",
+      "root": {
+        "root": "link_offer",
+        "cardHash": "8d77b53ce83632404241c211f2411bc12c836e27b87730a06629d35b13ee7dbb",
+        "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+      },
+      "dialedOrigin": "https://vau1t.example.org",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "origin_mismatch"
+      }
+    },
+    {
+      "name": "order-origin-before-instance",
+      "why": "The served chain names another origin, and the offer names another instanceId than its card: origin_mismatch comes first.",
+      "root": {
+        "root": "link_offer",
+        "cardHash": "0222d0617d4be8f11b380910429fb0d3506b8a52f2d82ed77c26c6f4e804a764",
+        "instanceId": "ffffffff-ffff-4fff-8fff-ffffffffffff"
+      },
+      "dialedOrigin": "https://vau1t.example.org",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "origin_mismatch"
+      }
+    },
+    {
+      "name": "typed-address-names-itself",
+      "why": "A hand-typed address: trust on first use. The newest verified card names the dialed origin; after the Trust Gate it is pinned.",
+      "root": {
+        "root": "typed"
+      },
+      "dialedOrigin": "https://vault.example.org",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "ok",
+        "pinned": {
+          "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+          "card0Hash": "dd292bdba032fa1b20b42f8bebb88b267242c5c82ce0dc7672b424f4d457bc82",
+          "seq": 1,
+          "hash": "0222d0617d4be8f11b380910429fb0d3506b8a52f2d82ed77c26c6f4e804a764",
+          "origin": "https://vault.example.org",
+          "name": "RXhhbXBsZSBGYW1pbHkgVmF1bHQ",
+          "kind": "private",
+          "operator": "99999999-9999-4999-8999-999999999999",
+          "operatorSignKey": "veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc",
+          "recoveryFp": "none"
+        }
+      }
+    },
+    {
+      "name": "typed-genuine-chain-at-another-origin",
+      "why": "A look-alike address serves the real instance's genuine chain. Without this check the Trust Gate would show the real instance's name and operator key for the look-alike.",
+      "root": {
+        "root": "typed"
+      },
+      "dialedOrigin": "https://vau1t.example.org",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "origin_mismatch"
+      }
+    },
+    {
+      "name": "typed-empty-chain",
+      "why": "No card is served at the typed address: an empty chain is withheld for every root, the typed address included.",
+      "root": {
+        "root": "typed"
+      },
+      "dialedOrigin": "https://vault.example.org",
+      "frames": [],
+      "expect": {
+        "verdict": "withheld"
+      }
+    },
+    {
+      "name": "typed-old-origin-after-a-move",
+      "why": "The old address of an instance that moved, typed on a device with no pin: its newest card names the new origin.",
+      "root": {
+        "root": "typed"
+      },
+      "dialedOrigin": "https://vault.example.org",
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xzWUv7tQtmEiO8BwD6wCkzU_HyuXAJzXVCZeCMYjskk-2rXMn9bsJ8YstljOj4DikqgC40e9NfUgzXr3bzfstQZ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MiwicHJldiI6IjAyMjJkMDYxN2Q0YmU4ZjExYjM4MDkxMDQyOWZiMGQzNTA2YjhhNTJmMmQ4MmVkNzdjMjZjNmY0ZTgwNGE3NjQiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE3MjAwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "origin_mismatch"
+      }
+    }
+  ],
+  "operatorDevice": [
+    {
+      "name": "own-key-is-named",
+      "why": "The operator's own device, handed the Ed25519 key it derives from its own identity seed: card 0 and card 1 name its account with exactly that key.",
+      "self": {
+        "userId": "99999999-9999-4999-8999-999999999999",
+        "signPubB64": "veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc"
+      },
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "ok"
+      }
+    },
+    {
+      "name": "own-account-another-key",
+      "why": "Card 1 is validly signed by card 0's key and still names the operator's ACCOUNT, but with operator2's key, which is not this device's own.",
+      "self": {
+        "userId": "99999999-9999-4999-8999-999999999999",
+        "signPubB64": "veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc"
+      },
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x_ZH2yLv6CZM0UPmgcbPlJ4cDPd7c6trtqPdBP_la6nIKt_SlTkFmpuCUDbmdO1T7kRTGi5taOAeU_sYNeE1qwV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJIU0ZYWWY2aUZDVlE4MFlDTTFBYWtJTGFEREQwN3YtcFBtbFlyTFFvbUtvIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "operator_key_mismatch",
+        "failedAt": 1
+      }
+    },
+    {
+      "name": "another-device-does-not-check",
+      "why": "The same two cards on any other device: no other client holds a trustworthy copy of the operator's key, so none checks it, and the chain rule alone holds (the next card must be signed by operator2's key).",
+      "self": null,
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x_ZH2yLv6CZM0UPmgcbPlJ4cDPd7c6trtqPdBP_la6nIKt_SlTkFmpuCUDbmdO1T7kRTGi5taOAeU_sYNeE1qwV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJIU0ZYWWY2aUZDVlE4MFlDTTFBYWtJTGFEREQwN3YtcFBtbFlyTFFvbUtvIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "ok"
+      }
+    },
+    {
+      "name": "card-0-own-account-another-key",
+      "why": "A card 0 that names the operator's account with operator2's key, self-signed by that key.",
+      "self": {
+        "userId": "99999999-9999-4999-8999-999999999999",
+        "signPubB64": "veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc"
+      },
+      "frames": [
+        "YXZzAgQdIVdh_qIUJVDzRgIzUBqQgtoMMPTu_6k-aVistCiYqnJKSZNUgL-A_K2pDlRR6UnybzO74SnsBG7T3Ax3Rv8jmA4iaSqppORiNfO1C91nZxyGO7ZfBS6tx6--vDL0tAZ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJIU0ZYWWY2aUZDVlE4MFlDTTFBYWtJTGFEREQwN3YtcFBtbFlyTFFvbUtvIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "operator_key_mismatch",
+        "failedAt": 0
+      }
+    },
+    {
+      "name": "handed-over",
+      "why": "The old operator's device after a handover: card 5 names operator2's account, which is not this device's to check.",
+      "self": {
+        "userId": "99999999-9999-4999-8999-999999999999",
+        "signPubB64": "veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc"
+      },
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xzWUv7tQtmEiO8BwD6wCkzU_HyuXAJzXVCZeCMYjskk-2rXMn9bsJ8YstljOj4DikqgC40e9NfUgzXr3bzfstQZ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MiwicHJldiI6IjAyMjJkMDYxN2Q0YmU4ZjExYjM4MDkxMDQyOWZiMGQzNTA2YjhhNTJmMmQ4MmVkNzdjMjZjNmY0ZTgwNGE3NjQiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE3MjAwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x8fZCD9NwaIoiNPTwjUoCjLYkPmOwif7LcOIdjdS2HmOeXx0db8CpDSJvNLS59zEk04h3zsVH8gPEpa3OXAmuAB7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MywicHJldiI6ImFmMzI4NGM5Njg1ODg1NmVhZGFiODY5YTJlODM2ZTMwNjhkZDBkZDk1ZjJjY2Q5MDY3YjBlYzc4NDg5NDZjNGEiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImE3Nzc5ZTQzZThiN2Q5MWUwYjRhYTY5MjZkMDg2NTk0ZDk1NzhlNTE2NjZlY2ViY2U1OGE3NWZmMDY0MGU5ODciLCJpc3N1ZWRBdCI6MTc2MzE3NTYwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2APB3pvcjl_mSaLJKJHXC-q0bjqaIINNUNLcg1TyHTORDJGhjXj6edXw7-5qOYwwLlNxWFDCBmBU97ljisLgA97InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6NCwicHJldiI6IjhkNzdiNTNjZTgzNjMyNDA0MjQxYzIxMWYyNDExYmMxMmM4MzZlMjdiODc3MzBhMDY2MjlkMzViMTNlZTdkYmIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzE3OTIwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xzdUsi5_BYm6LJW81dzpa1p27orN-krQvF3PvowFezfvNXxZzirx2phpHOEqBnZEuizY7IOCXJ73JxTUVXhjVAN7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6NSwicHJldiI6IjU0NTIyMWY0NDZhY2U4N2NhZDE4ZjYyNTNiYjE3NzU1ZGU1NThhZjIwODVjZDRhMzYyMzQxOWI3ZmMwNmM2YTMiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI4ODg4ODg4OC04ODg4LTQ4ODgtODg4OC04ODg4ODg4ODg4ODgiLCJvcGVyYXRvclNpZ25LZXkiOiJIU0ZYWWY2aUZDVlE4MFlDTTFBYWtJTGFEREQwN3YtcFBtbFlyTFFvbUtvIiwicmVjb3ZlcnlGcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzE4MjgwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "ok"
+      }
+    },
+    {
+      "name": "new-operator-after-handover",
+      "why": "The new operator's device: cards 5 to 7 name its account with its own key; cards 0 to 4 name another account.",
+      "self": {
+        "userId": "88888888-8888-4888-8888-888888888888",
+        "signPubB64": "HSFXYf6iFCVQ80YCM1AakILaDDD07v-pPmlYrLQomKo"
+      },
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xzWUv7tQtmEiO8BwD6wCkzU_HyuXAJzXVCZeCMYjskk-2rXMn9bsJ8YstljOj4DikqgC40e9NfUgzXr3bzfstQZ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MiwicHJldiI6IjAyMjJkMDYxN2Q0YmU4ZjExYjM4MDkxMDQyOWZiMGQzNTA2YjhhNTJmMmQ4MmVkNzdjMjZjNmY0ZTgwNGE3NjQiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE3MjAwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x8fZCD9NwaIoiNPTwjUoCjLYkPmOwif7LcOIdjdS2HmOeXx0db8CpDSJvNLS59zEk04h3zsVH8gPEpa3OXAmuAB7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MywicHJldiI6ImFmMzI4NGM5Njg1ODg1NmVhZGFiODY5YTJlODM2ZTMwNjhkZDBkZDk1ZjJjY2Q5MDY3YjBlYzc4NDg5NDZjNGEiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImE3Nzc5ZTQzZThiN2Q5MWUwYjRhYTY5MjZkMDg2NTk0ZDk1NzhlNTE2NjZlY2ViY2U1OGE3NWZmMDY0MGU5ODciLCJpc3N1ZWRBdCI6MTc2MzE3NTYwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2APB3pvcjl_mSaLJKJHXC-q0bjqaIINNUNLcg1TyHTORDJGhjXj6edXw7-5qOYwwLlNxWFDCBmBU97ljisLgA97InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6NCwicHJldiI6IjhkNzdiNTNjZTgzNjMyNDA0MjQxYzIxMWYyNDExYmMxMmM4MzZlMjdiODc3MzBhMDY2MjlkMzViMTNlZTdkYmIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzE3OTIwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xzdUsi5_BYm6LJW81dzpa1p27orN-krQvF3PvowFezfvNXxZzirx2phpHOEqBnZEuizY7IOCXJ73JxTUVXhjVAN7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6NSwicHJldiI6IjU0NTIyMWY0NDZhY2U4N2NhZDE4ZjYyNTNiYjE3NzU1ZGU1NThhZjIwODVjZDRhMzYyMzQxOWI3ZmMwNmM2YTMiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI4ODg4ODg4OC04ODg4LTQ4ODgtODg4OC04ODg4ODg4ODg4ODgiLCJvcGVyYXRvclNpZ25LZXkiOiJIU0ZYWWY2aUZDVlE4MFlDTTFBYWtJTGFEREQwN3YtcFBtbFlyTFFvbUtvIiwicmVjb3ZlcnlGcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzE4MjgwMDAwMH0",
+        "YXZzAgQdIVdh_qIUJVDzRgIzUBqQgtoMMPTu_6k-aVistCiYqu7DZsyFi5rYR_PI01tkslg9dOTV1pj9rtRw2a9lA9xQBExsKviO-wdPzW44V2URtcuOM3L-GN-lmONl1oSwCQx7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6NiwicHJldiI6ImQ2NDJmYzA4NDg5NzZmYjU3YzNjOGFjOGMzYjRiOGMwYTFkOWFmY2VkNDBjYTVmZDU3ZDMzMTU3MmZlNWIxZTIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI4ODg4ODg4OC04ODg4LTQ4ODgtODg4OC04ODg4ODg4ODg4ODgiLCJvcGVyYXRvclNpZ25LZXkiOiJIU0ZYWWY2aUZDVlE4MFlDTTFBYWtJTGFEREQwN3YtcFBtbFlyTFFvbUtvIiwicmVjb3ZlcnlGcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzE4NjQwMDAwMH0",
+        "YXZzAgQdIVdh_qIUJVDzRgIzUBqQgtoMMPTu_6k-aVistCiYqpPPA7fo4qW_vekDat3GarEu9njjV5HvjftYs9Moc98SC9Xhc3nj0N3Rc5vIB_0E7PppDFvSsvUe8I2S56xUeQZ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6NywicHJldiI6ImE1NjQ4NGYxN2I5NGMxNWJkZTQxNmZlMGZlN2Y1N2EyYTAxZWI2ZjdlZDNmYjc3MDVjZDJhOWZmMDY3Zjc4ZTgiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwdWJsaWMiLCJvcGVyYXRvciI6Ijg4ODg4ODg4LTg4ODgtNDg4OC04ODg4LTg4ODg4ODg4ODg4OCIsIm9wZXJhdG9yU2lnbktleSI6IkhTRlhZZjZpRkNWUTgwWUNNMUFha0lMYURERDA3di1wUG1sWXJMUW9tS28iLCJyZWNvdmVyeUZwIjoibm9uZSIsImlzc3VlZEF0IjoxNzYzMTkwMDAwMDAwfQ"
+      ],
+      "expect": {
+        "verdict": "ok"
+      }
+    },
+    {
+      "name": "order-signature-before-operator-key",
+      "why": "The mismatching card with a broken signature: bad_signature comes first.",
+      "self": {
+        "userId": "99999999-9999-4999-8999-999999999999",
+        "signPubB64": "veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc"
+      },
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x_ZH2yLv6CZM0UPngcbPlJ4cDPd7c6trtqPdBP_la6nIKt_SlTkFmpuCUDbmdO1T7kRTGi5taOAeU_sYNeE1qwV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJIU0ZYWWY2aUZDVlE4MFlDTTFBYWtJTGFEREQwN3YtcFBtbFlyTFFvbUtvIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "bad_signature",
+        "failedAt": 1
+      }
+    },
+    {
+      "name": "handover-names-the-negated-key",
+      "why": "A handover card, validly signed by the outgoing operator (card 4's key), that names the incoming operator's account with the NEGATION of its signing key: -A, the same y with the sign bit of x flipped. On the incoming operator's device operatorSignKey is not byte-equal to the key it derives from its identity seed. -A has the same X25519 image as A, so a comparison through the image would pass this card, and every later card would then have to be signed under -A, which locks the real key out.",
+      "self": {
+        "userId": "88888888-8888-4888-8888-888888888888",
+        "signPubB64": "HSFXYf6iFCVQ80YCM1AakILaDDD07v-pPmlYrLQomKo"
+      },
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xzWUv7tQtmEiO8BwD6wCkzU_HyuXAJzXVCZeCMYjskk-2rXMn9bsJ8YstljOj4DikqgC40e9NfUgzXr3bzfstQZ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MiwicHJldiI6IjAyMjJkMDYxN2Q0YmU4ZjExYjM4MDkxMDQyOWZiMGQzNTA2YjhhNTJmMmQ4MmVkNzdjMjZjNmY0ZTgwNGE3NjQiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE3MjAwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x8fZCD9NwaIoiNPTwjUoCjLYkPmOwif7LcOIdjdS2HmOeXx0db8CpDSJvNLS59zEk04h3zsVH8gPEpa3OXAmuAB7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MywicHJldiI6ImFmMzI4NGM5Njg1ODg1NmVhZGFiODY5YTJlODM2ZTMwNjhkZDBkZDk1ZjJjY2Q5MDY3YjBlYzc4NDg5NDZjNGEiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImE3Nzc5ZTQzZThiN2Q5MWUwYjRhYTY5MjZkMDg2NTk0ZDk1NzhlNTE2NjZlY2ViY2U1OGE3NWZmMDY0MGU5ODciLCJpc3N1ZWRBdCI6MTc2MzE3NTYwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2APB3pvcjl_mSaLJKJHXC-q0bjqaIINNUNLcg1TyHTORDJGhjXj6edXw7-5qOYwwLlNxWFDCBmBU97ljisLgA97InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6NCwicHJldiI6IjhkNzdiNTNjZTgzNjMyNDA0MjQxYzIxMWYyNDExYmMxMmM4MzZlMjdiODc3MzBhMDY2MjlkMzViMTNlZTdkYmIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzE3OTIwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x8hw-VgC6lipHRVYOaoqLOs2bonsw63Lxb9bBVxanewTK9oJdEM8Ib5NgRjLqY2gruwhhLoU3iZQNL2g_wx1YgJ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6NSwicHJldiI6IjU0NTIyMWY0NDZhY2U4N2NhZDE4ZjYyNTNiYjE3NzU1ZGU1NThhZjIwODVjZDRhMzYyMzQxOWI3ZmMwNmM2YTMiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI4ODg4ODg4OC04ODg4LTQ4ODgtODg4OC04ODg4ODg4ODg4ODgiLCJvcGVyYXRvclNpZ25LZXkiOiJIU0ZYWWY2aUZDVlE4MFlDTTFBYWtJTGFEREQwN3YtcFBtbFlyTFFvbUNvIiwicmVjb3ZlcnlGcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzE4MjgwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "operator_key_mismatch",
+        "failedAt": 5
+      }
+    },
+    {
+      "name": "handover-names-the-negated-key-on-another-device",
+      "why": "The same six cards on any other device: the chain's own checks pass, because the outgoing operator did sign the handover, and only the incoming operator's device can tell that the key named is not its own.",
+      "self": null,
+      "frames": [
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x5dup-Tzq-1PmaOknV7JYYnSRp7t0BAGDQjfKnLr_96uP5nM_Lnf75_5sjfejtPCZLiziIsJXdZauYvv5UDGewV7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MSwicHJldiI6ImRkMjkyYmRiYTAzMmZhMWIyMGI0MmY4YmViYjg4YjI2NzI0MmM1YzgyY2UwZGM3NjcyYjQyNGY0ZDQ1N2JjODIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2ODQwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1xzWUv7tQtmEiO8BwD6wCkzU_HyuXAJzXVCZeCMYjskk-2rXMn9bsJ8YstljOj4DikqgC40e9NfUgzXr3bzfstQZ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MiwicHJldiI6IjAyMjJkMDYxN2Q0YmU4ZjExYjM4MDkxMDQyOWZiMGQzNTA2YjhhNTJmMmQ4MmVkNzdjMjZjNmY0ZTgwNGE3NjQiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE3MjAwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x8fZCD9NwaIoiNPTwjUoCjLYkPmOwif7LcOIdjdS2HmOeXx0db8CpDSJvNLS59zEk04h3zsVH8gPEpa3OXAmuAB7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MywicHJldiI6ImFmMzI4NGM5Njg1ODg1NmVhZGFiODY5YTJlODM2ZTMwNjhkZDBkZDk1ZjJjY2Q5MDY3YjBlYzc4NDg5NDZjNGEiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImE3Nzc5ZTQzZThiN2Q5MWUwYjRhYTY5MjZkMDg2NTk0ZDk1NzhlNTE2NjZlY2ViY2U1OGE3NWZmMDY0MGU5ODciLCJpc3N1ZWRBdCI6MTc2MzE3NTYwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2APB3pvcjl_mSaLJKJHXC-q0bjqaIINNUNLcg1TyHTORDJGhjXj6edXw7-5qOYwwLlNxWFDCBmBU97ljisLgA97InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6NCwicHJldiI6IjhkNzdiNTNjZTgzNjMyNDA0MjQxYzIxMWYyNDExYmMxMmM4MzZlMjdiODc3MzBhMDY2MjlkMzViMTNlZTdkYmIiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzE3OTIwMDAwMH0",
+        "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x8hw-VgC6lipHRVYOaoqLOs2bonsw63Lxb9bBVxanewTK9oJdEM8Ib5NgRjLqY2gruwhhLoU3iZQNL2g_wx1YgJ7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6NSwicHJldiI6IjU0NTIyMWY0NDZhY2U4N2NhZDE4ZjYyNTNiYjE3NzU1ZGU1NThhZjIwODVjZDRhMzYyMzQxOWI3ZmMwNmM2YTMiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0Mi5leGFtcGxlLm9yZzo4NDQzIiwibmFtZSI6IlJYaGhiWEJzWlNCR1lXMXBiSGtnVm1GMWJIUSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI4ODg4ODg4OC04ODg4LTQ4ODgtODg4OC04ODg4ODg4ODg4ODgiLCJvcGVyYXRvclNpZ25LZXkiOiJIU0ZYWWY2aUZDVlE4MFlDTTFBYWtJTGFEREQwN3YtcFBtbFlyTFFvbUNvIiwicmVjb3ZlcnlGcCI6ImRiODc0OTQ0ZGEwNmVhYzVkZDE5ZDM1MjM3MjJkNDcyOTk3MTdkZTM1OWM3MmE1MDM2NDU5OGZiM2FhNjk4ZWQiLCJpc3N1ZWRBdCI6MTc2MzE4MjgwMDAwMH0"
+      ],
+      "expect": {
+        "verdict": "ok"
+      }
+    }
+  ]
+}

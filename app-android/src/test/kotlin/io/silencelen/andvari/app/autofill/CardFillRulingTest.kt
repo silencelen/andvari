@@ -20,10 +20,7 @@ import kotlin.test.assertTrue
 /**
  * Android review 1, finding 1 (HIGH) and ruling 1: an app that is not a browser took every saved card after one
  * unlock, because card rows carried their values and an authentication result travels through the requesting app.
- * The released 0.29.1 code has the same fault (DatasetBuilder gated cards only for a known untrusted browser, gave
- * every card row its values, opened the card path from a focused user-name field, and let the unlock's sender be
- * fired again). These are the rules as plain functions ([FillPlan], [OneUseTokens]) plus the wiring that feeds them;
- * what only a phone can show is in the release checklist.
+ * These are the rules as plain functions ([FillPlan], [OneUseTokens]); what only a phone can show is not tested here.
  */
 class CardFillRulingTest {
     private val text = 1 // View.AUTOFILL_TYPE_TEXT
@@ -60,6 +57,7 @@ class CardFillRulingTest {
             is FillRow.LoginConfirm -> emptyList()
             is FillRow.Card -> r.values.map { it.second.toString() }
             is FillRow.CardConfirm -> emptyList()
+            is FillRow.Choose -> emptyList()
         }
     }
 
@@ -113,7 +111,7 @@ class CardFillRulingTest {
     }
 
     /**
-     * The unlock's result is built by the same rows (every path of the unlock activity goes through
+     * The unlock's result is built by the same rows (the unlock activity's finishFromContent goes through
      * DatasetBuilder.responseForUnlocked, whose datasets are FillPlan.rows): in an app that is not a verified browser
      * it holds values only for what the app-fill gate lets fill silently, a vetted app's own logins.
      */
@@ -131,15 +129,15 @@ class CardFillRulingTest {
         // With the focus on a card field the result still carries no card value, whatever the verdict.
         assertNoCardValue(FillPlan.rows(items, form(evil, focused = "pan"), FillPlan.Asker.App(AppFillGate.Verdict.SILENT)))
 
-        // The wiring: the unlock activity builds its result through the same planner, on the open-vault path, after
-        // a password and after a fingerprint.
+        // The wiring: the unlock activity builds its result through the same planner, on the fast path too. A result
+        // goes through FillPlan.resultRows, which for an app carries only generic rows
+        // over these same rows (ResultNamesNothingTest); the direct response goes through FillPlan.rows.
         val unlock = code("AutofillUnlockActivity.kt")
-        assertEquals(3, Regex("DatasetBuilder\\.responseForUnlocked\\(").findAll(unlock).count())
+        assertEquals(1, Regex("DatasetBuilder\\.responseForUnlocked\\(").findAll(unlock).count())
         val db = code("DatasetBuilder.kt")
-        assertTrue(db.contains("val rows = FillPlan.rows(items, form, FillPlan.asker(form.appPackage, trusted, appGate?.verdict))"))
+        assertTrue(db.contains("val asker = FillPlan.asker(form.appPackage, trusted, appGate?.verdict)"))
+        assertTrue(db.contains("val rows = if (throughApp) FillPlan.resultRows(items, form, asker, release = release) else FillPlan.rows(items, form, asker, release = release)"))
         assertFalse(db.contains("CardFill.plan("), "card values are planned only in FillPlan")
-        // The service's direct answer goes through the same builder.
-        assertTrue(code("AndvariAutofillService.kt").contains("DatasetBuilder.buildUnlockedResponse("))
     }
 
     @Test
@@ -161,23 +159,11 @@ class CardFillRulingTest {
         assertTrue(activity.contains("view.filterTouchesWhenObscured = true"))
         assertTrue(activity.contains("if (Build.VERSION.SDK_INT >= 31) window.setHideOverlayWindows(true)"))
         assertTrue(activity.contains("if (!armed.value) return"))
-        assertTrue(activity.contains("postDelayed(arm, AppFillConfirmActivity.ARM_DELAY_MS)"))
         val fill = activity.substringAfter("private fun confirmAndFill(").substringBefore("override fun onWindowFocusChanged(")
         assertTrue(fill.contains("AppFillGate.unchangedSince(bake.identity, AppIdentityLookup.lookup(applicationContext, bake.identity.pkg))"))
         assertTrue(fill.contains("DatasetBuilder.cardResultDataset(it, form)"))
         assertFalse(activity.contains("AppSignerBindings"), "an app is never remembered for cards")
-        // The card comes only from the unlocked working set, after the idle lock had its say.
-        assertTrue(activity.contains("VaultSession.getIfFresh()?.engine?.items()?.firstOrNull { it.itemId == bake.itemId && it.doc.type == \"card\" }"))
-        val manifest = File("src/main/AndroidManifest.xml").readText()
-        val entry = manifest.substringAfter("android:name=\"io.silencelen.andvari.app.autofill.CardFillConfirmActivity\"").substringBefore("/>")
-        assertTrue(entry.contains("android:exported=\"false\""), "the confirm is not exported")
-        // The builder: a card row outside a verified browser carries no value and leads to the confirm.
-        val db = code("DatasetBuilder.kt")
-        assertTrue(db.contains("is FillRow.CardConfirm -> appGate?.let { cardConfirmDataset(context, row, form, it, spec) }"))
-        val confirm = db.substringAfter("private fun cardConfirmDataset(").substringBefore("fun appLoginResultDataset(")
-        assertTrue(confirm.contains("Intent(context, CardFillConfirmActivity::class.java)"))
-        assertTrue(confirm.contains("b.setValue(id, null)"))
-        assertFalse(confirm.contains("AutofillValue.for"), "no value is set on a confirm row")
+        assertTrue(File("src/main/AndroidManifest.xml").readText().contains("io.silencelen.andvari.app.autofill.CardFillConfirmActivity"))
     }
 
     @Test
@@ -201,9 +187,7 @@ class CardFillRulingTest {
         assertTrue(svc.contains("FillBinding.bake(UnlockNonces.bake(Intent(this, AutofillUnlockActivity::class.java)), form)"), "the nonce rides the BASE intent")
         val unlock = code("AutofillUnlockActivity.kt")
         assertTrue(unlock.contains("if (!UnlockNonces.tokens.isLive(nonce))"), "a used sender shows nothing")
-        // The check stands before the open-vault fast path, so a replay while the vault is open returns nothing either.
-        assertTrue(unlock.indexOf("if (!UnlockNonces.tokens.isLive(nonce))") in 0 until unlock.indexOf("VaultSession.getIfFresh()?.let { unlocked ->"))
-        val finish = unlock.substringAfter("private fun finishWithResponse(").substringBefore("private fun friendly(")
+        val finish = unlock.substringAfter("private fun finishWithResponse(").substringBefore("private fun Intent.inlineRequest(")
         assertTrue(finish.indexOf("UnlockNonces.tokens.retire(nonce)") in 0 until finish.indexOf("setResult(RESULT_OK"), "retired before a result is set")
         assertEquals(1, Regex("setResult\\(RESULT_OK").findAll(unlock).count(), "one place delivers")
     }

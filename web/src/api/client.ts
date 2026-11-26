@@ -6,20 +6,14 @@ import type {
   AdminDeviceSummary,
   AdminStatus,
   AdminUserSummary,
-  AttachmentMeta,
   AuditEvent,
   ClientPolicy,
   CreateVaultRequest,
   CreateVaultResponse,
-  DeletedItemsResponse,
   DeletedVaultSummary,
   InviteResponse,
-  ItemRestoreResponse,
-  ItemUpload,
-  ItemVersionsResponse,
   PasswordChangeRequest,
   PreloginResponse,
-  PushResponse,
   RecoveryCommitRequest,
   RecoverySelfConfirmRequest,
   RecoverySelfSetupRequest,
@@ -28,15 +22,12 @@ import type {
   RecoveryVerifyResponse,
   RegisterRequest,
   SessionResponse,
-  SyncResponse,
   TotpSetupResponse,
   TotpStatus,
   TransferAcceptRequest,
   TransferOfferRequest,
   TransferOfferResponse,
-  Mutation,
   AccountKeys,
-  UserLookupResponse,
   AccountStateResponse,
   PersonalWrap,
   VaultDeleteRequest,
@@ -50,16 +41,12 @@ import type {
   WsTicketResponse,
 } from "./types";
 import { assertServerKdfParams } from "../crypto/keys";
+import { decodeErrorExtras, type ErrorExtras } from "./wire";
 import { SAFE_ID } from "../vault/itemdoc-shape";
-import { refusedSession, refusedUser, sanitizeAccountKeys, sanitizeDeleteBlockers, sanitizeDeletedItems, sanitizeDeletedVaults, sanitizeDeletePreview, sanitizeMembers, sanitizeSync, type Refusal, type Sanitized } from "./wireids";
+import { refusedSession, sanitizeAccountKeys, sanitizeDeleteBlockers, sanitizeDeletedVaults, sanitizeDeletePreview, sanitizeMembers, type Refusal, type Sanitized } from "./wireids";
 
 export const CLIENT_VERSION = "0.30.0";
 const CLIENT_HEADER = `web/${CLIENT_VERSION}`;
-
-/** A request body that is ALREADY JSON text and must not be re-serialized (see adminRecovery). */
-class PreSerializedJson {
-  constructor(readonly text: string) {}
-}
 
 /**
  * Every id interpolated into a request path goes through here (security review 2026-10, root
@@ -76,10 +63,159 @@ export function pathSeg(id: string): string {
 }
 
 export class ApiError extends Error {
+  /** The fields a few refusals carry beside `error` (spec 03 §0.1), decoded for the code that defines them. */
+  extras: ErrorExtras | null = null;
+  /**
+   * The wait a `429` names in its `Retry-After` (spec 03 §0.1), in whole seconds; null when the answer named none, or
+   * named it in a form this client does not read (only plain seconds, at most a day). Said to the person, never waited
+   * for by itself.
+   */
+  retryAfterS: number | null = null;
   constructor(public status: number, public code: string, message: string) {
     super(message);
     this.name = "ApiError";
   }
+}
+
+/** A `Retry-After` in plain seconds, 1 to 86 400 (a day); anything else (absent, a date, a fraction, out of range) is null. */
+export function retryAfterSeconds(raw: string | null): number | null {
+  if (raw === null) return null;
+  const t = raw.trim();
+  if (!/^\d{1,5}$/.test(t)) return null;
+  const n = Number(t);
+  return n >= 1 && n <= 86_400 ? n : null;
+}
+
+/**
+ * Design §4.4 "a fork stops traffic, not reading": a request this client refused before anything left the browser, or
+ * an answer it dropped unread, because its traffic gate ([ApiClient.trafficGate]) said the origin's pin is forked or
+ * damaged. An ApiError with status 0, so a caller that only knows ApiError treats it as a refusal, never as a network
+ * blip to retry.
+ */
+export class TrafficStoppedError extends ApiError {
+  /**
+   * [sent] tells the two apart: false when the gate refused the request before it left the browser (nothing was sent,
+   * so nothing changed at the server), true when the request went out and the gate dropped its answer, whatever that
+   * answer was (what the server did cannot be told). Every place that raises it says which: there is no default, so a
+   * caller that forgets cannot make a request that went out read as one that never left.
+   */
+  constructor(public readonly reason: string, public readonly sent: boolean) {
+    super(0, "traffic_stopped", `nothing is sent to this server: ${reason}`);
+    this.name = "TrafficStoppedError";
+  }
+}
+
+/**
+ * An answer that was a redirect. The client follows no redirect on any request to the server's routes (`redirect:
+ * "manual"`): the server never answers with one, so a redirect comes from something between the browser and the server
+ * (a proxy, a captive portal), and it is an answer that is not the server's. What the server did with the request
+ * cannot be told from it. An ApiError with status 0, so a caller that only knows ApiError reads it as a failure.
+ */
+export class RedirectRefusedError extends ApiError {
+  constructor(public readonly answeredStatus: number) {
+    super(0, "redirect_refused", `the answer was a redirect (HTTP ${answeredStatus}), not the server's own`);
+    this.name = "RedirectRefusedError";
+  }
+}
+
+/**
+ * An answer whose status and headers arrived and whose body could not be read to its end (the connection broke while it
+ * came, or the read itself failed). It is an answer, never "no answer": the server may have done what was asked, and
+ * what it said cannot be read. `ApiError(0, "bad_response")`, as for any other answer this browser could not take.
+ */
+export class AnswerCutOffError extends ApiError {
+  /** The limit that ended the answer while it came in, or null when the connection broke or the read failed by itself. */
+  readonly limit: AnswerLimitKind | null;
+  constructor(public readonly answeredStatus: number, cause: unknown) {
+    super(0, "bad_response", `the answer (HTTP ${answeredStatus}) could not be read to its end: ${String(cause)}`);
+    this.name = "AnswerCutOffError";
+    this.limit = cause instanceof AnswerLimitError ? cause.kind : null;
+  }
+}
+
+/**
+ * Which of the two limits on an answer ended it. `too_long`: an answer that is small by its nature took longer than its
+ * whole limit ({@link ANSWER_TIMEOUT_MS}). `stalled`: an answer whose size grows with the vault or a file (a sync, a push,
+ * an attachment) went {@link PROGRESS_TIMEOUT_MS} without a byte.
+ */
+export type AnswerLimitKind = "too_long" | "stalled";
+
+/** The reason a request was ended by one of this client's limits: what its signal is aborted with. */
+export class AnswerLimitError extends Error {
+  constructor(public readonly kind: AnswerLimitKind, public readonly ms: number) {
+    super(kind === "too_long" ? `no whole answer within ${ms} ms` : `nothing came for ${ms} ms`);
+    this.name = "AnswerLimitError";
+  }
+}
+
+/**
+ * A request one of this client's limits ended before any answer came. It is a TypeError, the way a fetch that got no
+ * answer fails, so every caller that reads "no answer" (the request may or may not have reached the server) reads it so;
+ * [kind] says which limit it was, for the sentence the person reads.
+ */
+export class NoAnswerInTimeError extends TypeError {
+  constructor(public readonly kind: AnswerLimitKind, ms: number) {
+    super(kind === "too_long" ? `no answer within ${ms} ms` : `nothing came for ${ms} ms`);
+  }
+}
+
+/** The limit that ended [e]'s request (looked for in [e] and its causes), or null when no limit of this client did. */
+export function answerLimitOf(e: unknown): AnswerLimitKind | null {
+  let x: unknown = e;
+  for (let depth = 0; depth < 4 && x !== null && x !== undefined; depth++) {
+    if (x instanceof NoAnswerInTimeError || x instanceof AnswerLimitError) return x.kind;
+    if (x instanceof AnswerCutOffError && x.limit !== null) return x.limit;
+    x = typeof x === "object" ? (x as { cause?: unknown }).cause : undefined;
+  }
+  return null;
+}
+
+/** The body of an answer whose status arrived, as text; a failure while reading it is {@link AnswerCutOffError}. */
+export async function readAnswerText(resp: Pick<Response, "status" | "text">): Promise<string> {
+  try {
+    return await resp.text();
+  } catch (e) {
+    throw new AnswerCutOffError(resp.status, e);
+  }
+}
+
+/** The statuses `fetch` follows, and the opaque answer a browser gives for one under `redirect: "manual"`. */
+export function isRedirect(resp: Pick<Response, "status" | "type" | "redirected">): boolean {
+  return resp.type === "opaqueredirect" || resp.redirected === true || [301, 302, 303, 307, 308].includes(resp.status);
+}
+
+/** True when a `Content-Type` names JSON (`application/json`, any parameters after it), the type the server's API answers in. */
+export function isJsonContentType(contentType: string | null | undefined): boolean {
+  if (!contentType) return false;
+  return (contentType.split(";")[0] ?? "").trim().toLowerCase() === "application/json";
+}
+
+/**
+ * Design §4.4 "No credential goes to an origin without a pin in force": true for a request that carries a bearer
+ * token, or goes to a route whose body is a credential: every `/auth/` route (prelogin, login with its `authKey` and
+ * TOTP code, register's `authKey`, refresh's token, logout) and the kit recovery's `/recovery/self/` routes (the
+ * `recoveryAuthKey`). The other routes without a session (the card chain, the client policy, the recovery public key,
+ * the sign-up email and its code, static files) carry none.
+ */
+export function carriesCredential(url: string, init: RequestInit): boolean {
+  const h = init.headers;
+  const auth = h instanceof Headers ? h.get("Authorization") : h && !Array.isArray(h) ? (h as Record<string, string>)["Authorization"] : undefined;
+  if (auth) return true;
+  let path: string;
+  try {
+    path = new URL(url, "http://relative.invalid").pathname;
+  } catch {
+    return true; // a URL this client cannot read is asked as credentialed
+  }
+  return /^\/api\/v[0-9]+\/(auth|recovery\/self)\//.test(path);
+}
+
+/** A served answer as the v2 routes read it (api/wireclient.ts): the status and the body text, unparsed. */
+export interface RawAnswer {
+  status: number;
+  text: string;
+  /** The answer's `Content-Type`, or null without one: a body is the server's own JSON only under the JSON type. */
+  contentType: string | null;
 }
 
 /**
@@ -121,6 +257,131 @@ function blockerOf(raw: unknown): AccountDeleteBlocker {
 export interface Tokens {
   accessToken: string;
   refreshToken: string;
+  /**
+   * The mark that a refresh of [refreshToken] is out (spec 03 §2, the refresh's grace): the wall time in ms of its first
+   * sending, written with the pair before the request goes and kept through whatever cuts it off (a lost answer, a tab
+   * closed, reloaded or asleep). Only an answer in the server's own envelope clears it. Absent: no refresh is out.
+   */
+  refreshOutAt?: number;
+  /** The one more try of that refresh was sent: no further try goes. */
+  refreshTriedAgain?: boolean;
+}
+
+/**
+ * A refresh whose answer never came is tried once more only within this long of its first try's sending (the edge
+ * included), by any tab, judged by the wall clock so that a reload earns no extra try. The server answers a repeat of a
+ * token it replaced for sixty seconds from the replacement; the second try has to arrive inside them, and the ten seconds
+ * are the margin for the road. The shared code's session keeper has the same rule (REFRESH_SECOND_TRY_MS).
+ */
+export const REFRESH_SECOND_TRY_MS = 50_000;
+
+/** How a refresh ended the session: `refused` by the server's own answer, or `not_confirmed` here, no try being left. */
+export type RefreshEnd = "refused" | "not_confirmed";
+
+/**
+ * Where every tab shares one pair (the offline copy on), what this browser's record of that session holds now for a
+ * refresh token this tab is about to send: `holds` (that same pair, or this tab's own slot holds it), `other` (another
+ * pair of the same account), `ended` (the account's record with no pair), `gone` (no record of the account), `unsaved`
+ * (no record, because this tab's own sign-in of that pair could not write it).
+ */
+export type SharedRecord = "holds" | "other" | "ended" | "gone" | "unsaved";
+
+/**
+ * The one more try of a refresh whose answer never came is made by the tab itself this long after the first try's
+ * sending, where the tab is alive ([ApiClient.secondTryAfterMs]): after the first try's own limit
+ * (REFRESH_FETCH_TIMEOUT_MS, fifteen seconds) has run out, with ten seconds more for the line to come back (a tunnel, a
+ * change of network), and twenty-five seconds before the window ([REFRESH_SECOND_TRY_MS]) closes, for a road that is
+ * slow and a timer the browser holds back in a tab that is not in view. A request that needs the session earlier makes
+ * the try earlier; the try is made once either way.
+ */
+export const SECOND_TRY_AFTER_MS = 25_000;
+
+/**
+ * Why a refresh did not renew the session although the session lives (the request that set it off is not answered with
+ * its own `401`, which its caller would read as the session's end):
+ *  - `unanswered`: no answer of the server's came (no answer at all, a gateway's page, a body that does not read). The
+ *    mark stands, and the one more try is left while its window lasts.
+ *  - `unavailable`: the server's own answer for the moment (its 5xx, 429 or 426 in its envelope): it took nothing.
+ *  - `not_kept`: the mark could not be written where the pair is kept, so nothing was sent; the next request tries again.
+ * A TypeError, the way a request that got no answer fails: every caller that reads "no answer" reads it so (the change
+ * waits in the queue, the events connection tries again later, the unlock card opens the copy).
+ */
+export type RenewalNotDone = "unanswered" | "unavailable" | "not_kept";
+
+export class RefreshUnansweredError extends TypeError {
+  constructor(public readonly kind: RenewalNotDone, cause?: unknown) {
+    super(kind === "not_kept" ? "the mark of a refresh could not be kept: nothing was sent" : `the session's renewal got no answer of the server's (${kind})`);
+    this.name = "RefreshUnansweredError";
+    if (cause !== undefined) (this as { cause?: unknown }).cause = cause;
+  }
+}
+
+/**
+ * A refresh whose answer never came had no try left: nothing was sent, and the session ended here, not confirmed. Its end
+ * was raised once already ([ApiClient.onRefreshRefused] `not_confirmed`); a caller raises none of its own and never says
+ * it as expired, as ended by the server, or as revoked. An ApiError with status 0 (never 401), so a caller that only
+ * knows ApiError reads it as a failure of the request and not as the session's end.
+ */
+export class SessionNotConfirmedError extends ApiError {
+  constructor() {
+    super(0, "session_not_confirmed", "the session ended in this browser: its renewal could not be confirmed, and nothing was sent");
+    this.name = "SessionNotConfirmedError";
+  }
+}
+
+/**
+ * The session every tab shares is gone from this browser's record (another tab signed out or ended it) and this tab had
+ * not heard of it yet: nothing was sent, and the end was raised once already ([ApiClient.onEndedElsewhere]). Status 0 (never 401), so a caller reads it as a failure of the request, not as the session's end.
+ */
+export class SessionEndedElsewhereError extends ApiError {
+  constructor() {
+    super(0, "session_ended_elsewhere", "the session every tab shares is no longer in this browser's record: nothing was sent");
+    this.name = "SessionEndedElsewhereError";
+  }
+}
+
+/** What a refresh came to, for the request that set it off ([ApiClient.rawSend]). */
+type RefreshOutcome = "renewed" | RenewalNotDone | "not_confirmed" | "refused" | "dropped" | "elsewhere";
+
+/** The refusals by which the server ends a session at a refresh, in its own envelope, at any status (with 401 and 403). */
+const REFRESH_ENDS = new Set(["invalid_refresh", "refresh_reuse", "refresh_expired"]);
+
+/** Whether the server's own refusal of a refresh ([refusal], answered at [status]) ends the session. */
+const serverEnded = (refusal: string, status: number): boolean => status === 401 || status === 403 || REFRESH_ENDS.has(refusal);
+
+/** The tab's own one more try is for this marked pair only ([ApiClient.scheduleSecondTry]). */
+interface SecondTryOf {
+  readonly token: string;
+  readonly outAt: number;
+}
+
+const marked = (t: Tokens | null): boolean => typeof t?.refreshOutAt === "number";
+
+/** The pair alone, without a mark. */
+const bare = (t: Tokens): Tokens => ({ accessToken: t.accessToken, refreshToken: t.refreshToken });
+
+/** [a] with the mark [b] carries for the same token: the earliest first sending, and a second try made by either. */
+function withMark(a: Tokens, b: Tokens): Tokens {
+  if (a.refreshToken !== b.refreshToken || !marked(b)) return a;
+  const outAt = Math.min(a.refreshOutAt ?? Infinity, b.refreshOutAt!);
+  return { ...a, refreshOutAt: outAt, ...(a.refreshTriedAgain || b.refreshTriedAgain ? { refreshTriedAgain: true } : {}) };
+}
+
+/**
+ * A refresh's answer, read whole: the new pair, or the server's own refusal (its `{error, message}` envelope), or null
+ * for anything else (a gateway's page, a body that does not read or does not decode, a `200` among them), which says
+ * nothing of whether the server took the token.
+ */
+async function refreshAnswer(resp: Response): Promise<{ pair: Tokens } | { refusal: string } | null> {
+  let b: Record<string, unknown> | null;
+  try {
+    b = JSON.parse(await resp.text()) as Record<string, unknown> | null;
+  } catch {
+    return null;
+  }
+  if (typeof b !== "object" || b === null) return null;
+  if (resp.ok) return typeof b.accessToken === "string" && typeof b.refreshToken === "string" ? { pair: { accessToken: b.accessToken, refreshToken: b.refreshToken } } : null;
+  return typeof b.error === "string" && typeof b.message === "string" ? { refusal: b.error } : null;
 }
 
 /** A request retries after at most this many refresh/adopt rounds (see raw()). */
@@ -137,18 +398,122 @@ const REFRESH_LOCK_WAIT_MS = 20_000;
  *  race does NOT cancel a fetch, and an uncancelled revocation outlives the sign-out (see
  *  logout()). One constant, one clock. */
 export const LOGOUT_TIMEOUT_MS = 5_000;
+/** The longest wait a refused `end-session` (429) is tried again after: a lock's answer stays prompt. */
+export const END_SESSION_RETRY_MAX_S = 30;
 /** Account deletion (spec 03 §13): how long `POST /account/delete` may take before its outcome is reported unknown —
  *  ample for the server's memory-hard verify and a wait on its writer lock. It also bounds App's hold on a session end
  *  that lands while the request is in flight (account-delete.ts stepDeletionWatch, DELETION_HOLD_LIMIT_MS). */
 export const ACCOUNT_DELETE_TIMEOUT_MS = 60_000;
+/** An answer that is small by its nature: how long its whole answer, the body included, may take (ApiClient.answerTimeoutMs). */
+export const ANSWER_TIMEOUT_MS = 60_000;
+/**
+ * An answer whose size grows with the vault or a file (the sync, a push, an attachment's upload or download): how long it
+ * may go without a byte (ApiClient.progressTimeoutMs). There is no limit on its total: a first sync of a large vault on a
+ * slow line finishes.
+ */
+export const PROGRESS_TIMEOUT_MS = 30_000;
+/**
+ * A browser cannot see a request's body leave, so for a request with a body the wait for the answer's head is the time
+ * without progress plus the time the body takes at this floor rate (2 KiB/s, 16 kbit/s: far below any line that still
+ * carries a page). A 25 MiB attachment is then given about three and a half hours before its answer must begin.
+ */
+export const UPLOAD_FLOOR_BYTES_PER_S = 2_048;
+
+/** The size of a request body as it leaves (a JSON text in UTF-8, or bytes); 0 for anything else. */
+function bodyBytes(body: BodyInit | null | undefined): number {
+  if (typeof body === "string") {
+    let n = 0;
+    for (let i = 0; i < body.length; i++) {
+      const c = body.charCodeAt(i);
+      n += c < 0x80 ? 1 : c < 0x800 ? 2 : c >= 0xd800 && c <= 0xdbff ? (i++, 4) : 3;
+    }
+    return n;
+  }
+  if (body instanceof Uint8Array || body instanceof ArrayBuffer) return body.byteLength;
+  return 0;
+}
+
+/** What a request's answer is: small by its nature (a limit on its whole time), or growing with the vault or a file. */
+export type AnswerSize = "small" | "grows";
+
+/**
+ * The limit of one request without a deadline of its caller. `small`: one deadline from the start for the whole answer.
+ * `grows`: a window that each sign of progress renews (the request leaving, the answer's head, every piece of its body),
+ * paused while the session is refreshed. When it strikes, the request's signal is aborted with an [AnswerLimitError].
+ */
+class AnswerWatch {
+  readonly ctl = new AbortController();
+  fired: AnswerLimitError | null = null;
+  /** Called once when the limit strikes (the body's reader is cancelled through it). */
+  onFire: (() => void) | null = null;
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private over = false;
+
+  constructor(
+    private readonly size: AnswerSize,
+    private readonly ms: number,
+    private readonly floorBytesPerS: number,
+  ) {
+    if (size === "small") this.arm(ms);
+  }
+
+  private arm(ms: number): void {
+    if (this.over) return;
+    if (this.timer !== undefined) clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.fire(), ms);
+  }
+
+  private fire(): void {
+    if (this.over) return;
+    this.over = true;
+    this.timer = undefined;
+    this.fired = new AnswerLimitError(this.size === "small" ? "too_long" : "stalled", this.ms);
+    this.ctl.abort(this.fired);
+    this.onFire?.();
+  }
+
+  /** A request (or its re-send) leaves with a body of [bytes]. */
+  sending(bytes: number): void {
+    if (this.size === "grows") this.arm(this.ms + Math.ceil((bytes * 1000) / this.floorBytesPerS));
+  }
+
+  /** Something of the answer came: its head, or a piece of its body. */
+  progressed(): void {
+    if (this.size === "grows") this.arm(this.ms);
+  }
+
+  /** The session is being refreshed before a re-send (bounded by the refresh's own limits). */
+  waiting(): void {
+    if (this.size === "grows" && this.timer !== undefined && !this.over) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+  }
+
+  /**
+   * An answer is handed on to be read: a window paused for a refresh that led to no second send (the refresh failed, or
+   * the tab is bound to another account now) runs again, so the body of the answer in hand is never read without a limit.
+   */
+  handedOn(): void {
+    if (this.size === "grows" && this.timer === undefined) this.arm(this.ms);
+  }
+
+  /** The answer was read to its end, or failed: no limit is kept running. */
+  done(): void {
+    this.over = true;
+    if (this.timer !== undefined) clearTimeout(this.timer);
+    this.timer = undefined;
+  }
+}
 
 /**
  * Why the session ended (events() → onRevoked): an explicit server `revoked` frame is
  * a real revocation; a 401/403 at ticket mint after a refused refresh is ordinary
  * EXPIRY (laptop asleep past the refresh lifetime) and must not be presented as
- * "your device was revoked".
+ * "your device was revoked". `unconfirmed`: no server ended it; this browser could not confirm the session in time (a
+ * refresh whose answer never came had no try left, [REFRESH_SECOND_TRY_MS]) and ended it itself, sending nothing.
  */
-export type SessionEndKind = "revoked" | "expired";
+export type SessionEndKind = "revoked" | "expired" | "unconfirmed";
 
 /** AbortSignal.timeout where it exists (Chrome 103+/FF 100+/Safari 16+) — some
  *  browsers HAVE Web Locks but not this; a missing timeout must degrade to an
@@ -174,6 +539,56 @@ function isAbort(e: unknown): boolean {
   const name = typeof e === "object" && e !== null ? (e as { name?: unknown }).name : undefined;
   return name === "TimeoutError" || name === "AbortError";
 }
+
+/**
+ * [resp] with its body read through [watch]: each piece renews a growing answer's window, the end (or a failure) stops
+ * the limit, and a limit that strikes while the body comes ends the read with the limit's [AnswerLimitError] (read by
+ * [readAnswerText] as an answer cut off, with the limit named). An answer without a readable body is handed back as it is.
+ */
+function watched(resp: Response, watch: AnswerWatch): Response {
+  // A third review: after a 401 whose refresh failed, the paused window was never started again, and a body that never
+  // came was then waited for without end (every later sync queued behind it). Every answer handed on is watched.
+  watch.handedOn();
+  const src = (resp as { body?: unknown }).body;
+  if (!src || [101, 103, 204, 205, 304].includes(resp.status) || typeof (src as ReadableStream<Uint8Array>).getReader !== "function") {
+    watch.done();
+    return resp;
+  }
+  const reader = (src as ReadableStream<Uint8Array>).getReader();
+  watch.onFire = () => void reader.cancel(watch.fired).catch(() => {});
+  const body = new ReadableStream<Uint8Array>({
+    async pull(c) {
+      let r: ReadableStreamReadResult<Uint8Array>;
+      try {
+        r = await reader.read();
+      } catch (e) {
+        watch.done();
+        c.error(watch.fired ?? e);
+        return;
+      }
+      // A read the limit cancelled ends as "done": it is the limit's end, never the answer's.
+      if (watch.fired) {
+        c.error(watch.fired);
+        return;
+      }
+      if (r.done) {
+        watch.done();
+        c.close();
+        return;
+      }
+      watch.progressed();
+      c.enqueue(r.value);
+    },
+    cancel(reason) {
+      watch.done();
+      return reader.cancel(reason);
+    },
+  });
+  return new Response(body, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
+}
+
+/** A refresh POST as a lock that overtakes it sees it (ApiClient.endSession): the token it spent, and what ended its answer. */
+type RefreshTicket = { spent: string; owner: string | null; orphan: Promise<boolean> | null; settled: boolean };
 
 /**
  * REST client for the andvari server. Holds the token pair, refreshes the access
@@ -212,10 +627,114 @@ export class ApiClient {
    */
   private generation = 0;
 
+  /**
+   * Design §4.4 "a fork stops traffic, not reading": consulted before every request and socket this client makes, and
+   * again when an answer lands. A non-null answer (why traffic stopped) refuses the request with
+   * {@link TrafficStoppedError} before anything leaves the browser, and drops an answer that arrives after it. The app
+   * wires it to the pin of the origin it dials (ui/opensession.ts createWebContext): forked or damaged stops traffic.
+   */
+  trafficGate?: (credentialed: boolean) => string | null;
+
+  /** The live event sockets' closers, so a stop closes them at once ([cutLiveTraffic]). */
+  private readonly liveSockets = new Set<() => void>();
+
+  /**
+   * Throws {@link TrafficStoppedError} while the gate says traffic is stopped. [credentialed] (design §4.4 "No
+   * credential goes to an origin without a pin in force"): the request carries a bearer token, a refresh token, a
+   * logout, or a value derived from the master password ({@link carriesCredential}); the gate refuses those to an
+   * origin with no pin in force. A caller that cannot tell asks as credentialed. [sent]: whether anything of this act
+   * has already left the browser (said at every call; never a default).
+   */
+  assertTrafficAllowed(credentialed: boolean, sent: boolean): void {
+    const why = this.trafficGate?.(credentialed) ?? null;
+    if (why !== null) throw new TrafficStoppedError(why, sent);
+  }
+
+  /** Closes every live event socket (and its reconnects) now: the app calls it when a session finds its pin forked. */
+  cutLiveTraffic(): void {
+    for (const close of [...this.liveSockets]) close();
+  }
+
+  /**
+   * The one `fetch` of the web client: refused before it leaves, and its answer dropped, while traffic is stopped. It
+   * follows no redirect: a redirect is an answer that is not the server's ({@link RedirectRefusedError}).
+   */
+  private async send(url: string, init: RequestInit): Promise<Response> {
+    // The limit of this request (when the client set one) learns when it leaves and when its answer's head came.
+    const watch = init.signal ? this.watches.get(init.signal) : undefined;
+    watch?.sending(bodyBytes(init.body));
+    const credentialed = carriesCredential(url, init);
+    this.assertTrafficAllowed(credentialed, false);
+    const resp = await fetch(url, { ...init, redirect: "manual" });
+    this.assertTrafficAllowed(credentialed, true); // §4.4: nothing from a forked origin is accepted, an answer already on its way included
+    watch?.progressed();
+    if (isRedirect(resp)) throw new RedirectRefusedError(resp.status);
+    return resp;
+  }
+
+  /** A same-origin static file (the downloads manifest), through the same gate as every API call. */
+  fetchStatic(url: string, init: RequestInit = {}): Promise<Response> {
+    return this.limited(init.signal ?? undefined, "small", (s) => this.send(url, s ? { ...init, signal: s } : init));
+  }
+
   setTokens(t: Tokens | null) {
     this.generation++;
+    this.clearSecondTry();
     this.tokens = t;
     this.onTokens(t);
+  }
+
+  private clearSecondTry(): void {
+    if (this.secondTryTimer !== null) clearTimeout(this.secondTryTimer);
+    this.secondTryTimer = null;
+  }
+
+  /**
+   * After a first try whose answer never came, the tab makes the one more try itself at [secondTryAfterMs] from its
+   * sending, if the pair is still that marked pair then (no request, and no other tab, made it meanwhile).
+   */
+  private scheduleSecondTry(asked: Tokens): void {
+    if (this.secondTryAfterMs === null || asked.refreshTriedAgain || !marked(asked)) return;
+    this.clearSecondTry();
+    const of = { token: asked.refreshToken, outAt: asked.refreshOutAt! };
+    const timer = setTimeout(() => {
+      this.secondTryTimer = null;
+      if (this.tokens?.refreshToken !== of.token) return;
+      void this.tryRefresh(of).catch(() => {});
+    }, Math.max(0, of.outAt + this.secondTryAfterMs - Date.now()));
+    (timer as { unref?: () => void }).unref?.();
+    this.secondTryTimer = timer;
+  }
+
+  /**
+   * The request that set a refresh off, after it: re-sent once the session was renewed; its own answer handed back where
+   * the refresh was refused by the server or the pair went meanwhile (as before); and otherwise an error its caller can
+   * tell apart, never its `401`, which reads as the session's end: [RefreshUnansweredError] (the session lives) or
+   * [SessionNotConfirmedError] (ended here; its end was raised once already).
+   */
+  private async afterRefresh(resp: Response): Promise<"resend" | Response> {
+    let outcome: RefreshOutcome;
+    try {
+      outcome = await this.tryRefresh();
+    } catch (e) {
+      if (e instanceof TrafficStoppedError) throw e; // §4.4: a stop, said as a stop
+      throw new RefreshUnansweredError("unanswered", e); // no answer at all (a lost answer, a time limit, a redirect)
+    }
+    switch (outcome) {
+      case "renewed":
+        return "resend";
+      case "unanswered":
+      case "unavailable":
+      case "not_kept":
+        throw new RefreshUnansweredError(outcome);
+      case "not_confirmed":
+        throw new SessionNotConfirmedError();
+      case "elsewhere":
+        throw new SessionEndedElsewhereError();
+      case "refused":
+      case "dropped":
+        return resp;
+    }
   }
 
   /**
@@ -242,6 +761,108 @@ export class ApiClient {
    * not a replacement error path.
    */
   onUpgradeRequired?: () => void;
+
+  /**
+   * Registered by the app shell (App.tsx): a refresh ended the session. `refused`: the server refused it outright in its
+   * own envelope (401/403, or a refresh code). `not_confirmed`: a refresh whose answer never came had no try left, so
+   * nothing was sent and the session ended here ([REFRESH_SECOND_TRY_MS]). The pair is already dropped when this fires;
+   * App ends the session the design §4.4 way (the copy stays).
+   */
+  onRefreshRefused?: (why: RefreshEnd) => void;
+
+  /**
+   * Wired by ui/session.ts makeClient: keeps the refresh token of a session that ended here with no try left, or that a
+   * lock or a sign-out dropped while a refresh of it had no answer, for ONE use: the next sign-in names it as the session
+   * it replaces. It is never sent as a refresh or to end a session.
+   */
+  keepUnconfirmed?: (refreshToken: string, owner: string | null) => void;
+
+  /**
+   * Wired by ui/session.ts makeClient: whether [refreshToken] is one [keepUnconfirmed] kept, in any tab of this browser.
+   * Such a token is never sent, whatever this tab still holds in its memory.
+   */
+  isKeptUnconfirmed?: (refreshToken: string) => boolean;
+
+  /**
+   * Wired by ui/session.ts makeClient: where every tab shares one pair (the offline copy on), what this browser's record
+   * holds now for [refreshToken] ([SharedRecord]); undefined where the pair is this tab's own. A refresh token leaves this
+   * tab only while the record holds that same pair ([mayLeave]); no record of a removed token is kept anywhere, the
+   * record's absence is the guard.
+   */
+  sharedRecord?: (refreshToken: string) => SharedRecord | undefined;
+
+  /**
+   * Whether [refreshToken] may leave this tab now: where every tab shares the pair, only while this browser's record holds
+   * that same pair. A record that cannot be read holds nothing.
+   */
+  private readonly mayLeave = (refreshToken: string): boolean => {
+    const r = this.recordOf(refreshToken);
+    return r === undefined || r === "holds";
+  };
+
+  /** [sharedRecord] for [refreshToken]; a record that cannot be read is gone. */
+  private readonly recordOf = (refreshToken: string): SharedRecord | undefined => {
+    try {
+      return this.sharedRecord?.(refreshToken);
+    } catch {
+      return "gone";
+    }
+  };
+
+  /**
+   * The session every tab shares is no longer the one this browser's record holds: nothing is sent and nothing is kept
+   * (the tab that removed it removed its token too); the pair goes and the tab ends as signed out elsewhere. A property,
+   * not a method, as [noTryLeft]: nothing that walks the client's methods can drop the pair through it.
+   */
+  private readonly endElsewhere = (): RefreshOutcome => {
+    this.setTokens(null);
+    this.onEndedElsewhere?.();
+    return "elsewhere";
+  };
+
+  /**
+   * Registered by the app shell (App.tsx): the session every tab shares (the offline copy on) is no longer the one this
+   * browser's record holds, because another tab signed out or ended it before this tab heard of it. Nothing was sent and
+   * the pair is already dropped when this fires; App lands the tab as that tab's `storage` event would.
+   */
+  onEndedElsewhere?: () => void;
+
+  /**
+   * The tab makes the one more try of a refresh whose answer never came by itself, this long after the first try's
+   * sending ([SECOND_TRY_AFTER_MS]); null: only a request that needs the session makes it. ui/session.ts makeClient sets
+   * it for the app's client; a client built bare (a test, a helper) has no timer of its own.
+   */
+  secondTryAfterMs: number | null = null;
+  private secondTryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * [held] as this browser keeps it: with the mark another tab wrote on the same pair (the session every tab shares with
+   * the offline copy on). Every place that sends a refresh token reads it through here, never its own memory alone.
+   */
+  private asKept(held: Tokens): Tokens {
+    let persisted: Tokens | null = null;
+    try {
+      persisted = this.readPersistedTokens?.() ?? null;
+    } catch {
+      persisted = null;
+    }
+    return persisted ? withMark(held, persisted) : held;
+  }
+
+  /** Whether [t]'s refresh token may leave: no refresh of it is out unanswered, and it is not a kept token. */
+  private spendable(t: Tokens): boolean {
+    return !marked(t) && !this.isKeptUnconfirmed?.(t.refreshToken);
+  }
+
+  /** Keeps [refreshToken] for the next sign-in's name ([keepUnconfirmed]), as [owner]'s (the account the client was
+   *  bound to when the call that keeps it began); a failure keeps nothing, and sends nothing. */
+  private keepForNextSignIn(refreshToken: string, owner: string | null = this.boundUserId): void {
+    try {
+      this.keepUnconfirmed?.(refreshToken, owner);
+    } catch {
+      /* not kept: the next sign-in names nothing; nothing is sent either way */
+    }
+  }
 
   /**
    * Security review 2026-10 (plugin scan F1/F2, branch A10): every server-supplied id is checked against the UUID
@@ -287,31 +908,76 @@ export class ApiClient {
     return accountKeys === s.accountKeys ? s : { ...s, accountKeys };
   }
 
-  private async raw(method: string, path: string, body?: unknown, auth = true, attempt = 0, signal?: AbortSignal): Promise<Response> {
+  /**
+   * Two kinds of limit on an answer, for a request whose caller sets no deadline of its own (review: an answer whose head
+   * arrived and whose body never did left the screen waiting for ever; a second review: a limit on the whole time made the
+   * first sync of a large vault on a slow line impossible). An answer that is small by its nature: [answerTimeoutMs] for
+   * the whole answer, the body included, one limit for the request and its re-send after a refresh. An answer whose size
+   * grows with the vault or a file: [progressTimeoutMs] without a byte, and no limit on its total. Past either before the
+   * answer's head: a [NoAnswerInTimeError] (a TypeError, as for any request with no answer); past it while the body comes
+   * in: the body read fails, an answer that could not be read ([AnswerCutOffError]). Both say which limit it was.
+   */
+  answerTimeoutMs = ANSWER_TIMEOUT_MS;
+  /** The time without progress for an answer that grows with the vault or a file. */
+  progressTimeoutMs = PROGRESS_TIMEOUT_MS;
+  /** The floor rate a request's body is given to leave before its answer must begin (see UPLOAD_FLOOR_BYTES_PER_S). */
+  uploadFloorBytesPerS = UPLOAD_FLOOR_BYTES_PER_S;
+
+  /** The limit of each request in flight, by the signal it was sent with: [send] tells it when the request leaves and its head comes. */
+  private readonly watches = new WeakMap<AbortSignal, AnswerWatch>();
+
+  /** [run] under [signal], or under this client's own limit of the kind [size] names when the caller set none. */
+  private async limited(signal: AbortSignal | undefined, size: AnswerSize, run: (s: AbortSignal | undefined) => Promise<Response>): Promise<Response> {
+    if (signal !== undefined) return run(signal);
+    const watch = new AnswerWatch(size, size === "small" ? this.answerTimeoutMs : this.progressTimeoutMs, this.uploadFloorBytesPerS);
+    this.watches.set(watch.ctl.signal, watch);
+    let resp: Response;
+    try {
+      resp = await run(watch.ctl.signal);
+    } catch (e) {
+      watch.done();
+      // No answer came within the limit: said as no answer, the way a fetch that got none fails, with the limit named.
+      if (watch.fired && (e === watch.fired || isAbort(e))) throw new NoAnswerInTimeError(watch.fired.kind, watch.fired.ms);
+      throw e;
+    }
+    return watched(resp, watch);
+  }
+
+  private raw(method: string, path: string, body?: unknown, auth = true, attempt = 0, signal?: AbortSignal, size: AnswerSize = "small"): Promise<Response> {
+    return this.limited(signal, size, (s) => this.rawSend(method, path, body, auth, attempt, s));
+  }
+
+  private async rawSend(method: string, path: string, body: unknown, auth: boolean, attempt: number, signal: AbortSignal | undefined): Promise<Response> {
     const headers: Record<string, string> = { "X-Andvari-Client": CLIENT_HEADER };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     const used = auth && this.tokens ? this.tokens.accessToken : null;
     if (used) headers["Authorization"] = `Bearer ${used}`;
-    const resp = await fetch(this.baseUrl + path, {
+    // The account this request was made for. A 401 is retried, or the pair refreshed for it, only while
+    // the tab is still bound to that account: after a sign-out and a sign-in as another, the old request ends with its
+    // 401 instead of going out again under the new account's token.
+    const bound = this.boundUserId;
+    const resp = await this.send(this.baseUrl + path, {
       method,
       headers,
-      // A PreSerializedJson body goes on the wire byte-for-byte (adminRecovery); everything
-      // else is serialized here, as before.
-      body: body === undefined ? undefined : body instanceof PreSerializedJson ? body.text : JSON.stringify(body),
+      body: body === undefined ? undefined : JSON.stringify(body),
       // Optional deadline (account deletion): one signal for the request and its re-send, so the whole call is bounded.
       ...(signal ? { signal } : {}),
     });
-    if (resp.status === 401 && auth && attempt < MAX_AUTH_ATTEMPTS && this.tokens) {
+    if (resp.status === 401 && auth && attempt < MAX_AUTH_ATTEMPTS && this.tokens && this.boundUserId === bound) {
       // A refresh that completed while this request was in flight (another caller's
       // single-flight refresh, or a pair adopted from another tab) already replaced
       // the tokens — retry with the fresh access token instead of rotating again.
-      if (this.tokens.accessToken !== used) return this.raw(method, path, body, auth, attempt + 1, signal);
-      if (await this.tryRefresh()) return this.raw(method, path, body, auth, attempt + 1, signal);
+      if (this.tokens.accessToken !== used) return this.rawSend(method, path, body, auth, attempt + 1, signal);
+      // The refresh awaits: a sign-out and a sign-in as another account can happen meanwhile, and the re-send would then
+      // carry that account's token. It goes out only while the tab is still bound to the account it was made for.
+      // The window paused here runs again when the answer in hand is handed on without a re-send ([watched]).
+      if (signal) this.watches.get(signal)?.waiting();
+      if ((await this.afterRefresh(resp)) === "resend" && this.boundUserId === bound) return this.rawSend(method, path, body, auth, attempt + 1, signal);
     }
     return resp;
   }
 
-  private refreshInFlight: Promise<boolean> | null = null;
+  private refreshInFlight: Promise<RefreshOutcome> | null = null;
 
   /**
    * F25 — the refresh token is SINGLE-USE and rotating; the server's reuse heuristic
@@ -328,20 +994,20 @@ export class ApiClient {
    * pair — a 502/503/429 is the server having a moment, and destroying the pair on
    * it would cascade into a false fleet-wide "revoked" sign-out.
    */
-  private tryRefresh(): Promise<boolean> {
-    this.refreshInFlight ??= this.refreshExclusive().finally(() => {
+  private tryRefresh(secondTryOf?: SecondTryOf): Promise<RefreshOutcome> {
+    this.refreshInFlight ??= this.refreshExclusive(secondTryOf).finally(() => {
       this.refreshInFlight = null;
     });
     return this.refreshInFlight;
   }
 
-  private async refreshExclusive(): Promise<boolean> {
+  private async refreshExclusive(secondTryOf?: SecondTryOf): Promise<RefreshOutcome> {
     // Web Locks API (Chrome 69+/FF 96+/Safari 15.4+) serializes tabs. Where missing
     // (older browsers, non-window contexts) proceed unlocked — the persisted-pair
     // re-read in refreshNow still catches most cross-tab races, and in-tab callers
     // are already deduped by the shared promise.
     const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
-    if (!locks?.request) return this.refreshNow();
+    if (!locks?.request) return this.refreshNow(secondTryOf);
     // `granted` disambiguates a rejected lock WAIT from a failure of refreshNow
     // itself: post-grant errors must propagate untouched (re-running refreshNow after
     // its own fetch timed out could replay a rotation that DID land server-side).
@@ -352,7 +1018,7 @@ export class ApiClient {
         { signal: timeoutSignal(REFRESH_LOCK_WAIT_MS) },
         () => {
           granted = true;
-          return this.refreshNow();
+          return this.refreshNow(secondTryOf);
         },
       );
     } catch (e) {
@@ -361,23 +1027,115 @@ export class ApiClient {
       // proceed WITHOUT cross-tab exclusion. Per-tab single-flight still holds and
       // the persisted re-read still runs; the worst case is a rare double-rotation —
       // strictly better than every tab stalling behind one wedged fetch.
-      return this.refreshNow();
+      return this.refreshNow(secondTryOf);
     }
   }
 
-  private async refreshNow(): Promise<boolean> {
-    const spending = this.tokens;
-    if (!spending) return false;
+  private async refreshNow(secondTryOf?: SecondTryOf): Promise<RefreshOutcome> {
+    const held = this.tokens;
+    if (!held) return "dropped";
     const generation = this.generation; // W2: the pair this refresh may replace
     // Re-read INSIDE the lock: if another tab already rotated (the persisted refresh
     // token differs from the one we were about to spend), adopt its pair — POSTing
     // ours now would replay a consumed token and revoke the device.
     const persisted = this.readPersistedTokens?.() ?? null;
-    if (persisted && persisted.refreshToken !== spending.refreshToken) {
+    if (persisted && persisted.refreshToken !== held.refreshToken) {
       this.setTokens(persisted);
-      return true;
+      return "renewed";
     }
-    const resp = await fetch(this.baseUrl + "/api/v1/auth/refresh", {
+    // Where every tab shares the pair, this tab's token leaves only while the record holds that same pair: a record gone
+    // (another tab signed out) or holding no pair means this tab has not yet heard of that end, and its token, which that
+    // tab may have spent, never goes.
+    // This tab's own sign-in could not write the record (a full storage): nothing ended elsewhere, the session was never
+    // saved where every tab shares it. Nothing is sent, and the request says so (RENEWAL_NOT_SAVED), as for a mark that
+    // could not be written.
+    if (this.recordOf(held.refreshToken) === "unsaved") return "not_kept";
+    if (!this.mayLeave(held.refreshToken)) return this.endElsewhere();
+    // A refresh whose answer never came (spec 03 §2, the grace): the server may have taken the token, and then answers it
+    // again with the same pair for sixty seconds from the replacement only. So it is tried once more, by any tab (the mark
+    // another tab wrote on this pair counts here), within [REFRESH_SECOND_TRY_MS] of its first sending, and never after:
+    // a third try, or one after the window, would read as a stolen token's reuse and end every session of the device.
+    const spending = persisted ? withMark(held, persisted) : held;
+    const kept = this.isKeptUnconfirmed?.(spending.refreshToken) === true;
+    const now = Date.now();
+    const inWindow = marked(spending) && !spending.refreshTriedAgain && now >= spending.refreshOutAt! && now - spending.refreshOutAt! <= REFRESH_SECOND_TRY_MS;
+    if (secondTryOf) {
+      // The tab's own one more try: made only for the marked pair it was set for, inside the window; anything else (a
+      // request or another tab made it, the answer came, the window is gone) leaves the end, if any, to the next request.
+      if (kept || !inWindow || spending.refreshToken !== secondTryOf.token || spending.refreshOutAt !== secondTryOf.outAt) return "dropped";
+    }
+    let asked: Tokens;
+    if (kept || (marked(spending) && !inWindow)) {
+      this.noTryLeft(spending);
+      return "not_confirmed";
+    } else if (marked(spending)) {
+      asked = { ...spending, refreshTriedAgain: true }; // counted before it goes: never a third
+    } else {
+      asked = { ...bare(spending), refreshOutAt: now };
+    }
+    // Written with the pair before the request goes: whatever cuts it off (a lost answer, the tab closed, reloaded or
+    // asleep) leaves it. Not a new pair (no W2 generation): the same session, marked. The write is read back where the
+    // pair is kept: a mark that could not be written is not a mark, and nothing is sent without one.
+    this.tokens = asked;
+    if (!this.markKept(asked)) {
+      this.tokens = spending;
+      return "not_kept";
+    }
+    const ticket: RefreshTicket = { spent: asked.refreshToken, owner: this.boundUserId, orphan: null, settled: false };
+    this.refreshTicket = ticket;
+    try {
+      const outcome = await this.refreshSend(asked, generation, ticket);
+      if (outcome === "unanswered" && this.tokens?.refreshToken === asked.refreshToken) this.scheduleSecondTry(asked);
+      return outcome;
+    } catch (e) {
+      // The gate's stop (§4.4) refused it before it left: nothing reached the server, so the pair stands as it was before
+      // this try. Every other failure (no answer, a timeout, a redirect) leaves the mark.
+      if (e instanceof TrafficStoppedError && !e.sent && this.tokens === asked) {
+        this.tokens = spending;
+        this.onTokens(spending);
+      } else if (this.tokens === asked) this.scheduleSecondTry(asked);
+      throw e;
+    } finally {
+      ticket.settled = true;
+    }
+  }
+
+  /**
+   * Writes [asked] (the pair with its mark) through the persistence hook and reads it back where the pair is kept. False
+   * when the browser keeps this pair (its token) and the write did not put the mark there: a reload, or another tab, would
+   * then find the token unmarked and send it again at any later time. A pair the browser keeps nowhere (no reader wired,
+   * or no record of it) lives only in this client's memory, which holds the mark.
+   */
+  private markKept(asked: Tokens): boolean {
+    let threw = false;
+    try {
+      this.onTokens(asked);
+    } catch {
+      threw = true;
+    }
+    if (!this.readPersistedTokens) return !threw;
+    let back: Tokens | null;
+    try {
+      back = this.readPersistedTokens();
+    } catch {
+      return false;
+    }
+    if (back === null || back.refreshToken !== asked.refreshToken) return !threw;
+    return back.refreshOutAt === asked.refreshOutAt && (back.refreshTriedAgain === true) === (asked.refreshTriedAgain === true);
+  }
+
+  /**
+   * No try is left for a refresh whose answer never came: nothing is sent, and the session ends here with an end of its
+   * own (`not_confirmed`, never said as the server's). Its token is kept for one use only ([keepUnconfirmed]).
+   */
+  private readonly noTryLeft = (s: Tokens): void => {
+    this.keepForNextSignIn(s.refreshToken);
+    this.setTokens(null);
+    this.onRefreshRefused?.("not_confirmed");
+  };
+
+  private async refreshSend(spending: Tokens, generation: number, ticket: RefreshTicket): Promise<RefreshOutcome> {
+    const resp = await this.send(this.baseUrl + "/api/v1/auth/refresh", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Andvari-Client": CLIENT_HEADER },
       body: JSON.stringify({ refreshToken: spending.refreshToken }),
@@ -385,32 +1143,183 @@ export class ApiClient {
       // every OTHER tab's (they queue behind us for up to REFRESH_LOCK_WAIT_MS).
       signal: timeoutSignal(REFRESH_FETCH_TIMEOUT_MS),
     });
-    // W2: the pair was dropped or replaced while this refresh was in flight — adopt nothing.
-    if (this.generation !== generation) return false;
-    if (!resp.ok) {
-      // Only a definitive refusal means the pair is dead. Anything else (502/503/504/
-      // 429, a proxy error page) is transient: keep the pair — clearing it here would
-      // persist tokens:null, fail the next WS ticket mint with 401, and cascade a
-      // FALSE "session ended" sign-out across every tab.
-      if (resp.status === 401 || resp.status === 403) this.setTokens(null);
-      return false;
+    // W2: the pair was dropped or replaced while this refresh was in flight — adopt nothing. Spec 03 §2: a
+    // rotated pair that nobody adopts is a live session nobody holds, so it is ended by its own refresh token (the lock
+    // that dropped the pair reads the result through [ticket]).
+    if (this.generation !== generation) {
+      ticket.orphan = this.endOrphanedAnswer(resp, ticket);
+      return "dropped";
     }
-    const pair = (await resp.json()) as Tokens;
-    if (this.generation !== generation) return false; // W2: …or while its body was read
-    this.setTokens(pair);
-    return true;
+    const answer = await refreshAnswer(resp);
+    if (this.generation !== generation) {
+      // W2: …or while its body was read (and F2: a rotated pair nobody adopts is ended).
+      ticket.orphan = this.endOrphaned(answer, resp.status, ticket);
+      return "dropped";
+    }
+    // No answer of the server's (a gateway's page, a body that does not read, a 200 among them): the mark stays, for the
+    // one more try. Never read as the server's end: a gateway's 401 page is not the server refusing the token.
+    if (answer === null) return "unanswered";
+    if ("refusal" in answer) {
+      // Only a definitive refusal means the pair is dead. Anything else in the server's envelope (a 502/503/429 of its
+      // own) is transient: keep the pair — clearing it here would persist tokens:null, fail the next WS ticket mint with
+      // 401, and cascade a FALSE "session ended" sign-out across every tab.
+      if (serverEnded(answer.refusal, resp.status)) {
+        this.setTokens(null);
+        this.onRefreshRefused?.("refused"); // design §4.4: the server ended the session
+        return "refused";
+      }
+      // The server's answer to a first try clears the mark (it took nothing). To a second try, the first is still
+      // unanswered: the mark stays, and no third try goes.
+      const cur = this.tokens;
+      if (!spending.refreshTriedAgain && cur && cur.refreshToken === spending.refreshToken) {
+        this.tokens = bare(cur);
+        this.onTokens(this.tokens);
+      }
+      return "unavailable";
+    }
+    this.ownRotations.set(spending.refreshToken, answer.pair.refreshToken);
+    this.setTokens(answer.pair);
+    return "renewed";
   }
 
-  /** Like raw() but with a binary request body (attachments). */
-  private async rawBytes(method: string, path: string, body: Uint8Array | undefined, attempt = 0): Promise<Response> {
+  /**
+   * What an answer nobody adopted comes to: a rotated pair is ended by its own refresh token; only the
+   * server's own refusal of the token confirms that nothing it made is live. Anything else (a gateway's page of any
+   * status, a body that does not read, the server's answer for the moment) is not a confirmation. Where the answer is
+   * not the server's own at all (a page), the server may have taken the token and rotated the chain: the spent token is
+   * kept for the next sign-in's name, as for a refresh that got no answer, as the account's the refresh began under.
+   */
+  private endOrphaned(answer: { pair: Tokens } | { refusal: string } | null, status: number, ticket: RefreshTicket): Promise<boolean> {
+    if (answer === null) {
+      this.keepForNextSignIn(ticket.spent, ticket.owner);
+      return Promise.resolve(false);
+    }
+    if ("pair" in answer) return this.postEndSession(answer.pair.refreshToken);
+    return Promise.resolve(serverEnded(answer.refusal, status));
+  }
+
+  /**
+   * The refresh tokens this client's OWN refreshes replaced, each with the one the server answered in its place. A pair
+   * adopted from another tab (the persisted pair, the `storage` listener) is never in it: it is not this client's line.
+   */
+  private readonly ownRotations = new Map<string, string>();
+
+  /**
+   * Whether the pair held now is the session whose refresh token was [refreshToken], as this client itself has kept it:
+   * that token, or what this client's own refreshes turned it into. A sign-in's way out (ui/tabsession.ts) ends only
+   * such a pair.
+   */
+  holdsSessionOf(refreshToken: string): boolean {
+    const held = this.tokens?.refreshToken;
+    if (held === undefined) return false;
+    let t: string | undefined = refreshToken;
+    for (let step = 0; t !== undefined && step <= 64; step++) {
+      if (t === held) return true;
+      t = this.ownRotations.get(t);
+    }
+    return false;
+  }
+
+  /**
+   * The refresh POST last sent, for a lock that overtook it ([endSession]): [orphan] is set when its answer landed after
+   * the pair was dropped or replaced, to whether the session that answer made is ended (true also when the refresh was
+   * refused: nothing it made is live).
+   */
+  private refreshTicket: RefreshTicket | null = null;
+
+  /** An answer to a refresh whose pair was dropped meanwhile, read as [endOrphaned] reads it. */
+  private async endOrphanedAnswer(resp: Response, ticket: RefreshTicket): Promise<boolean> {
+    return this.endOrphaned(await refreshAnswer(resp), resp.status, ticket);
+  }
+
+  /** `POST /auth/end-session` (spec 03 §2, index row 93), bounded and best effort: true only on the server's `200 ok`. */
+  private async postEndSession(refreshToken: string, attempt = 0): Promise<boolean> {
+    try {
+      const resp = await this.send(this.baseUrl + "/api/v1/auth/end-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Andvari-Client": CLIENT_HEADER },
+        body: JSON.stringify({ refreshToken }),
+        signal: timeoutSignal(LOGOUT_TIMEOUT_MS),
+      });
+      // A refusal for the moment (429, the server naming its wait) is tried once more after that
+      // wait, with the same token, which this call alone still holds (the tab dropped its pair at once). A wait the
+      // server does not name, or one longer than END_SESSION_RETRY_MAX_S, is not waited for: the answer is "not
+      // confirmed", which the unlock card says (LOCK_REVOKE_UNCONFIRMED).
+      if (resp.status === 429 && attempt === 0) {
+        const raw = resp.headers.get("Retry-After");
+        const wait = raw !== null && /^\d{1,4}$/.test(raw.trim()) ? Number(raw.trim()) : null;
+        if (wait === null || wait > END_SESSION_RETRY_MAX_S) return false;
+        await new Promise((r) => setTimeout(r, Math.max(wait, 1) * 1000));
+        return this.postEndSession(refreshToken, 1);
+      }
+      return resp.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Spec 03 §2 (index row 93): the lock of a tab that keeps no token (a browser without the offline copy)
+   * ends exactly this tab's session at the server, by its own refresh token. The logout would end every session of the
+   * browser's device row, so every other tab of this account in this browser; this call leaves them alone.
+   *
+   * Call it while the pair is still held and drop the pair right after, synchronously (as the logout's callers do): it
+   * reads the pair and the refresh in flight now, closes this client's events sockets, and resolves later to whether the
+   * server confirmed the end. Best effort: it never rejects, and the pair goes at once whatever it resolves to.
+   *  - No refresh on its way: `end-session` with the pair's refresh token, the newest this tab holds.
+   *  - A refresh on its way is spending that token, and sending a spent token reads as reuse at the server, which ends
+   *    every tab of this browser for the account. So nothing is sent now: the drop makes that refresh adopt nothing (W2),
+   *    and its answer, whenever it lands, is ended by its own new refresh token (refreshNow). This resolves to that.
+   *    A refresh still waiting for another tab's refresh lock never sends (it finds no pair once it is let in), and one
+   *    that has already adopted its answer left the pair read here as the newest: either way that token is unspent.
+   */
+  endSession(): Promise<boolean> {
+    const held = this.tokens;
+    const owner = this.boundUserId; // a token kept below is this account's, also after the caller rebinds the client
+    const t = this.refreshTicket;
+    const inflight = this.refreshInFlight;
+    this.cutLiveTraffic();
+    if (!held) return Promise.resolve(true);
+    // The pair as this browser keeps it: a mark another tab wrote on it, or a token kept from a session that ended here.
+    const pair = this.asKept(held);
+    if (!inflight || !t || t.settled || t.spent !== pair.refreshToken) {
+      // Where every tab shares the pair and the record no longer holds it, nothing is sent and nothing is kept.
+      if (!this.mayLeave(pair.refreshToken)) return Promise.resolve(false);
+      // A refresh of this token got no answer: the server may hold it as replaced, and `end-session` reads a replaced
+      // token as a stolen one's reuse (every session of the row ends). Nothing is sent; the end is not confirmed, and the
+      // token is kept for the next sign-in's name, so that the server ends that chain as replaced.
+      if (!this.spendable(pair)) {
+        this.keepForNextSignIn(pair.refreshToken, owner);
+        return Promise.resolve(false);
+      }
+      return this.postEndSession(pair.refreshToken);
+    }
+    // It spent the pair's token: its answer is ended when it lands. A refresh that got no answer is unknown: its token is
+    // kept for the next sign-in's name, as above.
+    const outcome = () => {
+      if (t.orphan) return t.orphan;
+      this.keepForNextSignIn(t.spent, owner);
+      return Promise.resolve(false);
+    };
+    return inflight.then(outcome, outcome);
+  }
+
+  /** Like raw() but with a binary request body (attachments): an answer that grows with a file. */
+  private rawBytes(method: string, path: string, body: Uint8Array | undefined): Promise<Response> {
+    return this.limited(undefined, "grows", (s) => this.rawBytesSend(method, path, body, 0, s));
+  }
+
+  private async rawBytesSend(method: string, path: string, body: Uint8Array | undefined, attempt: number, signal: AbortSignal | undefined): Promise<Response> {
     const headers: Record<string, string> = { "X-Andvari-Client": CLIENT_HEADER };
     if (body !== undefined) headers["Content-Type"] = "application/octet-stream";
     const used = this.tokens ? this.tokens.accessToken : null;
     if (used) headers["Authorization"] = `Bearer ${used}`;
-    const resp = await fetch(this.baseUrl + path, { method, headers, body: body as BodyInit | undefined });
-    if (resp.status === 401 && attempt < MAX_AUTH_ATTEMPTS && this.tokens) {
-      if (this.tokens.accessToken !== used) return this.rawBytes(method, path, body, attempt + 1);
-      if (await this.tryRefresh()) return this.rawBytes(method, path, body, attempt + 1);
+    const bound = this.boundUserId; // as in rawSend: a re-send goes out only for the account the request was made for
+    const resp = await this.send(this.baseUrl + path, { method, headers, body: body as BodyInit | undefined, ...(signal ? { signal } : {}) });
+    if (resp.status === 401 && attempt < MAX_AUTH_ATTEMPTS && this.tokens && this.boundUserId === bound) {
+      if (this.tokens.accessToken !== used) return this.rawBytesSend(method, path, body, attempt + 1, signal);
+      if (signal) this.watches.get(signal)?.waiting();
+      if ((await this.afterRefresh(resp)) === "resend" && this.boundUserId === bound) return this.rawBytesSend(method, path, body, attempt + 1, signal);
     }
     return resp;
   }
@@ -418,21 +1327,47 @@ export class ApiClient {
   private async throwApiError(resp: Response): Promise<never> {
     let code = `http_${resp.status}`;
     let message = resp.statusText;
+    let body: unknown = null;
     try {
-      const err = await resp.json();
-      code = err.error ?? code;
-      message = err.message ?? message;
+      body = await resp.json();
+      const err = body as { error?: unknown; message?: unknown };
+      if (typeof err.error === "string") code = err.error;
+      if (typeof err.message === "string") message = err.message;
     } catch {
       /* non-JSON error body */
     }
     if (code === "upgrade_required") this.onUpgradeRequired?.();
-    throw new ApiError(resp.status, code, message);
+    const e = new ApiError(resp.status, code, message);
+    if (body !== null) e.extras = decodeErrorExtras(code, body as never);
+    if (resp.status === 429) e.retryAfterS = retryAfterSeconds(resp.headers?.get("Retry-After") ?? null);
+    throw e;
+  }
+
+  /**
+   * The transport of the v2 routes (api/wireclient.ts): the same token, refresh and 401-retry handling as every
+   * other call, a refusal thrown as an [ApiError] with its extras, and a success handed back as text for the
+   * caller's own strict decoder. `auth = false` for the routes that run without a session.
+   */
+  async sendRequest(method: string, path: string, body?: unknown, opts: { auth?: boolean; signal?: AbortSignal; size?: AnswerSize } = {}): Promise<RawAnswer> {
+    const resp = await this.raw(method, path, body, opts.auth ?? true, 0, opts.signal, opts.size ?? "small");
+    if (!resp.ok) await this.throwApiError(resp);
+    return { status: resp.status, text: await readAnswerText(resp), contentType: resp.headers?.get("Content-Type") ?? null };
+  }
+
+  /**
+   * [sendRequest] for the two attachment routes (spec 03 §9): a raw byte body out (an upload) or raw bytes back (a
+   * download), with the same token, refresh and 401-retry handling. A refusal is the same [ApiError].
+   */
+  async requestBytes(method: string, path: string, body?: Uint8Array): Promise<Response> {
+    const resp = await this.rawBytes(method, path, body);
+    if (!resp.ok) await this.throwApiError(resp);
+    return resp;
   }
 
   private async json<T>(method: string, path: string, body?: unknown, auth = true): Promise<T> {
     const resp = await this.raw(method, path, body, auth);
     if (!resp.ok) await this.throwApiError(resp);
-    const text = await resp.text();
+    const text = await readAnswerText(resp);
     return (text ? JSON.parse(text) : undefined) as T;
   }
 
@@ -441,7 +1376,7 @@ export class ApiClient {
   private async text(method: string, path: string, body?: unknown, auth = true): Promise<string> {
     const resp = await this.raw(method, path, body, auth);
     if (!resp.ok) await this.throwApiError(resp);
-    return resp.text();
+    return readAnswerText(resp);
   }
 
   async prelogin(email: string) {
@@ -507,21 +1442,39 @@ export class ApiClient {
    * revokes the right session. Resolves with the final logout response: `ok` = revoked.
    */
   async logout(): Promise<Response> {
-    const pair = this.tokens;
+    const held = this.tokens;
+    // Read at call time (the caller drops the pair right after), with what this browser keeps of it: the mark another
+    // tab wrote on the same pair (the session every tab shares with the offline copy on), or a token kept as unconfirmed.
+    const atCall = held ? this.asKept(held) : null;
     const signal = timeoutSignal(LOGOUT_TIMEOUT_MS);
     const post = (accessToken: string | null) => {
       const headers: Record<string, string> = { "X-Andvari-Client": CLIENT_HEADER };
       if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
-      return fetch(this.baseUrl + "/api/v1/auth/logout", { method: "POST", headers, signal });
+      return this.send(this.baseUrl + "/api/v1/auth/logout", { method: "POST", headers, signal });
     };
-    const first = await post(pair?.accessToken ?? null);
-    if (first.status !== 401 || !pair) return first;
-    const refreshed = await fetch(this.baseUrl + "/api/v1/auth/refresh", {
+    const first = await post(atCall?.accessToken ?? null);
+    if (first.status !== 401 || !atCall) return first;
+    // Where every tab shares the pair and the record no longer holds it (another tab signed out, ended it, or renewed it),
+    // this tab's token never goes, and nothing is kept: the sign-out is not confirmed.
+    if (!this.mayLeave(atCall.refreshToken)) return first;
+    // A refresh of the pair's token got no answer, in this tab or another, or its session ended here unconfirmed: it is
+    // never sent as a refresh from here (the refresh's own rule), read again now, since another tab may have marked it
+    // while the logout was on its way. It is kept for the next sign-in's name; the sign-out is not confirmed.
+    const pair = this.asKept(atCall);
+    if (!this.spendable(atCall) || !this.spendable(pair)) {
+      this.keepForNextSignIn(pair.refreshToken);
+      return first;
+    }
+    const refreshed = await this.send(this.baseUrl + "/api/v1/auth/refresh", {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Andvari-Client": CLIENT_HEADER },
       body: JSON.stringify({ refreshToken: pair.refreshToken }),
       signal,
     });
+    // Both the access and the refresh token refused: the session is already ended at the server (another tab of this
+    // browser logged the device row out first). That is the confirmation a revoke wants, not
+    // a failure to report; any other answer (5xx, 429, unreachable) stays unconfirmed.
+    if (refreshed.status === 401) return new Response(null, { status: 204 });
     if (!refreshed.ok) return first;
     const fresh = (await refreshed.json()) as Tokens;
     return post(fresh.accessToken);
@@ -543,35 +1496,7 @@ export class ApiClient {
     return p;
   }
 
-  async sync(since: number) {
-    return this.reported("sync", sanitizeSync(await this.json<SyncResponse>("GET", `/api/v1/sync?since=${since}`)));
-  }
-
-  push(mutations: Mutation[]) {
-    return this.json<PushResponse>("POST", "/api/v1/sync/push", { mutations });
-  }
-
-  /** Item history: the archived ciphertext versions of an item (server keeps the last 10),
-   *  grant-checked. The caller decrypts each blob under the held VK (Account.decryptItemVersion). */
-  async itemVersions(itemId: string) {
-    return this.json<ItemVersionsResponse>("GET", `/api/v1/items/${pathSeg(itemId)}/versions`);
-  }
-
-  /** Item undelete: the caller's tombstoned items (grant-scoped server-side). */
-  async deletedItems() {
-    const r = await this.json<DeletedItemsResponse>("GET", "/api/v1/items/deleted");
-    return { ...r, items: this.reported("deletedItems", sanitizeDeletedItems(r.items)) };
-  }
-
-  /** Item undelete: restore a tombstoned item from a re-encrypted version; returns the new rev. */
-  async restoreItem(itemId: string, upload: ItemUpload) {
-    return this.json<ItemRestoreResponse>("POST", `/api/v1/items/${pathSeg(itemId)}/restore`, upload);
-  }
-
-  /** Item undelete (F49): "Delete forever" — hard-delete a tombstoned item + its versions. */
-  async purgeItem(itemId: string) {
-    return this.json<ItemRestoreResponse>("POST", `/api/v1/items/${pathSeg(itemId)}/purge`);
-  }
+  // The item routes (sync, push, history, trash, attachments) are the item layer's, in api/wireclient.ts (ItemWire).
 
   // ---- shared vaults (spec 03 §10) — refused on the public break-glass origin ----
 
@@ -579,7 +1504,7 @@ export class ApiClient {
     return this.json<CreateVaultResponse>("POST", "/api/v1/vaults", req);
   }
 
-  // ---- account state + personal wrap + identity (security review 2026-10, root cause A §4, A5) ----
+  // ---- account state + identity (security review 2026-10, root cause A §4, A5) ----
 
   /** The UVK-sealed account-state blob and the server's CAS counter. */
   accountState() {
@@ -591,31 +1516,15 @@ export class ApiClient {
     return this.json<AccountStateResponse>("PUT", "/api/v1/account/state", { sealedState, baseSeq });
   }
 
-  /** First set (migration) or replace (with a fresh `currentAuthKey`, owner decision Q9). */
-  async putPersonalWrap(wrap: PersonalWrap, currentAuthKey?: string) {
-    await this.text("PUT", "/api/v1/account/personal-wrap", { vaultId: wrap.vaultId, wrappedVk: wrap.wrappedVk, ...(currentAuthKey ? { currentAuthKey } : {}) });
-  }
-
-  /** The identity key the server holds for `userId`: UNTRUSTED until a human verifies it. */
-  async userIdentity(userId: string) {
-    const u = await this.json<UserLookupResponse>("GET", `/api/v1/users/${pathSeg(userId)}/identity`);
-    const r = refusedUser(u);
-    if (r) this.refuseWire("userIdentity", r);
-    return u;
-  }
-
-  async lookupUser(email: string) {
-    const u = await this.json<UserLookupResponse>("POST", "/api/v1/users/lookup", { email });
-    const r = refusedUser(u);
-    if (r) this.refuseWire("lookupUser", r);
-    return u;
-  }
 
   async vaultMembers(vaultId: string) {
     return this.reported("members", sanitizeMembers(await this.json<VaultMemberSummary[]>("GET", `/api/v1/vaults/${pathSeg(vaultId)}/members`)));
   }
 
-  async addVaultMember(vaultId: string, body: VaultMemberAdd) {
+  // The member, lifecycle and transfer routes below have no caller in the web app (its shared vaults change through the
+  // vault's log, vault/logstore.ts); each is named so that it can be searched for apart from the store's gestures (see
+  // api/sends.ts).
+  async postVaultMember(vaultId: string, body: VaultMemberAdd) {
     return this.json<CreateVaultResponse>("POST", `/api/v1/vaults/${pathSeg(vaultId)}/members`, body);
   }
 
@@ -626,7 +1535,7 @@ export class ApiClient {
   /** DELETE member. `proof`/`nonce` (spec 03 §11 removal proof) are optional and additive:
    *  when supplied they ride the body so a 0.5.0 victim can verify the removal was a real
    *  owner action; omitted → the proofless 0.4.0 shape (no body). */
-  async removeVaultMember(vaultId: string, userId: string, body?: VaultMemberRemoveRequest) {
+  async deleteVaultMember(vaultId: string, userId: string, body?: VaultMemberRemoveRequest) {
     return this.json<CreateVaultResponse>(
       "DELETE",
       `/api/v1/vaults/${pathSeg(vaultId)}/members/${pathSeg(userId)}`,
@@ -654,15 +1563,15 @@ export class ApiClient {
     return this.json<CreateVaultResponse>("POST", `/api/v1/vaults/${pathSeg(vaultId)}/leave`, body ?? {});
   }
 
-  async offerTransfer(vaultId: string, body: TransferOfferRequest) {
+  async postTransferOffer(vaultId: string, body: TransferOfferRequest) {
     return this.json<TransferOfferResponse>("POST", `/api/v1/vaults/${pathSeg(vaultId)}/transfer`, body);
   }
 
-  async cancelTransfer(vaultId: string) {
+  async deleteTransferOffer(vaultId: string) {
     return this.json<CreateVaultResponse>("DELETE", `/api/v1/vaults/${pathSeg(vaultId)}/transfer`);
   }
 
-  async acceptTransfer(vaultId: string, body: TransferAcceptRequest) {
+  async postTransferAccept(vaultId: string, body: TransferAcceptRequest) {
     return this.json<CreateVaultResponse>("POST", `/api/v1/vaults/${pathSeg(vaultId)}/transfer/accept`, body);
   }
 
@@ -670,40 +1579,8 @@ export class ApiClient {
     return this.json<CreateVaultResponse>("PUT", `/api/v1/vaults/${pathSeg(vaultId)}/meta`, body);
   }
 
-  /** Member self-wrap (security review 2026-10, root cause A §3.2): store our own UVK wrap of the VK
-   *  on our grant row so every device of this account reads the key from it, not the seal. */
-  async putGrantSelfWrap(vaultId: string, body: { wrappedVk: string }) {
-    return this.json<CreateVaultResponse>("PUT", `/api/v1/vaults/${pathSeg(vaultId)}/grant/self-wrap`, body);
-  }
 
-  /** Owner re-issue of a member's grant as v2 with the same vault key (root cause A §8.2 step 4, A6). */
-  async reissueGrant(vaultId: string, userId: string, body: { signedGrant: string }) {
-    return this.json<CreateVaultResponse>("PUT", `/api/v1/vaults/${pathSeg(vaultId)}/members/${pathSeg(userId)}/grant`, body);
-  }
 
-  putEscrow(sealed: string, fingerprint: string) {
-    return this.raw("PUT", "/api/v1/escrow/self", { sealed, fingerprint });
-  }
-
-  /** The usage ledger (spec 02 §8.2) — one opaque blob per user. `sealedUsage: null` means this
-   *  account has never written one, which callers must read as "no usage recorded", NEVER as
-   *  "nothing has been used". */
-  getUsage() {
-    return this.json<{ sealedUsage: string | null; updatedAt: number }>("GET", "/api/v1/usage");
-  }
-
-  /** Replace the stored ledger. Last-writer-wins by design — callers merge before calling, and
-   *  MUST batch (spec 03 §3: never one PUT per fill, or `updatedAt` becomes an activity trace).
-   *
-   *  Rides text(), NOT raw() (audit H34): raw() resolves with the error Response on a non-2xx, so
-   *  a refused write — 400 `bad_usage_blob`, 413, 5xx, a 401 the refresh could not cure — used to
-   *  look exactly like a landed one. UsageTracker.flush() re-arms its buffer only when this
-   *  REJECTS, so with raw() its "a failed flush must not silently drop the session's uses" catch
-   *  was unreachable for every server refusal and the window's uses were dropped. The extension
-   *  (api.ts json()) and core (AndvariApi `if (!resp.status.isSuccess()) throw`) already threw. */
-  putUsage(sealedUsage: string): Promise<string> {
-    return this.text("PUT", "/api/v1/usage", { sealedUsage });
-  }
 
   // F57: current org recovery PUBLIC key (base64url); the client verifies its fingerprint
   // against the user-confirmed sheet value before re-sealing escrow to it.
@@ -759,44 +1636,21 @@ export class ApiClient {
     return this.text("POST", "/api/v1/recovery/self/confirm", body);
   }
 
-  // ---- attachments (spec 02 §6: body = 24-byte header ‖ ciphertext chunks) ----
-
-  async uploadAttachment(id: string, itemId: string, vaultId: string, body: Uint8Array): Promise<AttachmentMeta> {
-    const q = `vaultId=${pathSeg(vaultId)}&itemId=${pathSeg(itemId)}`;
-    const resp = await this.rawBytes("POST", `/api/v1/attachments/${pathSeg(id)}?${q}`, body);
-    if (!resp.ok) await this.throwApiError(resp);
-    return (await resp.json()) as AttachmentMeta;
-  }
-
-  async downloadAttachment(id: string): Promise<Uint8Array> {
-    const resp = await this.rawBytes("GET", `/api/v1/attachments/${pathSeg(id)}`, undefined);
-    if (!resp.ok) await this.throwApiError(resp);
-    return new Uint8Array(await resp.arrayBuffer());
-  }
-
   // ---- server TOTP + password change ----
 
   totpStatus() {
     return this.json<TotpStatus>("GET", "/api/v1/account/totp");
   }
 
-  /** A FIRST enrollment outside the server's fresh-login window needs `currentAuthKey` — the
-   *  login authKey of the typed master password (spec 03 §2, security review 2026-10); see
-   *  ui/totp-enrol.ts. Without it the call keeps the fielded no-body shape. */
-  totpSetup(currentAuthKey?: string) {
-    if (currentAuthKey !== undefined) {
-      return this.json<TotpSetupResponse>("POST", "/api/v1/account/totp/setup", { currentAuthKey });
-    }
-    return this.json<TotpSetupResponse>("POST", "/api/v1/account/totp/setup");
+  // Setting two-step sign-in up is WireApi.totpSetup, always with the password proof (vault/settingsflow.ts setUpTwoStep).
+
+  /** Answers the plain-text `ok` (spec 03 §0.1 row 15), never a status: two-step sign-in is on once it resolves. */
+  async totpConfirm(code: string): Promise<void> {
+    await this.text("POST", "/api/v1/account/totp/confirm", { code });
   }
 
-  totpConfirm(code: string) {
-    return this.json<TotpStatus>("POST", "/api/v1/account/totp/confirm", { code });
-  }
-
-  totpDisable(code: string) {
-    return this.json<TotpStatus>("POST", "/api/v1/account/totp/disable", { code });
-  }
+  // Turning two-step sign-in off carries the password proof beside the code (spec 03 §0.1 row 16): it goes through the
+  // Settings flows (vault/settingsflow.ts turnOffTwoStep), which prove the password on this device first.
 
   changePassword(req: PasswordChangeRequest) {
     return this.text("PUT", "/api/v1/account/password", req);
@@ -896,18 +1750,6 @@ export class ApiClient {
   /** §8.4 drill hook — POST the receipt `recovery-cli verify` printed (verbatim JSON text). */
   async adminEscrowDrill(receiptJson: string) {
     return this.json<{ dropped: string[]; kept: string[] }>("POST", "/api/v1/admin/escrow/drill", JSON.parse(receiptJson));
-  }
-
-  /** F59 recovery step 3 (spec 04 §4) — POST the recovery-cli bundle to `/admin/recovery`. H24
-   *  (audit 2026-09-13): the route, the CLI that emits the exact wire body and the self-hosting
-   *  guide's "upload the result in the admin panel" all existed, and no shipped client had a call
-   *  site — the admin was left to improvise curl with a bearer token the web app never shows. The
-   *  bundle text goes on the wire VERBATIM: it is the server's own RecoveryUpload type serialized
-   *  by the CLI, and PRC-1 taught that re-serializing it once turned `tempKdfParams` into a JSON
-   *  string and 400'd the household's only path back from a forgotten master password. Answers
-   *  "ok"; `no_such_user` / `kdf_too_weak` / a decode 400 surface as ApiError for the panel. */
-  adminRecovery(bundleText: string) {
-    return this.text("POST", "/api/v1/admin/recovery", new PreSerializedJson(bundleText));
   }
 
   async adminRevokeDevice(deviceId: string) {
@@ -1029,6 +1871,7 @@ export class ApiClient {
         // Tickets are single-use (spec 03 §6) — re-mint on every attempt.
         const t = await this.json<WsTicketResponse>("POST", "/api/v1/events/ticket");
         if (closed) return;
+        this.assertTrafficAllowed(true, true); // §4.4: the socket is traffic too (its ticket was minted with the bearer token, and that request went out)
         const sock = new WebSocket(this.baseUrl.replace(/^http/, "ws") + `/api/v1/events?ticket=${encodeURIComponent(t.ticket)}`);
         ws = sock;
         let registered = false; // per socket: a reconnect proves itself again
@@ -1043,6 +1886,10 @@ export class ApiClient {
         };
         sock.onmessage = (ev) => {
           if (closed) return; // a frame after close()/revoked must not reset the ladder or fire onOpen (extension parity)
+          if (this.trafficGate?.(true) != null) {
+            close(); // §4.4: a frame from a forked origin is not accepted; the socket goes with it
+            return;
+          }
           if (ev.data === "pong") {
             // The echo loop runs after the server's notifier.register(): the first pong is
             // the proof the bell can reach this socket. Exactly once per socket.
@@ -1074,6 +1921,17 @@ export class ApiClient {
         };
       } catch (e) {
         if (closed) return;
+        if (e instanceof TrafficStoppedError) {
+          close(); // §4.4: no reconnect to a forked origin
+          return;
+        }
+        if (e instanceof SessionNotConfirmedError || e instanceof SessionEndedElsewhereError) {
+          // The session ended here, not confirmed: its one end was raised already (onRefreshRefused). None of the socket's.
+          close();
+          return;
+        }
+        // A renewal that got no answer of the server's (RefreshUnansweredError, a TypeError) is not the session's end:
+        // the socket tries again later, as for any request without an answer (below).
         if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
           // Session died (refresh already attempted inside json()) — surface it via the
           // consumer's existing session-expiry path and stop retrying. This is plain
@@ -1105,10 +1963,9 @@ export class ApiClient {
     };
     if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisible);
 
-    void connect();
-
-    return () => {
+    const close = () => {
       closed = true;
+      this.liveSockets.delete(close);
       if (timer !== null) {
         clearTimeout(timer);
         timer = null;
@@ -1118,5 +1975,10 @@ export class ApiClient {
       ws?.close();
       ws = null;
     };
+    this.liveSockets.add(close);
+
+    void connect();
+
+    return close;
   }
 }

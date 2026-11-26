@@ -60,27 +60,14 @@ describe("H117 — the post-'Wrong password' offer row", () => {
     expect(vault).toContain("a new password is ready — change it on the site, then press Save to keep it here");
   });
 
-  it("R03/R14/R15 — the Android twin ships the SAME sentence, labels AND generate behaviour", () => {
-    // Both lanes wrote this offer in the same cut, each from the design text, each asking the
-    // other to align — so the labels matched and the sentence and the behaviour did not: Android
-    // said “is marked as a wrong password. Change it now?” and its “Generate a new password”
-    // opened an ordinary editor that generated nothing. One label carrying two behaviours across
-    // the twins is worse than two labels, so pin the pair here, where the web string is declared.
-    const health = readFileSync(here("../../../app-android/src/main/kotlin/io/silencelen/andvari/app/HealthScreen.kt"), "utf8");
-    expect(health, "the phone's sentence is web's sentence, byte for byte (only the interpolation differs)").toContain(
-      "“$name” is marked as having the wrong password. Change it?",
-    );
-    for (const label of ["Open the item", "Generate a new password", "Not now"]) {
-      expect(health, `the phone offers ${label} too`).toContain(`Text("${label}")`);
-    }
-    const vm = readFileSync(here("../../../app-android/src/main/kotlin/io/silencelen/andvari/app/AndvariViewModel.kt"), "utf8");
-    expect(vm, "…and its generate leg really generates, like web's").toContain("openEditor(itemId, generate = true)");
-    const main = readFileSync(here("../../../app-android/src/main/kotlin/io/silencelen/andvari/app/MainActivity.kt"), "utf8");
-    expect(main).toContain("if (vm.editorGenerateOnOpen && isLogin)");
-    expect(main, "…with web's notice, so neither client implies the value is saved").toContain(
-      "a new password is ready — change it on the site, then press Save to keep it here",
-    );
-  });
+  // R03/R14/R15: this file also pinned the Android twin (the same sentence, the same three labels
+  // and a "Generate a new password" that really generates), because both clients once wrote this
+  // offer from the design text and drifted apart. That half is retired for now: the old Android
+  // health screen was deleted when the app moved to the new design's screens, which show visible
+  // placeholders until the product's wording is approved. The behaviour is tested on Android's side
+  // (the new health screen's own tests: the refused-password offer opens the item, or its editor
+  // with a new password shown and not saved). Bring the wording half back here, against the new
+  // screen or one shared sentence, when the approved wording lands on Android.
 
   it("the generate flag cannot leak into the NEXT editor the user opens", () => {
     // closeLayers (every navigation), Cancel and a completed save all clear it — otherwise the

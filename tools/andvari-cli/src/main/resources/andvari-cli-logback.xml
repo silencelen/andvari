@@ -1,0 +1,19 @@
+<!--
+  andvari-cli's logging (main() selects this file through logback.configurationFile unless the caller set one).
+  A command's standard output is its result, which scripts read: nothing is logged there. Warnings and errors go to
+  standard error; nothing below WARN is logged. logback's own status lines (its start-up report) are never printed.
+-->
+<configuration>
+    <statusListener class="ch.qos.logback.core.status.NopStatusListener"/>
+    <appender name="STDERR" class="ch.qos.logback.core.ConsoleAppender">
+        <target>System.err</target>
+        <encoder>
+            <!-- A message may quote a server's words: every control, format or line-separator character becomes '?', and an
+                 exception's text is folded into the one line the same way. -->
+            <pattern>andvari-cli: %-5level %logger{20} - %replace(%msg){'[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]', '?'}%replace(%ex{short}){'[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]', '?'}%nopex%n</pattern>
+        </encoder>
+    </appender>
+    <root level="WARN">
+        <appender-ref ref="STDERR"/>
+    </root>
+</configuration>

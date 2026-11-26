@@ -8,9 +8,7 @@ import { isUuid } from "./wireids.ts";
  *
  *  - item homes (`itemHomes:<userId>`): `{ [itemId]: vaultId }` — a key or value that is not a UUID is dropped;
  *  - the personal-wrap cache (`personalWrap:<userId>`): `{ vaultId, wrappedVk }` with a UUID vault id and nothing
- *    else, or null;
- *  - a pending personal change (`personalChange:<userId>`): the wrap plus the optional ciphertext names and the
- *    current vault id ("" while nothing is in force — A9 review MEDIUM-1), or null.
+ *    else, or null. (The pending personal change is gone: one personal wrap ever exists, design 2026-11-15 §5.3.)
  *
  * A decoder reports whether the stored value had to be cleaned (`rewrite`) so the caller can re-persist it once.
  * Chrome-free and runtime-import-free (node --test friendly).
@@ -52,29 +50,4 @@ export function decodePersonalWrap(raw: unknown): Decoded<PersonalWrapRecord | n
   const keys = Object.keys(o);
   if (keys.length !== 2 || !isUuid(o.vaultId) || typeof o.wrappedVk !== "string") return { value: null, rewrite: true };
   return { value: { vaultId: o.vaultId, wrappedVk: o.wrappedVk }, rewrite: false };
-}
-
-export interface PersonalChangeStored extends PersonalWrapRecord {
-  currentVaultId?: string;
-  currentMetaBlob?: string;
-  servedMetaBlob?: string;
-}
-
-const CHANGE_KEYS = new Set(["vaultId", "wrappedVk", "currentVaultId", "currentMetaBlob", "servedMetaBlob"]);
-
-/** A pending personal change: the served wrap (UUID vault id), `currentVaultId` a UUID or "" (nothing in force). */
-export function decodePersonalChange(raw: unknown): Decoded<PersonalChangeStored | null> {
-  if (raw === undefined || raw === null) return { value: null, rewrite: false };
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { value: null, rewrite: true };
-  const o = raw as Record<string, unknown>;
-  if (!Object.keys(o).every((k) => CHANGE_KEYS.has(k))) return { value: null, rewrite: true };
-  if (!isUuid(o.vaultId) || typeof o.wrappedVk !== "string") return { value: null, rewrite: true };
-  const cur = o.currentVaultId;
-  if (cur !== undefined && cur !== "" && !isUuid(cur)) return { value: null, rewrite: true };
-  for (const k of ["currentMetaBlob", "servedMetaBlob"] as const) if (o[k] !== undefined && typeof o[k] !== "string") return { value: null, rewrite: true };
-  const out: PersonalChangeStored = { vaultId: o.vaultId, wrappedVk: o.wrappedVk };
-  if (cur !== undefined) out.currentVaultId = cur as string;
-  if (typeof o.currentMetaBlob === "string") out.currentMetaBlob = o.currentMetaBlob;
-  if (typeof o.servedMetaBlob === "string") out.servedMetaBlob = o.servedMetaBlob;
-  return { value: out, rewrite: false };
 }

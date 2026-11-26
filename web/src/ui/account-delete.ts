@@ -1,8 +1,13 @@
 import { AccountDeleteBlockedError, AccountDeleteUnknownError, ApiError, type ApiClient, type SessionEndKind } from "../api/client";
 import type { AccountDeleteBlocker, AccountDeletePreview } from "../api/types";
-import { KdfPolicyError, WEAK_KDF_MESSAGE } from "../crypto/keys";
+import { KdfPolicyError } from "../crypto/keys";
 import { ReauthFailedError, ReauthStaleSessionError, type Account } from "../vault/account";
-import { UNREACHABLE } from "./errors";
+import { answerLimitText, UNREACHABLE } from "./errors";
+import type { AccountDeletePreviewV2 } from "../api/wire";
+import { type DeletionOutcome as FlowDeletionOutcome, NO_SESSION_WRAP, PASSWORD_CHANGE_UNCONFIRMED, PENDING_CHANGE_UNSETTLED, PROOF_REFUSED, SERVER_KEYS_NOT_KNOWN, type SettingsWire, settlePendingChange } from "../vault/settingsflow";
+import { passwordChangeText } from "./reauthtext";
+import { DELETE_ALREADY_DELETED, DELETE_ALREADY_DELETED_UNNAMED, fill, kdfRefusalText, PASSWORD_CHANGE_NOT_CONFIRMED, passwordRuleText, SERVER_KEYS_NOT_KNOWN_REFUSED, SERVER_REFUSED_PROOF, SIGNIN_BACKOFF } from "./copy";
+import { fmtDay } from "./format";
 
 /**
  * Settings → Delete account (spec 03 §13; design docs/design/2026-11-10-account-deletion.md §11). The pure half of the
@@ -89,17 +94,31 @@ export function deletionSummary(
   preview: AccountDeletePreview,
   vaultName: (vaultId: string) => string | null,
   personalVaultId: string | null,
+  /**
+   * Spec 03 §13 (2026-11-16): the caller's `GET /vaults/deleted`, named from its own `metaBlob` (null where it did
+   * not open). A vault of the preview that is in it was already deleted by the person: it is not one "only you hold",
+   * and it is said apart, with the day it could still be restored until.
+   */
+  recentlyDeleted: readonly { readonly vaultId: string; readonly name: string | null; readonly purgeAt: number }[] = [],
 ): { deletes: string[]; leaves: string[] } {
-  const others = preview.deletedVaults.filter((v) => v !== personalVaultId);
+  const already = new Map(recentlyDeleted.map((d) => [d.vaultId, d] as const));
+  const others = preview.deletedVaults.filter((v) => v !== personalVaultId && !already.has(v));
   const named = others.map(vaultName).filter((n): n is string => n !== null);
   const unnamed = others.length - named.length;
   const vaults: string[] = [];
   if (personalVaultId !== null && preview.deletedVaults.includes(personalVaultId)) vaults.push("your Personal vault");
   if (named.length > 0) vaults.push(`${named.length === 1 ? "the vault" : "the vaults"} only you use, ${quoted(named)}`);
   if (unnamed > 0) vaults.push(unnamed === 1 ? "1 other vault only you hold" : `${unnamed} other vaults only you hold`);
+  const deletedBefore = preview.deletedVaults
+    .filter((v) => v !== personalVaultId)
+    .flatMap((v) => {
+      const d = already.get(v);
+      return d === undefined ? [] : [d.name !== null ? fill(DELETE_ALREADY_DELETED, d.name, fmtDay(d.purgeAt)) : fill(DELETE_ALREADY_DELETED_UNNAMED, fmtDay(d.purgeAt))];
+    });
   const deletes = [
     "Your account, and its sign-in on every device.",
     ...(vaults.length > 0 ? [`${capitalize(joinAnd(vaults))} — every item, attachment and earlier version in them.`] : []),
+    ...deletedBefore,
     "Your recovery phrase and your household recovery backup: nobody, an admin included, can bring the account back.",
     "Invites you sent that nobody has used yet.",
   ];
@@ -126,6 +145,8 @@ function capitalize(s: string): string {
 
 /** Why the preview could not be loaded. */
 export function previewErrorText(e: unknown): string {
+  const limit = answerLimitText(e);
+  if (limit !== null) return limit;
   if (e instanceof ApiError && e.code === "account_delete_public_disabled") return PUBLIC_ORIGIN_REFUSED;
   if (e instanceof ApiError && e.code === "totp_enrollment_required") return TOTP_ENROLL_FIRST;
   if (e instanceof TypeError) return UNREACHABLE;
@@ -134,19 +155,30 @@ export function previewErrorText(e: unknown): string {
 
 const PUBLIC_ORIGIN_REFUSED =
   "Deleting an account isn't available from this emergency address. Use your household's usual andvari address.";
-const TOTP_ENROLL_FIRST = "This server requires two-factor sign-in: turn it on above first, then delete the account.";
+/** Approved wording (decided on 2026-11-17): the deletion refused until two-step sign-in is on. Was "This server requires two-factor sign-in: turn it on above first, then delete the account." */
+export const TOTP_ENROLL_FIRST ="This server requires two-step sign-in. Turn it on above first, then delete the account.";
 
 /** One sentence per refusal of the deletion request (or of the local password proof that precedes it). Every one of them
  *  means NOTHING was deleted — the server refuses before its transaction writes anything. */
 export function deleteErrorText(e: unknown): string {
   if (e instanceof ReauthFailedError) return e.message; // caught locally — the password never left this browser
   if (e instanceof ReauthStaleSessionError) return e.message;
-  if (e instanceof KdfPolicyError) return WEAK_KDF_MESSAGE;
+  if (e instanceof KdfPolicyError) return kdfRefusalText(e);
   if (e instanceof TypeError) return UNREACHABLE;
   if (e instanceof ApiError) {
     switch (e.code) {
+      // The server refused a proof that was made here (a wrong password is ReauthFailedError above, and sends nothing).
       case "reauth_failed":
-        return new ReauthFailedError().message;
+      case PROOF_REFUSED:
+        return SERVER_REFUSED_PROOF;
+      case SERVER_KEYS_NOT_KNOWN:
+        // Spec 01 §7: the server refused the proof while this session is marked as holding keys the server does not.
+        return SERVER_KEYS_NOT_KNOWN_REFUSED;
+      case PASSWORD_CHANGE_UNCONFIRMED:
+        // A password change has no answer and the server's keys could not be read: nothing was sent.
+        return PASSWORD_CHANGE_NOT_CONFIRMED;
+      case PENDING_CHANGE_UNSETTLED:
+        return new ReauthStaleSessionError().message;
       case "totp_code_required":
         return "Enter the code from your authenticator app.";
       case "bad_totp_code":
@@ -160,7 +192,8 @@ export function deleteErrorText(e: unknown): string {
       case "credential_changed":
         return "Your password was changed, or this device was signed out, while deleting — nothing was deleted. Sign in again and retry.";
       case "rate_limited":
-        return "Too many attempts — wait a while, then try again.";
+        // The proofs' own back-off (spec 03, 2026-11-16; it never blocks a sign-in): the sign-in back-off's sentence.
+        return SIGNIN_BACKOFF;
       case "upgrade_required":
         return "This tab is running an older version — reload to update, then try again.";
     }
@@ -189,9 +222,14 @@ export const SESSION_ENDED_OUTCOME_UNKNOWN =
   "Your session ended, so andvari can't tell whether your account was deleted. Sign in to find out: if your account still exists, you can.";
 
 /** App's card when the session ended WHILE the deletion request was in flight and its answer never came: that end was, most
- *  likely, the deletion's own revocation (the server revokes the account's sockets the moment the deletion commits). */
+ *  likely, the deletion's own revocation (the server revokes the account's sockets the moment the deletion commits).
+ *  PLACEHOLDER: its Forget keeps which account the address is and that account's key (the account may still exist), so
+ *  the line no longer says that everything this browser kept for it goes. Must say: the session ended during the deletion
+ *  and its answer never came, so it most likely went through; this browser can forget the account (its sign-in, its
+ *  offline copy, its settings here) but keeps which account the address is and that account's key, so that the account,
+ *  if it still exists, is known again at a sign-in; or sign in to check. */
 export const DELETION_MOST_LIKELY_DONE =
-  "Your session ended while your account was being deleted, and the server's answer never arrived — the deletion most likely went through. You can make this browser forget the account: its sign-in, its offline copy and everything else it kept for it. Or sign in to check: if your account still exists, you can.";
+  "⟦The session ended while the account was being deleted and the server's answer never came, so the deletion most likely went through. This browser can forget the account here (its sign-in, its offline copy, its settings) and keeps only which account the address is and that account's key, so that the account, if it still exists, is known again at a sign-in. Or sign in to check: an account that still exists signs in.⟧";
 
 export type DeletionOutcome =
   | { kind: "deleted"; deletedAt: number }
@@ -204,25 +242,32 @@ export type DeletionOutcome =
   | { kind: "session_gone" };
 
 /**
- * The submit. The master-password proof is derived through the account's fenced reauth (`Account.reauthAuthKey`: the KDF
- * floor, only this session's salt, and the derivation proved by opening this session's UVK), so a wrong password is caught
- * HERE and never sent. Then the one request; `onSend` fires just before it (App holds a session end that lands while it is
+ * The submit. The master-password proof is derived through the account's reauth (`Account.reauthAuthKey`: proven against
+ * the wrap this session keeps, under its own salt and cost, with nothing fetched), so a wrong password is caught HERE
+ * and nothing at all is sent. Then the one request; `onSend` fires just before it (App holds a session end that lands while it is
  * in flight). A transport failure, a timeout, a 5xx or a reply that is not the server's JSON is the ambiguous case — it may
  * have committed — and is reported as `unknown`, never as a failure; a 401, before or on the request, is `session_gone`.
  */
 export async function runAccountDeletion(
-  client: Pick<ApiClient, "accountKeys" | "deleteAccount">,
-  account: Pick<Account, "reauthAuthKey">,
+  client: Pick<ApiClient, "deleteAccount"> & Partial<Pick<ApiClient, "accountKeys">>,
+  account: Pick<Account, "reauthAuthKey"> & Partial<Pick<Account, "sessionWrap">>,
   input: { email: string; password: string; totp: string; totpRequired: boolean },
   onSend?: () => void,
 ): Promise<DeletionOutcome> {
+  // A proof is never sent while a password change of this session hangs: which password the server holds is read from
+  // its keys first, and the proof is made with that one only. Where it cannot be read, nothing is sent.
+  const wrap = account.sessionWrap;
+  if (wrap !== undefined && wrap.pendingAll.length > 0) {
+    const st = client.accountKeys === undefined ? ({ kind: "refused", code: PASSWORD_CHANGE_UNCONFIRMED } as const) : await settlePendingChange(wrap, client as Pick<SettingsWire, "accountKeys">);
+    if (st.kind === "session_ended") return { kind: "session_gone" };
+    if (st.kind !== "settled") return { kind: "error", message: passwordChangeText(st), ...(st.kind === "refused" ? { code: st.code } : {}) };
+  }
   let currentAuthKey: string;
   try {
-    currentAuthKey = await account.reauthAuthKey(input.password, await client.accountKeys());
+    // Spec 01 §7: proven against the wrap this session keeps; nothing is fetched for it.
+    currentAuthKey = await account.reauthAuthKey(input.password);
   } catch (e) {
-    if (e instanceof ApiError && e.status === 401) return { kind: "session_gone" };
-    if (e instanceof TypeError) return { kind: "error", message: deleteErrorText(e), unanswered: true };
-    return { kind: "error", message: deleteErrorText(e), ...(e instanceof ApiError ? { code: e.code } : {}) };
+    return { kind: "error", message: deleteErrorText(e) };
   }
   const totp = input.totpRequired ? totpDigits(input.totp) : "";
   onSend?.();
@@ -233,6 +278,8 @@ export async function runAccountDeletion(
     if (e instanceof AccountDeleteBlockedError) return { kind: "blocked", blockers: e.blockers };
     if (e instanceof AccountDeleteUnknownError || e instanceof TypeError) return { kind: "unknown" };
     if (e instanceof ApiError && e.status === 401) return { kind: "session_gone" };
+    // Spec 01 §7: refused while the session is marked as holding keys the server does not: said as that.
+    if (e instanceof ApiError && e.code === "reauth_failed" && account.sessionWrap?.serverKeysNotKnown === true) return { kind: "error", message: SERVER_KEYS_NOT_KNOWN_REFUSED, code: SERVER_KEYS_NOT_KNOWN };
     return { kind: "error", message: deleteErrorText(e), ...(e instanceof ApiError ? { code: e.code } : {}) };
   }
 }
@@ -413,7 +460,8 @@ export function stepDeletionWatch(w: DeletionWatch, e: DeletionWatchEvent): { wa
   }
   if (e.kind === "checked") {
     if (e.result === "still_here") return { watch: { ...s, unknown: false }, action: none };
-    if (e.result === "session_ended") return { watch: idle, action: ended("expired") };
+    // An end held meanwhile is the one said (a session this browser could not confirm is never said as expired).
+    if (e.result === "session_ended") return { watch: idle, action: ended(s.held ?? "expired") };
     return { watch: s, action: none };
   }
   switch (e.outcome) {
@@ -437,6 +485,59 @@ export function stepDeletionWatch(w: DeletionWatch, e: DeletionWatchEvent): { wa
 /** The notice on the sign-in card after a deletion this browser ran. */
 export const ACCOUNT_DELETED_NOTICE =
   "Your andvari account was deleted. Everything only it held is gone from the server, and this browser kept nothing of it.";
+
+/** Approved wording (decided on 2026-11-17): a membership's log reports a head time far in the future (design §3.11); nothing was signed or sent. */
+export const DELETE_FUTURE_HEAD = "One of your shared vaults reports a time far in the future. Try again later. Nothing was deleted.";
+/** PLACEHOLDER: a leave was stale (`account_delete_log_stale`): the preview is fetched again on the next try. */
+export const DELETE_LOG_STALE = "One of your shared vaults changed while you were deleting. Nothing was deleted; try again.";
+/** Approved wording (decided on 2026-11-17): `at_ahead` on a leave. */
+export const DELETE_CLOCK_AHEAD = "Your device's clock is ahead. Set the correct time and try again. Nothing was deleted.";
+
+/** The post-cut-over preview (spec 03 §13) in the shape the card renders (its memberships are the flow's own). */
+export function previewOfV2(p: AccountDeletePreviewV2): AccountDeletePreview {
+  return { blockers: p.blockers.map((b) => ({ kind: b.kind, vaultId: b.vaultId, others: b.others })), deletedVaults: p.deletedVaults, leftVaults: p.leftVaults, totpRequired: p.totpRequired };
+}
+
+/**
+ * `vault/settingsflow.ts` deleteAccount's outcome (with its leaves from the verified logs) as the card's outcome. Only
+ * `deleted` is a deletion; `unknown` stays the ambiguous case; a preview that could not be read was never sent.
+ */
+export function cardOutcomeOf(o: FlowDeletionOutcome): DeletionOutcome {
+  switch (o.kind) {
+    case "deleted":
+      return { kind: "deleted", deletedAt: o.deletedAt };
+    case "blocked":
+      return { kind: "blocked", blockers: o.blockers.map((b) => ({ kind: b.kind, vaultId: b.vaultId, others: b.others })) };
+    case "unknown":
+      return { kind: "unknown" };
+    case "session_ended":
+      return { kind: "session_gone" };
+    case "unreachable":
+      return { kind: "error", message: UNREACHABLE, unanswered: true };
+    case "email_mismatch":
+      return { kind: "error", message: deleteErrorText(new ApiError(400, "confirm_email_mismatch", "")), code: "confirm_email_mismatch" };
+    case "totp_needed":
+      return { kind: "error", message: deleteErrorText(new ApiError(400, "totp_code_required", "")), code: "totp_code_required" };
+    case "bad_totp":
+      return { kind: "error", message: deleteErrorText(new ApiError(400, "bad_totp_code", "")), code: "bad_totp_code" };
+    case "wrong_password":
+      return { kind: "error", message: new ReauthFailedError().message, code: "reauth_failed" };
+    case "future_head":
+      return { kind: "error", message: DELETE_FUTURE_HEAD, code: "future_head" };
+    case "log_stale":
+      return { kind: "error", message: DELETE_LOG_STALE, code: "account_delete_log_stale" };
+    case "clock_ahead":
+      return { kind: "error", message: DELETE_CLOCK_AHEAD, code: "at_ahead" };
+    case "password_rule":
+      return { kind: "error", message: passwordRuleText(o.decision), code: "password_rule" };
+    case "rate_limited":
+      return { kind: "error", message: SIGNIN_BACKOFF, code: "rate_limited" };
+    case "refused":
+      // This tab keeps no wrap to prove against (spec 01 §7): nothing was sent; the core twin's sentence says what to do.
+      if (o.code === NO_SESSION_WRAP) return { kind: "error", message: new ReauthStaleSessionError().message, code: o.code };
+      return { kind: "error", message: deleteErrorText(new ApiError(400, o.code, "")), code: o.code };
+  }
+}
 
 /** The notice after the member chose to forget an account whose deletion's answer was lost (it no longer signs in). */
 export const ACCOUNT_FORGOTTEN_NOTICE =

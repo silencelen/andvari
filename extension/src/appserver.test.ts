@@ -79,8 +79,8 @@ test("only the Safari build adopts, only the app's origin, and only when it diff
   assert.equal(appServerToAdopt({ kind: "unavailable" }, "https://other.example", "safari"), null);
 });
 
-// Spec 03 §13 (owner decision 2026-11-15): an account deleted in the app leaves the device as a fresh install, with
-// nothing of the account's server. The app then has no server, and says so: the extension forgets the one it adopted.
+// Spec 03 §13 (decided on 2026-11-15): an account deleted in the app leaves the device as a fresh install, with nothing
+// of the account's server. The app then has no server, and says so: the extension forgets the one it adopted.
 test("the extension forgets its server only when the app itself says it has none, in the Safari build, with one in effect", () => {
   assert.equal(appServerToForget({ kind: "none" }, true, "safari"), true);
   assert.equal(appServerToForget({ kind: "none" }, false, "safari"), false, "a first install: nothing to forget");
@@ -104,10 +104,11 @@ test("forgetting removes the kept choice first, then the origin's records, and l
   assert.equal(bg.split("forgetAppServer(").length - 1, 2, "one caller");
   const forget = bg.slice(bg.indexOf("async function forgetAppServer("), bg.indexOf("function syncAppServer("));
   const steps = [
-    "await trusted.remove([SERVER_URL_KEY]);",
+    "redeemGen++;",
+    "await trusted.remove([SERVER_URL_KEY, LAST_EMAIL_KEY]);",
     "if (trustedStoreOk) return false;",
     "APP_VAULT?.close();",
-    "applyServerChange(DEFAULT_SERVER_URL)",
+    "applyServerChange(NO_SERVER_ORIGIN)",
     "if (!noServerChosen()) return false;",
     "await purgeOriginNamespace(oldKey)",
     'dialBlock = { kind: "unsettled" };',
@@ -125,7 +126,7 @@ test("forgetting removes the kept choice first, then the origin's records, and l
   // When the worker's own ask got no answer, the popup asks the app itself: it hands the app's "none" to the worker as
   // it does a server, through the one relay (read there with the one parser, where only an explicit null is "none").
   const popup = readFileSync(new URL("./popup.ts", import.meta.url), "utf8");
-  assert.match(popup, /else if \(own\.answer\.kind === "none"\) \{\s*await ask\(\{ type: "appServerAnswer", url: null, nativeSave: own\.nativeSave, askedAt \}\);/);
+  assert.match(popup, /else if \(own\.answer\.kind === "none"\) \{[\s\S]{0,200}?await ask\(\{ type: "appServerAnswer", url: null, nativeSave: own\.nativeSave, askedAt \}\);/);
 });
 
 // Wiring pins: the worker adopts through the one trusted commit, the message is extension-page-only, and the Safari

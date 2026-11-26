@@ -85,6 +85,39 @@ export async function purgeServerDataFor(
 }
 
 /**
+ * Design 2026-11-15 §4.4, "A namespace's trust records move with its pin" (§12.2 rule 6): when a move is followed,
+ * every record of [area] under `ns.<fromKey>.` (the pin, the account-state high-water marks and vault records, the item
+ * homes, the device records, the personal-wrap cache, and the rest of what this browser keeps per origin) is written
+ * under `ns.<toKey>.` in ONE write, so a failure leaves the target as it was. A move never resets a mark: where the
+ * target already holds an account-state record with a higher mark, that record is kept. [overrides] (full target keys)
+ * ride the same write: the caller's new pin, which must replace the moved copy of the old one. Returns the target keys
+ * written, for the caller's rollback; the caller removes the old namespace only once the switch took effect.
+ */
+export async function moveNamespaceRecords(area: KvArea, fromKey: string, toKey: string, overrides: Readonly<Record<string, unknown>> = {}): Promise<string[]> {
+  if (!/^[0-9a-f]{16}$/.test(fromKey) || !/^[0-9a-f]{16}$/.test(toKey) || fromKey === toKey) throw new Error("moveNamespaceRecords: not two namespaces");
+  const from = nsKey(fromKey, "");
+  const all = await area.get(null);
+  const mark = (v: unknown): number => {
+    const h = v !== null && typeof v === "object" ? (v as { highWater?: unknown }).highWater : undefined;
+    return typeof h === "number" ? h : -1;
+  };
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(all)) {
+    if (!k.startsWith(from)) continue;
+    const name = k.slice(from.length);
+    const target = nsKey(toKey, name);
+    if (name.startsWith("accountStateMemory:") && target in all && mark(all[target]) > mark(v)) continue;
+    out[target] = v;
+  }
+  for (const [k, v] of Object.entries(overrides)) {
+    if (!k.startsWith(nsKey(toKey, ""))) throw new Error("moveNamespaceRecords: an override outside the target namespace");
+    out[k] = v;
+  }
+  if (Object.keys(out).length > 0) await area.set(out);
+  return Object.keys(out);
+}
+
+/**
  * A15: the store half of "remove data for this server" — every record under that origin's namespace
  * (`ns.<originKey>.`) in each of [areas] (background: the trusted store, storage.local's pre-A15 leftovers,
  * storage.session). By PREFIX, not a fixed key list: the per-user records (`itemHomes:<userId>`,
@@ -92,14 +125,29 @@ export async function purgeServerDataFor(
  * copy promises "cached state for that server" is removed. One store failing (IndexedDB unavailable) does not stop the
  * others. Only a 16-hex origin key names a namespace; anything else purges nothing.
  */
-export async function purgeOriginRecords(originKey: string, areas: readonly KvArea[]): Promise<void> {
+export async function purgeOriginRecords(originKey: string, areas: readonly KvArea[], keep: ((name: string) => boolean) | null = null): Promise<void> {
   if (!/^[0-9a-f]{16}$/.test(originKey)) return;
   const prefix = nsKey(originKey, "");
   for (const area of areas) {
     try {
-      await removeByPrefix(area, prefix);
+      if (keep === null) await removeByPrefix(area, prefix);
+      else {
+        const gone = Object.keys(await area.get(null)).filter((k) => k.startsWith(prefix) && !keep(k.slice(prefix.length)));
+        if (gone.length > 0) await area.remove(gone);
+      }
     } catch {
       /* this store is unavailable — the others are still purged */
     }
   }
+}
+
+/**
+ * What "Remove data for this server" keeps. It removes cached state (the quick-unlock
+ * record, caches, the device secret), never the records this browser decides what to trust by: the card pin (with its
+ * fork mark), the session's fork marker, the account-state high-water marks and vault records, and the item homes.
+ * "Forget this server" is the only thing that removes a pin.
+ */
+export function isTrustRecord(name: string): boolean {
+  // The records of which account an address is and of each account's key (accountmemory.ts) stay with the server's pin.
+  return name === "cardPin" || name === "forkSeen" || name.startsWith("accountStateMemory:") || name.startsWith("itemHomes:") || name.startsWith("selfIdentityByEmail:") || name.startsWith("selfIdentityPub:");
 }

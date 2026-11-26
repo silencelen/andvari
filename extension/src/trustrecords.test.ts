@@ -3,7 +3,7 @@
 // grammar on the way out of storage — and a value that had to be cleaned is flagged for a one-time rewrite.
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { decodeItemHomes, decodePersonalChange, decodePersonalWrap, encodeItemHomes } from "./trustrecords.ts";
+import { decodeItemHomes, decodePersonalWrap, encodeItemHomes } from "./trustrecords.ts";
 
 const v1 = "0f8e2c1a-3b4d-4e5f-8a9b-0c1d2e3f4a5b";
 const v2 = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
@@ -28,22 +28,5 @@ test("A10: the personal-wrap cache is exactly {vaultId (UUID), wrappedVk}", () =
   assert.deepEqual(decodePersonalWrap(undefined), { value: null, rewrite: false });
   for (const bad of [{ vaultId: `${v1}\n${v2}`, wrappedVk: "w" }, { vaultId: v1, wrappedVk: 5 }, { vaultId: v1, wrappedVk: "w", extra: 1 }, { vaultId: v1 }, "junk", [v1, "w"]]) {
     assert.deepEqual(decodePersonalWrap(bad), { value: null, rewrite: true }, JSON.stringify(bad));
-  }
-});
-
-test("A10: a pending personal change carries a UUID served vault, a UUID-or-empty current vault, and ciphertext names only", () => {
-  const full = { vaultId: v1, wrappedVk: "w", currentVaultId: v2, currentMetaBlob: "m1", servedMetaBlob: "m2" };
-  assert.deepEqual(decodePersonalChange(full), { value: full, rewrite: false });
-  const proposed = { vaultId: v1, wrappedVk: "w", currentVaultId: "", servedMetaBlob: "m2" };
-  assert.deepEqual(decodePersonalChange(proposed), { value: proposed, rewrite: false });
-  assert.deepEqual(decodePersonalChange(null), { value: null, rewrite: false });
-  for (const bad of [
-    { ...full, vaultId: `${v1}|x` },
-    { ...full, currentVaultId: `${v2}\n${v1}` },
-    { ...full, currentMetaBlob: 3 },
-    { ...full, unknown: "k" },
-    { wrappedVk: "w", currentVaultId: v2 },
-  ]) {
-    assert.deepEqual(decodePersonalChange(bad), { value: null, rewrite: true }, JSON.stringify(bad));
   }
 });

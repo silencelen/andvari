@@ -151,8 +151,6 @@ export interface WireGrant {
   role: string;
   wrappedVk: string;
   rev: number;
-  /** Member grants (spec 01 §6): crypto_box_seal to the member identityPub; owner/personal use wrappedVk. */
-  sealedVk?: string | null;
   /** Grant v2 (security review 2026-10, root cause A §1.5, A6): crypto_box_seal(memberIdentityPub, SignedStatement
    *  vault-grant), verified per §1.4 against our PIN for its `from`. Additive: an old client ignores it. */
   signedGrant?: string | null;
@@ -209,6 +207,8 @@ export interface SyncResponse {
   /** Additive companion detail for removedGrants (spec 03 §4/§11) — never the purge trigger
    *  itself; drives the 0.5.0 proof-verified notice / holding-area flow. */
   removedGrantsInfo?: RemovedGrantInfo[];
+  /** Spec 03 §4 (additive): the account state's counter, which every write of it advances; absent from an older server. */
+  accountStateSeq?: number | null;
 }
 
 // ---- shared vaults (spec 03 §10) ----
@@ -221,12 +221,6 @@ export interface CreateVaultRequest {
 
 export interface CreateVaultResponse {
   rev: number;
-}
-
-export interface UserLookupResponse {
-  userId: string;
-  displayName: string;
-  identityPub: string;
 }
 
 export interface VaultMemberAdd {
@@ -248,8 +242,6 @@ export interface VaultMemberSummary {
   /** F22 rider (spec 03 §10): account status ('active'|'disabled') — additive; feeds the
    *  transfer target picker and the disabled-member badge. */
   status?: string | null;
-  /** Root cause A §8.2 step 4 (A6): server HINT that this member's grant has neither a v2 grant nor a self-wrap. */
-  legacyGrant?: boolean | null;
 }
 
 // ---- vault lifecycle (spec 03 §11) ----
@@ -344,6 +336,11 @@ export interface MutationResult {
   serverItem?: WireItem;
   /** `rejected` only: `unknown_attachment` | `attachment_mismatch` | `item_attachment_quota`. */
   reason?: string;
+  /**
+   * Spec 03 §5: the answer would have carried this result's stored item past its per-answer limits,
+   * so it carries none; the client fetches the item instead. Never set together with `serverItem`.
+   */
+  serverItemOmitted?: boolean;
 }
 
 export interface PushResponse {
@@ -376,7 +373,7 @@ export interface ClientPolicy {
    *  no stranger nudge. Register success stays server-enforced (invite-ROW gate) either way. */
   signupMode?: string;
   /** §2.6 — per-instance login-factor stance. A UI pre-prompt HINT only; the reactive server errors
-   *  (totp_required / public_login_requires_totp) stay authoritative. Never gates a client-side
+   *  (totp_required) stay authoritative. Never gates a client-side
    *  protection (§2.3 trust table). Absent ⇒ false. */
   totpRequired?: boolean;
   /** Decorative label — NEVER rendered as a verified identity, never in the trust gate (§2.3). */

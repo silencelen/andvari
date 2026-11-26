@@ -10,18 +10,20 @@ import { test } from "node:test";
 type PermissionKey = "permissions" | "optional_permissions" | "host_permissions" | "optional_host_permissions";
 
 const ALLOWED: Record<string, Record<PermissionKey, readonly string[]>> = {
-  // As on main.
+  // As on main, with the host permission moved to the public instance (design 2026-11-15 §12.2: it covers
+  // https://vault.andvaripass.com, and other servers are optional permissions).
   "manifest.json": {
     permissions: ["storage", "activeTab", "scripting", "alarms", "offscreen", "contextMenus"],
     optional_permissions: [],
-    host_permissions: ["https://andvari.monahanhosting.com/*"],
+    host_permissions: ["https://vault.andvaripass.com/*"],
     optional_host_permissions: ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
   },
-  // As on main.
+  // As on main, the same move. (Firefox MV3 host permissions are granted by the person, site by site, so the broad
+  // patterns there are what Chrome's optional_host_permissions are.)
   "manifest.firefox.json": {
     permissions: ["storage", "activeTab", "scripting", "alarms", "clipboardWrite", "contextMenus"],
     optional_permissions: [],
-    host_permissions: ["https://andvari.monahanhosting.com/*", "https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+    host_permissions: ["https://vault.andvaripass.com/*", "https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
     optional_host_permissions: [],
   },
   // Not on main: the Safari build as this branch had it before the card-fill rework (3e6e212e).

@@ -32,6 +32,8 @@ object Attachments {
     /** Chunk + encrypt. Empty plaintext is rejected (spec: last chunk is 1..65536 bytes). */
     fun encrypt(crypto: CryptoProvider, fileKey: ByteArray, plaintext: ByteArray): Encrypted {
         if (plaintext.isEmpty()) throw CryptoException("attachment plaintext must not be empty")
+        // No file is sealed under a key of zeros: KeysGoneException.
+        KeyFloor.requireKey(fileKey)
         val chunks = ArrayList<ByteArray>((plaintext.size + CHUNK - 1) / CHUNK)
         var off = 0
         while (off < plaintext.size) {

@@ -1,3 +1,5 @@
+import { CARD_FALLBACK_NAME, CARD_SUBTITLE_NO_NUMBER } from "./copy.ts";
+
 // Minimal card display/copy + fill-adapter helpers — the extension's port of web/src/vault/card.ts
 // (itself the TS mirror of core CardNormalize.kt). ONLY what the extension port needs rides
 // here: digitsOnly/brand/brandLabel/maskedLast4/cardSubtitle for the popup's masked identity
@@ -162,6 +164,6 @@ export function maskedLast4(digits: string): string {
  */
 export function cardSubtitle(number: string | null | undefined): string {
   const d = digitsOnly(number ?? "");
-  if (d === "") return "card";
-  return `${brandLabel(brand(d)) ?? "Card"} ${maskedLast4(d)}`;
+  if (d === "") return CARD_SUBTITLE_NO_NUMBER;
+  return `${brandLabel(brand(d)) ?? CARD_FALLBACK_NAME} ${maskedLast4(d)}`;
 }

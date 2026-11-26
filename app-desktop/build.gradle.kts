@@ -18,13 +18,121 @@ dependencies {
     implementation(compose.materialIconsExtended)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.ktor.client.java) // the JVM HTTP engine for AndvariApi
+    // The QR codes of the new path (the kit document, a device link, a connect link): onboarding and trust design
+    // §0.3 "byte mode at error-correction level M". The catalog's encoder, the one recovery-cli already uses.
+    implementation(libs.zxing.core)
+    // The kept session is wrapped by the operating system's key store for this account
+    // (Windows data protection; the Linux desktop's secret service through libsecret). Approved by the owner on
+    // 2026-11-15 for that wrap and nothing else. One JNA version in the whole project: the catalog's `jna`, the one
+    // core's libsodium binding already runs on; `jna-platform` (DPAPI's Crypt32Util) takes the same version.
+    // The owner's decision of 2026-11-16 adds one use of the same `jna`, no new dependency: Windows'
+    // SetWindowDisplayAffinity, which hides the app's windows from screen capture (ScreenCapture.kt).
+    implementation(libs.jna)
+    implementation(libs.jna.platform)
     // §4.2 namespacing gate tests (originKey byte-parity pins, adoption one-shot, scoped purges).
     testImplementation(libs.kotlin.test)
+    // The shared code's own test server (FakeInstance and the helpers beside it, compiled against core's JVM variant),
+    // so the tests can walk the real engine against it: on the test class paths only, never in the distribution.
+    testImplementation(project(path = ":core", configuration = "testServerJvmElements"))
+}
+
+// The zero-key tripwire on this module's tests: test machinery, in the test source set only.
+kotlin.sourceSets.getByName("test") {
+    kotlin.srcDir(rootProject.file("core/src/jvmTripwire/kotlin"))
+    resources.srcDir(rootProject.file("core/src/jvmTripwire/resources"))
+}
+apply(from = rootProject.file("gradle/zero-key-tripwire.gradle.kts"))
+
+// The approved wording file, for a run that has one: its path in the environment variable ANDVARI_APPROVED_WORDING_FILE
+// reaches the tests as the system property andvari.approvedWordingFile, and ApprovedCopyTest then checks every string
+// the desktop carries against it. Without the variable that check is left out.
+tasks.withType<Test>().configureEach {
+    System.getenv("ANDVARI_APPROVED_WORDING_FILE")?.takeIf { it.isNotBlank() }?.let { systemProperty("andvari.approvedWordingFile", it) }
+}
+
+// The store-build constants of the public instance (onboarding and trust design §0.3) come from
+// spec/public-instance.json, the one in-repo source ("every app's build reads this file"), as a small generated Kotlin
+// object. A value that starts with "PLACEHOLDER:" does not exist yet: the app then bakes no public instance (and so
+// offers no "Create an account on andvari"), and no installer can be made (checkStoreConstants, below).
+val publicInstanceSpec: File = rootProject.file("spec/public-instance.json")
+val generatedConstantsDir: File = layout.buildDirectory.dir("generated/andvariConstants/kotlin").get().asFile
+
+fun readPublicInstance(): Map<String, String> {
+    @Suppress("UNCHECKED_CAST")
+    val root = groovy.json.JsonSlurper().parse(publicInstanceSpec) as Map<String, Any?>
+    @Suppress("UNCHECKED_CAST")
+    val pi = root["PUBLIC_INSTANCE"] as Map<String, Any?>
+    return mapOf(
+        "origin" to pi["origin"].toString(),
+        "instanceId" to pi["instanceId"].toString(),
+        "card0Hash" to pi["card0Hash"].toString(),
+        "kind" to pi["kind"].toString(),
+        "name" to pi["name"].toString(),
+        "joinBase" to root["joinBase"].toString(),
+    )
+}
+
+val generateBuildConstants = tasks.register("generateAndvariBuildConstants") {
+    inputs.file(publicInstanceSpec)
+    outputs.dir(generatedConstantsDir)
+    doLast {
+        val v = readPublicInstance()
+        fun lit(s: String) = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"").replace("$", "\\$") + "\""
+        val baked = listOf("origin", "instanceId", "card0Hash", "kind").none { v.getValue(it).startsWith("PLACEHOLDER:") }
+        val dir = File(generatedConstantsDir, "io/silencelen/andvari/desktop/trust")
+        dir.mkdirs()
+        File(dir, "BuildConstants.kt").writeText(
+            """
+            |// Generated from spec/public-instance.json by :app-desktop:generateAndvariBuildConstants. Do not edit.
+            |package io.silencelen.andvari.desktop.trust
+            |
+            |internal object BuildConstants {
+            |    /** False while any public-instance value is a placeholder: the build then bakes no public instance. */
+            |    const val BAKES_PUBLIC_INSTANCE: Boolean = $baked
+            |    const val PUBLIC_ORIGIN: String = ${lit(v.getValue("origin"))}
+            |    const val PUBLIC_INSTANCE_ID: String = ${lit(v.getValue("instanceId"))}
+            |    const val PUBLIC_CARD0_HASH: String = ${lit(v.getValue("card0Hash"))}
+            |    const val PUBLIC_KIND: String = ${lit(v.getValue("kind"))}
+            |    const val PUBLIC_NAME: String = ${lit(v.getValue("name"))}
+            |    const val JOIN_BASE: String = ${lit(v.getValue("joinBase"))}
+            |}
+            |""".trimMargin(),
+        )
+    }
+}
+kotlin.sourceSets.getByName("main").kotlin.srcDir(generatedConstantsDir)
+tasks.named("compileKotlin") { dependsOn(generateBuildConstants) }
+
+// No installer or distributable is made while any store constant is a placeholder (spec/public-instance.json's own
+// rule: "a store build MUST refuse to ship while any value starts with it"). Wired in front of every Compose packaging
+// task (package*, create*Distributable, run*Distributable), so none can run past it; run
+// `:app-desktop:checkStoreConstants` alone to see what it says. The desktop is not a store build (storeBuild = false),
+// but it bakes the same public instance for the first screen, so the same rule holds.
+val checkStoreConstants = tasks.register("checkStoreConstants") {
+    inputs.file(publicInstanceSpec)
+    doLast {
+        val placeholders = readPublicInstance().filterValues { it.startsWith("PLACEHOLDER:") }.keys
+        if (placeholders.isNotEmpty()) {
+            throw GradleException("spec/public-instance.json still has placeholder values for $placeholders: no desktop installer may be made")
+        }
+    }
+}
+tasks.matching { it.name.startsWith("package") || it.name.contains("Distributable") }.configureEach { dependsOn(checkStoreConstants) }
+
+// The JVM the app runs in, packaged and from the run task. The attach mechanism is off (no
+// `jcmd <pid> GC.heap_dump` of an open vault by another program of the same user), and a crash leaves no core dump with
+// the open keys. The error file (hs_err_pid*.log) goes inside the app's own directory only from the run task: jpackage
+// expands $APPDIR, $BINDIR and $ROOTDIR in a launcher's options and HotSpot only %p, so the packaged app cannot name
+// the per-user ~/.andvari-desktop there (a known gap).
+val hardenedJvmArgs = listOf("-XX:+DisableAttachMechanism", "-XX:-CreateCoredumpOnCrash")
+tasks.withType<JavaExec>().matching { it.name == "run" }.configureEach {
+    jvmArgs("-XX:ErrorFile=" + File(File(System.getProperty("user.home"), ".andvari-desktop"), "hs_err_pid%p.log").path)
 }
 
 compose.desktop {
     application {
         mainClass = "io.silencelen.andvari.desktop.MainKt"
+        jvmArgs += hardenedJvmArgs
         nativeDistributions {
             targetFormats(TargetFormat.Msi, TargetFormat.Deb)
             packageName = "andvari"
@@ -75,10 +183,10 @@ compose.desktop {
             // The dark-background brand mark (gold ᛅ on #14120E) rendered per platform: .ico
             // carries every taskbar/Start size, the Linux .png feeds the .desktop entry. Without
             // these jpackage ships a blank generic icon (the app had none before).
-            // H138: the source moved to assets/brand/andvari-mark.svg (icons/andvari.svg is now a
-            // copy of it) and onto the wordmark geometry, so this mark is byte-for-byte the one
-            // the web favicon, the extension toolbar and the phone launcher show. Regenerate with
-            // scripts/gen-brand-icons.sh; nothing under icons/ is hand-edited.
+            // The sources are under assets/brand/ (icons/andvari.svg is a copy of the small tile
+            // andvari-mark.svg), so this mark is the one the web favicon, the extension toolbar
+            // and the phone launcher show. Regenerate with scripts/gen-brand-icons.sh; nothing
+            // under icons/ is hand-edited.
             windows {
                 iconFile.set(project.file("icons/andvari.ico"))
                 // STABLE across releases → re-running a newer installer upgrades in

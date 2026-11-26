@@ -19,8 +19,6 @@ import kotlin.test.assertTrue
  */
 class VaultMovesWiringTest {
     private val vm = File("src/main/kotlin/io/silencelen/andvari/app/AndvariViewModel.kt").readText()
-    private val main = File("src/main/kotlin/io/silencelen/andvari/app/MainActivity.kt").readText()
-    private val sharing = File("src/main/kotlin/io/silencelen/andvari/app/SharingScreen.kt").readText()
 
     private fun span(of: String, from: String, to: String): String {
         val a = of.indexOf(from)
@@ -68,18 +66,9 @@ class VaultMovesWiringTest {
         assertTrue(vm.contains("""private val moves = VaultMoves(VaultMoves.Store.Sealed(AppPrivateFile(File(cacheDir, "move-memos.bin"))) { account })"""))
         assertTrue(span(vm, "fun closeMovePicker() {", "\n    }\n").contains("movePickerItemId?.let(moves::cancelled)"), "Cancel/dismiss drops it")
         assertTrue(vm.contains("moves.forget() // L5"), "a lock keeps it, sealed, out of memory")
-        assertEquals(3, Regex("""moves\.drop\(\)""").findAll(vm).count(), "a sign-out, an ended session and a deleted account drop it")
+        assertEquals(2, Regex("""moves\.drop\(\)""").findAll(vm).count(), "a sign-out and an ended session drop it")
     }
 
-    @Test
-    fun theScreensAskTheViewModel() {
-        assertTrue(main.contains("val moveTargets = vm.moveTargets(item)"))
-        assertTrue(main.contains("MoveCopyControl(vm, ui, item, moveTargets, canMove = vm.canMoveOut(item))"))
-        assertFalse(main.contains("""it.type == "personal" || it.role == "owner" || it.role == "writer""""), "no copy of the rule in the screens")
-        assertEquals(2, Regex("""vm\.writableVaults\(\)""").findAll(main).count(), "the editor's and the import's vault choices")
-        // Offered to a reader too: the control sits after the editable-only block closes, not inside it.
-        val detail = span(main, "if (!readOnly) {\n            var confirmDelete", "val moveTargets = vm.moveTargets(item)")
-        assertTrue(detail.contains("\n            }\n        }\n        // F19 (design §8)"), "the if (!readOnly) block closes before the move/copy control")
-        assertTrue(sharing.contains("""if (canMove) TextButton(onClick = { vm.openMovePicker(item.itemId, "move") }) { Text("Move to vault…") }"""), "Move only where the item can leave its vault")
-    }
+    // theScreensAskTheViewModel pinned the old item detail and SharingScreen.kt's move control, deleted in the overhaul; the
+    // new path's move and copy go through the content (trust/VaultItemsScreens.kt, VaultContentWiringTest).
 }

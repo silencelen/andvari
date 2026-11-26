@@ -183,7 +183,7 @@ describe("F05 — every copy surface routes through the shared slot and tells th
   const src = (p: string) => readFileSync(here(p), "utf8");
   const vaultTsx = src("./Vault.tsx");
   const welcomeTsx = src("./Welcome.tsx");
-  const adminTsx = src("./Admin.tsx");
+  const kitTsx = src("./KitCard.tsx");
   // useCopy moved out of Vault.tsx into its own module (2026-08-22) when the verification run
   // became a second consumer. The guarantee is unchanged — only its address moved — so the pin
   // follows it rather than being relaxed, and Staleness.tsx joins the no-raw-wipe sweep.
@@ -191,15 +191,18 @@ describe("F05 — every copy surface routes through the shared slot and tells th
   const stalenessTsx = src("./Staleness.tsx");
 
   it("no view file schedules a raw clipboard wipe of its own any more", () => {
-    for (const [name, s] of [["Vault.tsx", vaultTsx], ["Welcome.tsx", welcomeTsx], ["Admin.tsx", adminTsx], ["Staleness.tsx", stalenessTsx]] as const) {
+    for (const [name, s] of [["Vault.tsx", vaultTsx], ["Welcome.tsx", welcomeTsx], ["KitCard.tsx", kitTsx], ["Staleness.tsx", stalenessTsx]] as const) {
       expect(s, `${name} must not fire its own writeText("") timer`).not.toContain('clipboard.writeText("")');
       expect(s, `${name} must not write the clipboard unguarded`).not.toContain("navigator.clipboard.writeText");
     }
   });
 
-  it("the shared useCopy hook and Welcome's recovery-phrase copy both arm the shared slot", () => {
+  it("the shared useCopy hook arms the shared slot, and the kit screens have no copy at all (design §10)", () => {
     expect(useCopyTs).toContain("scheduleClipboardClear(clampClipboardClearSeconds(clearSeconds)");
-    expect(welcomeTsx).toContain("scheduleClipboardClear(clampClipboardClearSeconds(clipboardClearSeconds)");
+    for (const s of [welcomeTsx, kitTsx]) {
+      expect(s).not.toContain("writeClipboard");
+      expect(s).not.toContain("useCopy");
+    }
     // The wipe timer must NOT be a per-instance ref again — that aliasing is the bug.
     expect(useCopyTs).not.toContain("wipeTimer");
     expect(vaultTsx).not.toContain("wipeTimer");
@@ -223,10 +226,6 @@ describe("F05 — every copy surface routes through the shared slot and tells th
     expect(CLIPBOARD_NOT_CLEARED).toContain("Still on your clipboard");
   });
 
-  it("Admin's invite/link copy is guarded and shows the canon failure sentence", () => {
-    expect(adminTsx).toContain("const ok = await writeClipboard(value);");
-    expect(adminTsx).toContain("{copyFailed && <Msg kind=\"err\">{CLIPBOARD_FAILED}</Msg>}");
-  });
 });
 
 /**
@@ -258,8 +257,8 @@ describe("F25 — the second-factor rows auto-clear, the identity code deliberat
     expect(settingsTsx).not.toContain("navigator.clipboard.writeText");
   });
 
-  it("a caller that passes no window still gets a plain copy — the identity code's path", () => {
-    expect(settingsTsx).toContain("<CopyButton value={code} />");
+  it("a caller that passes no window still gets a plain copy (its one caller, the identity code, went with its card on 2026-11-16)", () => {
+    expect(settingsTsx).not.toContain("<CopyButton value={code} />");
     expect(settingsTsx).toContain("if (clearSeconds > 0) {");
   });
 

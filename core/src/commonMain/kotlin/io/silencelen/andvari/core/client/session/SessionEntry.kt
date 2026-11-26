@@ -167,6 +167,9 @@ class SessionEntry(
                 a.close()
                 return SignInResult.TotpRequired(codeWasWrong = totp != null)
             }
+            // Design §2.2, strict decoding: served key texts in another form than the canonical one are refused before
+            // anything opens or is kept (the session the login issued is ended below, as for every failure here).
+            io.silencelen.andvari.core.client.onboard.ServedKeyForm.requireCanonical(s.accountKeys)
             // A11 (q08): the §2.4 pin is found by the email the person TYPED, not only by the server's userId.
             val acct = handOff({
                 Account.unlock(s.userId, password, s.accountKeys, selfIdentityPub = store.origin(opKey).identityPins().pinFor(email, s.userId))
@@ -276,6 +279,8 @@ class SessionEntry(
             // address to sign in as. No marker on a same-origin enroll.
             store.pendingServer?.let { store.pendingServer = it.copy(email = r.email) }
             val s = runBounded(BoundedOps.FLAT_MS) { a.register(enrolled.request) }.also { issued = true }
+            // Design §2.2, strict decoding: nothing of keys served in another form than the canonical one is kept.
+            io.silencelen.andvari.core.client.onboard.ServedKeyForm.requireCanonical(s.accountKeys)
             // A14 (F8), second layer: if the client was moved anyway, this account is not the one it now points at.
             // Do not commit: revoke the tokens at the origin that issued them (this client's own), drop them, and
             // say so.

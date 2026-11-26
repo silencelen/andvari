@@ -1,0 +1,512 @@
+{
+  "_about": [
+    "The account genesis record of design 2026-11-15-onboarding-trust \u00a75 (purpose 0x05).",
+    "Hand-authored from the independent oracle in tools/vector-gen/oracle (Node WebCrypto and @noble; no andvari code). Regenerate with `npm run generate` there; `npm run check` fails on any difference.",
+    "Every row is one unlock of alice's account: the identity seed `account.seedB64` is already derived, `genesisB64` is the served (or cached) genesis frame, `sessionUserId` the session's userId, `pinnedInstanceId` the pinned card's instanceId, and `personalWrap` the served wrap {vaultId, wrappedVkB64} or null when none is served.",
+    "expect.verdict is the first failing check, in \u00a72.4's order (VR-13): the parse verdicts (bad_frame, unknown_format, non_canonical, bad_statement); signer_not_pinned_key (signerPub is not, byte for byte, the Ed25519 signing key derived from the seed, `account.signPubB64`; \u00a72.4, the Signer binding row 0x05); bad_signature; identity_mismatch (identityKey is not the seed-derived key); user_mismatch; instance_mismatch; personal_vault_mismatch (a served personalWrap.vaultId is not personalVaultId). Every failure shows the same IDENTITY_MISMATCH copy.",
+    "The signer's expected key: every device of the account holds the identity seed, derives its Ed25519 signing key from it (crypto_sign_seed_keypair, `account.signPubB64`) and requires signerPub to equal it byte for byte, on every client. The X25519 identity key (`account.identityPubB64`, crypto_box_seed_keypair of the same seed) is what identityKey must equal, and is never the signer's comparison on a device: -A, the negation of the Ed25519 key, has the same X25519 image as A, and the key's holder can sign validly under either. (The server, which holds no seed, checks the signer through the image of identityPub; it is not graded by this file.)",
+    "expect.extensionVerdict is the same unlock in the extension. It equals expect.verdict on every row: the extension and the full clients bind the signer the same way. The field is kept so that a reader of the file's earlier shape still finds it.",
+    "Changed on 2026-11-15, with the rule that every client checks the genesis signer as an Ed25519 key (design \u00a72.4, spec 01 \u00a75.1): full clients compared through the X25519 image until then, and the extension by bytes. (1) signer-negated-point: expect.verdict was bad_signature and is now signer_not_pinned_key, its extensionVerdict as before; its `why` was reworded. No other row's verdict or extensionVerdict changed, and no row now has an extensionVerdict that differs from its verdict. (2) genesis-signed-under-the-negated-key is new, at the end: alice's genesis validly signed under -A (with the negated secret scalar), signer_not_pinned_key for every client. The other 27 rows are unchanged byte for byte.",
+    "expect.personalVaultInForce, on ok rows: \u00a75.3. A served wrap that names personalVaultId AND opens under the UVK with AD andvari/v1|vk-personal|{vaultId}|{userId} is in force on any device. A withheld or unopenable wrap passes the genesis checks and leaves no personal vault (an anomaly, not the identity fault).",
+    "The extension grades every row of this file (\u00a717)."
+  ],
+  "account": {
+    "userId": "11111111-1111-4111-8111-111111111111",
+    "seedB64": "DRQbIikwNz5FTFNaYWhvdn2Ei5KZoKeutbzDytHY3-Y",
+    "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+    "signPubB64": "nHq6JH1Lmot5tW6rGCV05fjNlUAomh-JWgaeAFtYs8o",
+    "uvkB64": "F2ATCxSJlgo5IZv1bGQosulaPh1XPxTBhf_4p0YOXRw"
+  },
+  "instanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+  "personalVaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  "personalVkB64": "oKz53p74CcRdPovkngrxuzxggUKrLrThRH436oLFSeM",
+  "rows": [
+    {
+      "name": "valid",
+      "why": "alice's genesis, her session, the pinned instance, and a personal wrap that names personalVaultId and opens: the personal vault is in force, with no question, on any device.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"personalVaultId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyou5SIFcajOZ7o7P8CEf3NwoOZoLeARo6VdYTlz3QpRbyeBgXm4mjZjg3Qh_9_yBarreAcGe8PxrxdPB1Tgjsgh7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpZGVudGl0eUtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "ok",
+        "extensionVerdict": "ok",
+        "personalVaultInForce": true
+      }
+    },
+    {
+      "name": "valid-no-wrap-served",
+      "why": "The server withholds the personal wrap. The genesis checks pass (the wrap check applies only if a wrap is served); the account has no personal vault until one is served: an anomaly, not the identity fault.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"personalVaultId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyou5SIFcajOZ7o7P8CEf3NwoOZoLeARo6VdYTlz3QpRbyeBgXm4mjZjg3Qh_9_yBarreAcGe8PxrxdPB1Tgjsgh7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpZGVudGl0eUtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": null,
+      "expect": {
+        "verdict": "ok",
+        "extensionVerdict": "ok",
+        "personalVaultInForce": false
+      }
+    },
+    {
+      "name": "valid-wrap-does-not-open",
+      "why": "A served wrap that names personalVaultId but does not open under the account's UVK: the genesis checks pass and no personal vault is in force.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"personalVaultId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyou5SIFcajOZ7o7P8CEf3NwoOZoLeARo6VdYTlz3QpRbyeBgXm4mjZjg3Qh_9_yBarreAcGe8PxrxdPB1Tgjsgh7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpZGVudGl0eUtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n_iVHoAtJEcbviWpAkwGTtc4ThrXqMcV1Obp24adt2n2csDfjoOtuKMEVwzJeVomA4"
+      },
+      "expect": {
+        "verdict": "ok",
+        "extensionVerdict": "ok",
+        "personalVaultInForce": false
+      }
+    },
+    {
+      "name": "truncated",
+      "why": "The genesis cut off inside its signature.",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyou5SIFcajOZ7o7P8CEf3NwoOZoLeARo6VdYTlz3QpRbyQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "bad_frame",
+        "extensionVerdict": "bad_frame"
+      }
+    },
+    {
+      "name": "another-format-version",
+      "why": "Format byte 0x03 in the magic.",
+      "genesisB64": "YXZzAwWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyou5SIFcajOZ7o7P8CEf3NwoOZoLeARo6VdYTlz3QpRbyeBgXm4mjZjg3Qh_9_yBarreAcGe8PxrxdPB1Tgjsgh7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpZGVudGl0eUtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "unknown_format",
+        "extensionVerdict": "unknown_format"
+      }
+    },
+    {
+      "name": "card-frame-served-as-genesis",
+      "why": "A well-formed instance-card frame (purpose 0x04) served as the genesis.",
+      "signer": "operator",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"instance-card\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"seq\":0,\"prev\":\"0000000000000000000000000000000000000000000000000000000000000000\",\"origin\":\"https://vault.example.org\",\"name\":\"RXhhbXBsZSBWYXVsdA\",\"kind\":\"private\",\"operator\":\"99999999-9999-4999-8999-999999999999\",\"operatorSignKey\":\"veBRZqO81KqMF4hqP4hVnOk0qV2ClY6tlywOTYK5dcc\",\"recoveryFp\":\"none\",\"issuedAt\":1763164800000}",
+      "genesisB64": "YXZzAgS94FFmo7zUqowXiGo_iFWc6TSpXYKVjq2XLA5Ngrl1x2qYVGJU70jDxPbdGvxS981MqrsaGI-c7UpEOchAGV7XztSgQCozWlFBJjoxR5D1YqHtQlWP1sinK6elB2luBAt7InYiOjIsInB1cnBvc2UiOiJpbnN0YW5jZS1jYXJkIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInNlcSI6MCwicHJldiI6IjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAiLCJvcmlnaW4iOiJodHRwczovL3ZhdWx0LmV4YW1wbGUub3JnIiwibmFtZSI6IlJYaGhiWEJzWlNCV1lYVnNkQSIsImtpbmQiOiJwcml2YXRlIiwib3BlcmF0b3IiOiI5OTk5OTk5OS05OTk5LTQ5OTktODk5OS05OTk5OTk5OTk5OTkiLCJvcGVyYXRvclNpZ25LZXkiOiJ2ZUJSWnFPODFLcU1GNGhxUDRoVm5PazBxVjJDbFk2dGx5d09UWUs1ZGNjIiwicmVjb3ZlcnlGcCI6Im5vbmUiLCJpc3N1ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "bad_frame",
+        "extensionVerdict": "bad_frame"
+      }
+    },
+    {
+      "name": "white-space",
+      "why": "A genesis alice signed with a space after a colon.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\": \"11111111-1111-4111-8111-111111111111\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"personalVaultId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izytP4Sh2oAi3gohJE88YPo292Id7NpJ3FmvhZ-Hn_HpIqxzfw7oZDRP9V-c9MYlPptbFf1We-jXXmPBHcYfp9FgZ7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiAiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIiwiaWRlbnRpdHlLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInBlcnNvbmFsVmF1bHRJZCI6ImNjY2NjY2NjLWNjY2MtNGNjYy04Y2NjLWNjY2NjY2NjY2NjYyIsImNyZWF0ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "non_canonical",
+        "extensionVerdict": "non_canonical"
+      }
+    },
+    {
+      "name": "no-personal-vault-id",
+      "why": "A signed genesis with no personalVaultId key.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izym3DOVUNzKgOdkg_2qElUAynXUSv9F220591vX4yUNrwZ1V_1jJOgCBGwGINH7Ces0U2quec-7Vm9_5wdTDe0wN7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpZGVudGl0eUtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "non_canonical",
+        "extensionVerdict": "non_canonical"
+      }
+    },
+    {
+      "name": "version-3",
+      "why": "A canonical genesis with \"v\":3.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"account-genesis\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"personalVaultId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izymnvlM-esXayO9F66aQQYEkOjQBxFEpNWmvPdQtCwwMj9T-cGtuoAT9AbVX46M_srefMhimvW6FVyV8a6y4m7gh7InYiOjMsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpZGVudGl0eUtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "bad_statement",
+        "extensionVerdict": "bad_statement"
+      }
+    },
+    {
+      "name": "signed-by-another-account",
+      "why": "A signer that is not the identity: the statement is alice's word for word, but bob's key signed it.",
+      "signer": "bob",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"personalVaultId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAirusqqiGaywHe62Bc0esYaHlBeZh5qaDxKupCzJNTLKuxw8zLxUSK-2c0uV5ZDLQVHY7wgz6kbgDki2zJ0C-AR7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpZGVudGl0eUtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "signer_not_pinned_key",
+        "extensionVerdict": "signer_not_pinned_key"
+      }
+    },
+    {
+      "name": "another-accounts-genesis",
+      "why": "bob's own, valid genesis served on alice's account: the signer does not map to her seed-derived key.",
+      "signer": "bob",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\":\"22222222-2222-4222-8222-222222222222\",\"identityKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"personalVaultId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAnTn5bQ3_jzfVzkbjiEnC5cpvGujzAr4n-zfFPVFTnQQnFARzjY21lXophnLpGnWeuHfU1XMpYxeVtshAzIAjQF7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJpZGVudGl0eUtleSI6IlJzUjZrYjZVQzJBSjdDaE94ZGdHRHpQNlgxOUlwblFfblhSa3pXTVhhUk0iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "signer_not_pinned_key",
+        "extensionVerdict": "signer_not_pinned_key"
+      }
+    },
+    {
+      "name": "signer-negated-point",
+      "why": "signerPub replaced by -A, under the signature alice made as A. Every client compares signerPub with the Ed25519 key it derives from the seed, byte for byte, and stops at the signer. (-A has the X25519 image of A, so a comparison through the image would bind it, and this frame would then fail the signature only because nobody signed again; the row genesis-signed-under-the-negated-key is the one that tells the two apart.)",
+      "signer": "alice; signerPub then replaced by -A",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"personalVaultId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izSou5SIFcajOZ7o7P8CEf3NwoOZoLeARo6VdYTlz3QpRbyeBgXm4mjZjg3Qh_9_yBarreAcGe8PxrxdPB1Tgjsgh7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpZGVudGl0eUtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "signer_not_pinned_key",
+        "extensionVerdict": "signer_not_pinned_key"
+      }
+    },
+    {
+      "name": "signature-flipped",
+      "why": "alice's genesis with one signature bit flipped.",
+      "signer": "alice, then one signature bit flipped",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"personalVaultId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyou5SIFcajOZ7o7O8CEf3NwoOZoLeARo6VdYTlz3QpRbyeBgXm4mjZjg3Qh_9_yBarreAcGe8PxrxdPB1Tgjsgh7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpZGVudGl0eUtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "bad_signature",
+        "extensionVerdict": "bad_signature"
+      }
+    },
+    {
+      "name": "statement-changed-after-signing",
+      "why": "createdAt changed after signing (still canonical).",
+      "signer": "alice signed another statement",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"personalVaultId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"createdAt\":1763164800001}",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyou5SIFcajOZ7o7P8CEf3NwoOZoLeARo6VdYTlz3QpRbyeBgXm4mjZjg3Qh_9_yBarreAcGe8PxrxdPB1Tgjsgh7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpZGVudGl0eUtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAxfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "bad_signature",
+        "extensionVerdict": "bad_signature"
+      }
+    },
+    {
+      "name": "identity-key-is-another",
+      "why": "alice signed it, but its identityKey names bob's key: identityKey must equal the seed-derived key.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"identityKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"personalVaultId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyleaVz238OD2O3lspqfelEHqBoblptuHRZsHvBb7FXRjGlVc8HGPhd8yPmseE9R5SQUtbNYlkCKxmlt9h-MhggF7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpZGVudGl0eUtleSI6IlJzUjZrYjZVQzJBSjdDaE94ZGdHRHpQNlgxOUlwblFfblhSa3pXTVhhUk0iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "identity_mismatch",
+        "extensionVerdict": "identity_mismatch"
+      }
+    },
+    {
+      "name": "changed-user-id",
+      "why": "A changed userId: alice signed a genesis for another userId than her session's.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\":\"22222222-2222-4222-8222-222222222222\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"personalVaultId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyhzoYqbtrBJSUhkkbrMEP8U14bcfXJZE6yYHuwxTa1IQuAgVXM8UVb0vD5iFmWpDcSGns0GqZ7Fy3xae_z64LAJ7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJpZGVudGl0eUtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "user_mismatch",
+        "extensionVerdict": "user_mismatch"
+      }
+    },
+    {
+      "name": "session-is-another-user",
+      "why": "The genesis is right, but the session the server opened is for another userId.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"personalVaultId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyou5SIFcajOZ7o7P8CEf3NwoOZoLeARo6VdYTlz3QpRbyeBgXm4mjZjg3Qh_9_yBarreAcGe8PxrxdPB1Tgjsgh7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpZGVudGl0eUtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "22222222-2222-4222-8222-222222222222",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "user_mismatch",
+        "extensionVerdict": "user_mismatch"
+      }
+    },
+    {
+      "name": "changed-instance-id",
+      "why": "A changed instanceId: the genesis names another instance than the pinned card.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"instanceId\":\"ffffffff-ffff-4fff-8fff-ffffffffffff\",\"personalVaultId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izypcPNNYytAA7bhqnIHD-sb8efXSeImeGH45ECiXBqDYI-PRixzll8E0eY0MD0vihfAeOebQyg81s7jBTxHhOywh7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpZGVudGl0eUtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJpbnN0YW5jZUlkIjoiZmZmZmZmZmYtZmZmZi00ZmZmLThmZmYtZmZmZmZmZmZmZmZmIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "instance_mismatch",
+        "extensionVerdict": "instance_mismatch"
+      }
+    },
+    {
+      "name": "pinned-card-is-another-instance",
+      "why": "The genesis is right, but this device pinned a card of another instance for this origin.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"personalVaultId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyou5SIFcajOZ7o7P8CEf3NwoOZoLeARo6VdYTlz3QpRbyeBgXm4mjZjg3Qh_9_yBarreAcGe8PxrxdPB1Tgjsgh7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpZGVudGl0eUtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "instance_mismatch",
+        "extensionVerdict": "instance_mismatch"
+      }
+    },
+    {
+      "name": "changed-personal-vault-id",
+      "why": "A changed personalVaultId: the genesis names another vault than the served personal wrap.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"personalVaultId\":\"dddddddd-dddd-4ddd-8ddd-dddddddddddd\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyp9NjdSD-y-PRcAvLgiHvWuBYkmZj9tdt0tXORjVEs2-hIg6UsSC1WErfu7mM58RlecNMf1qHyGECh84c6cuOA57InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpZGVudGl0eUtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwicGVyc29uYWxWYXVsdElkIjoiZGRkZGRkZGQtZGRkZC00ZGRkLThkZGQtZGRkZGRkZGRkZGRkIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "personal_vault_mismatch",
+        "extensionVerdict": "personal_vault_mismatch"
+      }
+    },
+    {
+      "name": "wrap-names-another-vault",
+      "why": "The served personal wrap names another vault than the genesis: the server cannot move the personal vault.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"personalVaultId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyou5SIFcajOZ7o7P8CEf3NwoOZoLeARo6VdYTlz3QpRbyeBgXm4mjZjg3Qh_9_yBarreAcGe8PxrxdPB1Tgjsgh7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpZGVudGl0eUtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "wrappedVkB64": "AQEYUS-oN6LlShtHXKmOXUlr8jWTJ5zRDtdnnY8Gk50273j87_EtDVmmWXNe-ovupISzCAIDrWdp72W_EQeInCbMH1TIRWVCt3E"
+      },
+      "expect": {
+        "verdict": "personal_vault_mismatch",
+        "extensionVerdict": "personal_vault_mismatch"
+      }
+    },
+    {
+      "name": "unopenable-wrap-names-another-vault",
+      "why": "The same with a wrap that would not open: the check is on the served vaultId.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"personalVaultId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyou5SIFcajOZ7o7P8CEf3NwoOZoLeARo6VdYTlz3QpRbyeBgXm4mjZjg3Qh_9_yBarreAcGe8PxrxdPB1Tgjsgh7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpZGVudGl0eUtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        "wrappedVkB64": "AQEYUS-oN6LlShtHXKmOXUlr8jWTJ5zRDtdlmi1EI1E5WS7xsg5p9V2WPfCmtu_AhJc-DJaks-HCBRKNdAOztY93Ers71uCoQy4"
+      },
+      "expect": {
+        "verdict": "personal_vault_mismatch",
+        "extensionVerdict": "personal_vault_mismatch"
+      }
+    },
+    {
+      "name": "order-parse-before-signer",
+      "why": "Not canonical and signed by bob.",
+      "signer": "bob",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\": \"11111111-1111-4111-8111-111111111111\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"personalVaultId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAgm96d2cha35kD2m59LuwZaL8W12NzuGn8khP7wrE2P9KNMiWRW-KmBkYebEohd1EtkGb-7GgY7TO0l-vAR3MQJ7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiAiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIiwiaWRlbnRpdHlLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwiaW5zdGFuY2VJZCI6ImVlZWVlZWVlLWVlZWUtNGVlZS04ZWVlLWVlZWVlZWVlZWVlZSIsInBlcnNvbmFsVmF1bHRJZCI6ImNjY2NjY2NjLWNjY2MtNGNjYy04Y2NjLWNjY2NjY2NjY2NjYyIsImNyZWF0ZWRBdCI6MTc2MzE2NDgwMDAwMH0",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "non_canonical",
+        "extensionVerdict": "non_canonical"
+      }
+    },
+    {
+      "name": "order-signer-before-signature",
+      "why": "Signed by bob, with the signature broken as well.",
+      "signer": "bob, then one signature bit flipped",
+      "genesisB64": "YXZzAgWzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAirusqqiGaywHe63Bc0esYaHlBeZh5qaDxKupCzJNTLKuxw8zLxUSK-2c0uV5ZDLQVHY7wgz6kbgDki2zJ0C-AR7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpZGVudGl0eUtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "signer_not_pinned_key",
+        "extensionVerdict": "signer_not_pinned_key"
+      }
+    },
+    {
+      "name": "order-signature-before-identity",
+      "why": "identityKey names bob's key and the signature is broken.",
+      "signer": "alice, then one signature bit flipped",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyleaVz238OD2O3ltpqfelEHqBoblptuHRZsHvBb7FXRjGlVc8HGPhd8yPmseE9R5SQUtbNYlkCKxmlt9h-MhggF7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpZGVudGl0eUtleSI6IlJzUjZrYjZVQzJBSjdDaE94ZGdHRHpQNlgxOUlwblFfblhSa3pXTVhhUk0iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "bad_signature",
+        "extensionVerdict": "bad_signature"
+      }
+    },
+    {
+      "name": "order-identity-before-user",
+      "why": "identityKey and userId are both bob's, signed by alice.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\":\"22222222-2222-4222-8222-222222222222\",\"identityKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"personalVaultId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izymFc-rqCkoiSKe4SQuT-DSW8n_kFIrCjF02KufPFE12mM_HocOChGgdhhvNzf-ZDXXUKcbUv3WBrcStaMNhBkAx7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJpZGVudGl0eUtleSI6IlJzUjZrYjZVQzJBSjdDaE94ZGdHRHpQNlgxOUlwblFfblhSa3pXTVhhUk0iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "identity_mismatch",
+        "extensionVerdict": "identity_mismatch"
+      }
+    },
+    {
+      "name": "order-user-before-instance",
+      "why": "Another userId and another instanceId.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\":\"22222222-2222-4222-8222-222222222222\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"instanceId\":\"ffffffff-ffff-4fff-8fff-ffffffffffff\",\"personalVaultId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izygO2GqetG8jDL3loiLyJZLpp5NggYAlCDJIhJJSBbIgeCBlifNYNV8Lraxid9NGnOhRFNsqIv23-yq0JbPWU5QV7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJpZGVudGl0eUtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJpbnN0YW5jZUlkIjoiZmZmZmZmZmYtZmZmZi00ZmZmLThmZmYtZmZmZmZmZmZmZmZmIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "user_mismatch",
+        "extensionVerdict": "user_mismatch"
+      }
+    },
+    {
+      "name": "order-instance-before-personal-vault",
+      "why": "Another instanceId and another personalVaultId.",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"instanceId\":\"ffffffff-ffff-4fff-8fff-ffffffffffff\",\"personalVaultId\":\"dddddddd-dddd-4ddd-8ddd-dddddddddddd\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyn81dBsVMIRKsXqXxTgefmxNOOO3GJN7mrwrdLhDNYvuV33mIkn_aIrfZl14jT14NPNoeLS4vMTl7IlC1HxxCAt7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpZGVudGl0eUtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJpbnN0YW5jZUlkIjoiZmZmZmZmZmYtZmZmZi00ZmZmLThmZmYtZmZmZmZmZmZmZmZmIiwicGVyc29uYWxWYXVsdElkIjoiZGRkZGRkZGQtZGRkZC00ZGRkLThkZGQtZGRkZGRkZGRkZGRkIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "instance_mismatch",
+        "extensionVerdict": "instance_mismatch"
+      }
+    },
+    {
+      "name": "genesis-signed-under-the-negated-key",
+      "why": "alice's genesis, word for word, VALIDLY signed under -A, the negation of her Ed25519 key: signed with the negated secret scalar, so the signature verifies under signerPub = -A. -A has the X25519 image of A, so a check through the image passes it (the server, which holds no seed, checks that way and registers it). Every client compares signerPub with the Ed25519 key it derives from the seed, byte for byte, and refuses it: signer_not_pinned_key, on the full clients and in the extension alike.",
+      "signer": "alice, under the negated key -A",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"account-genesis\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"instanceId\":\"eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee\",\"personalVaultId\":\"cccccccc-cccc-4ccc-8ccc-cccccccccccc\",\"createdAt\":1763164800000}",
+      "genesisB64": "YXZzAgWcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izSqGs-9Ewb-VVNZ7WZRKWT1n0zgzaVUdIdIP6ZJpsZZP4MyLLo71GPbP4wCLMmrfKLlQlJKcV5yw9mev3hXAjAwx7InYiOjIsInB1cnBvc2UiOiJhY2NvdW50LWdlbmVzaXMiLCJ1c2VySWQiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJpZGVudGl0eUtleSI6ImRtbjVUSTEtanRFUmRSVk1ab1dHNVFGcjNMWFBHcmVWSmNIRGF5TW5HaW8iLCJpbnN0YW5jZUlkIjoiZWVlZWVlZWUtZWVlZS00ZWVlLThlZWUtZWVlZWVlZWVlZWVlIiwicGVyc29uYWxWYXVsdElkIjoiY2NjY2NjY2MtY2NjYy00Y2NjLThjY2MtY2NjY2NjY2NjY2NjIiwiY3JlYXRlZEF0IjoxNzYzMTY0ODAwMDAwfQ",
+      "sessionUserId": "11111111-1111-4111-8111-111111111111",
+      "pinnedInstanceId": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+      "personalWrap": {
+        "vaultId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "wrappedVkB64": "AQGyhrOljhEChchlucATQH0yonK7PoRu0n97BgF_sXNCXQl-GV51rm0PDaUu7ByWRmExeTHHshEJ5mKdTnXCK6-rHo8zzx3DTho"
+      },
+      "expect": {
+        "verdict": "signer_not_pinned_key",
+        "extensionVerdict": "signer_not_pinned_key"
+      }
+    }
+  ]
+}

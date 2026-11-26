@@ -42,6 +42,7 @@
  *    fails `tsc` and the extension suite.
  */
 import type { CardFieldKind } from "./detect";
+import type { OtherSiteQuestion } from "./othersite";
 
 /** A listable login — safe subset, never the password. */
 export interface MatchItem {
@@ -217,29 +218,86 @@ export type UnlockCode =
   | "totp_required" // 0.16.3: no longer a dead-end — flips the popup to the code field
   | "totp_bad_code" // wrong/replayed code on the retry (authKey already proven at challenge time)
   | "totp_rate_limited" // 429 on the retry — too many attempts
+  | "rate_limited" // 429 on the password's sign-in: the sign-in's back-off (said as "at least a minute")
   | "totp_expired" // the 5-min challenge fused / the SW was evicted → sign in again
   | "totp_enroll_required" // restricted session (instance requires TOTP, user not enrolled) → web vault
   | "aborted" // a server switch / lock landed mid-sign-in — the popup silently re-renders, no error
   | "upgrade_required"
   | "identity_mismatch"
+  | "memory_unreadable" // what this extension remembers of the server's accounts could not be read: nothing taken, try again
   | "keys_damaged" // H67: the account's stored wrappedUvk isn't a readable envelope — terminal, not credentials
   | "kdf_policy"
   | "bad_wire_id" // A11 (c18): a login answer with malformed session ids (A10 grammar) — tampering class, terminal
-  | "confirm_server" // A15 review F1: a server is pending (confirm it or say "Not mine") — nothing was sent anywhere
+  | "confirm_server" // no server is chosen, or its pin forked or is damaged (serverstate.ts) — nothing was sent anywhere
+  | "link_required" // §8.7: a correct password, but the account only allows linked devices, which the extension cannot be
+  | "server_fork" // §4.4: the card chain forked at sign-in — the extension stopped before anything password-derived left
+  | "card_invalid" // the served card chain does not verify — nothing password-derived was sent
+  | "operator_account" // §12.2 rule 7: the session is the operator account's — revoked at once, refused
+  | "remade_account" // the address is known here as another account (accountmemory.ts): both possibilities are said
   | "server_error"
   | "network"
   | "unknown";
 
-/** A15 review F1 (serverstate.ts ServerBlock, structurally): while one stands, the worker dials no server. `confirm` —
- *  a previous server awaits the user's confirm (`keepable` false: the origin was read from storage.local only to block,
- *  so it can only be declined here — because this browser cannot keep a server choice, or, A16 review R3, because the
- *  update could not confirm it; serverInfo's `trustedStore` tells the two apart); `unsettled` — the trusted store did not
- *  answer, so the server is unknown. */
-export type ServerBlockWire = { kind: "confirm"; origin: string; keepable: boolean } | { kind: "unsettled" };
+/** serverstate.ts ServerBlock, structurally: while one stands, the worker dials no server (design 2026-11-15 §4.4).
+ *  `no_server` — none chosen yet (the first popup offers "andvari" or "Your own server"); `no_store` — this browser
+ *  mode cannot keep a server or its pin; `unsettled` — the trusted store did not answer; `pin_damaged` — the origin's
+ *  pin record does not decode; `fork` — the origin's identity changed in a way andvari can't verify. */
+export type ServerBlockWire =
+  | { kind: "no_server" }
+  | { kind: "no_store" }
+  | { kind: "unsettled" }
+  | { kind: "pin_damaged"; origin: string }
+  | { kind: "fork"; origin: string };
+
+/** What the pinned card says beside a working server (§4.4): an older chain served (`withheld`); the baked public
+ *  instance says it changed (`changed`, never followed); a move or a `kind` change awaiting the person. Names are the
+ *  card's `name` text, always shown with the origin. */
+export type CardNoticeWire =
+  | { kind: "withheld" }
+  /** The last refresh found a newer card that does not verify; the pin stays at the card checked before. */
+  | { kind: "invalid" }
+  | { kind: "changed" }
+  | { kind: "move"; name: string; from: string; to: string; hash: string }
+  | { kind: "kind"; name: string; origin: string; to: "public" | "private"; hash: string }
+  /** §4.4: the server is stopped by a fork while this browser's copy stays readable (an unlocked session). */
+  | { kind: "fork"; origin: string };
+
+/** The Trust Gate's card line for a typed address (§4.4, §12.3): the dialed origin, the name the server calls itself,
+ *  the operator key's 32-hex short form, and the card hash the confirm must name. */
+export interface TrustGateCardWire {
+  origin: string;
+  name: string;
+  operatorShortFp: string;
+  hash: string;
+  /** "Switch to a different server?" when a server is already chosen, else "Connect to this server?". */
+  switching: boolean;
+}
+
+/** Why choosing a server failed (§4.4, §2.4 pinning verdicts, R4). */
+export type ChooseServerCode =
+  | "invalid" // not in the §2.2 origin grammar (ORIGIN_REFUSED)
+  | "no_permission" // the browser did not grant access to that origin
+  | "unavailable" // the chain could not be fetched
+  | "redirected" // the address answered with a redirect, which is never followed (`redirectTo`: where it points, when known)
+  | "card_invalid" // the served chain does not verify
+  | "chain_too_long" // a first pin: the chain is longer than the extension verifies (instancecard.ts MAX_FIRST_PIN_CARDS)
+  | "withheld" // no card is served
+  | "origin_mismatch"
+  | "card0_mismatch"
+  | "instance_mismatch"
+  | "fork"
+  | "changed" // the baked instance's chain names another kind than the baked one
+  | "no_public_instance" // this build does not know the public instance's card 0 yet
+  | "pin_conflict"
+  | "pin_damaged"
+  | "stale" // the confirm names another card than the gate showed
+  | "storage"
+  | "not_allowed";
 
 /** Save-failure code for a resolved pending save — mapped to copy by the surface (never the raw
- *  SW error string, which used to leak "locked"/"save failed (conflict)" into the banner). */
-export type SaveErrorCode = "locked" | "no_personal_vault" | "conflict" | "rejected" | "failed" | "app_no_account" | "app_unavailable";
+ *  SW error string, which used to leak "locked"/"save failed (conflict)" into the banner). `cannot_tell`: a new item's
+ *  answer was lost, so it may be stored; a second try sends the same item, taken once. */
+export type SaveErrorCode = "locked" | "no_personal_vault" | "conflict" | "rejected" | "failed" | "app_no_account" | "app_unavailable" | "shared_vault" | "server_fork" | "server_ended" | "cannot_tell" | "app_refused";
 
 /** TOTP-add failure code (setTotp, design 2026-08-12) — mapped to copy by the
  *  surface. `exists` = the add-only contract refused a replace; `not_allowed` = a tab sender (the
@@ -261,12 +319,27 @@ export type PinUnlockCode =
   | "stale_uvk"
   | "keys_damaged" // A13 (q38): the served account-key blob is not a readable envelope — terminal, blob kept
   | "revoked"
+  | "not_confirmed" // the record held no refresh token (a refresh got no answer before the lock): nothing sent, not revoked
   | "network"
   | "server_error"
   | "identity_mismatch"
+  | "memory_unreadable" // what this extension remembers of the server's accounts could not be read: nothing taken, try again
   | "kdf_policy"
-  | "confirm_server" // A15 review F1: a server is pending — nothing was sent anywhere
+  | "confirm_server" // no usable server (serverstate.ts) — nothing was sent anywhere
+  | "server_fork" // §4.4: the card chain forked — nothing was spent
+  | "card_invalid" // the served card chain does not verify — nothing was spent
+  | "operator_account" // §12.2 rule 7: the pinned card names this account as the operator — signed out
   | "aborted";
+
+/** Said beside a quick unlock that opened the vault. `quick_unlock_not_updated`: the vault is open, but the
+ *  quick-unlock record could not be written afterwards (its locked-token stash was not cleared); it is kept, and the
+ *  next lock re-arms it. */
+export type QuickUnlockNotice = "quick_unlock_not_updated";
+
+/** Said beside a password (or one-time-code) sign-in that opened the vault. `quick_unlock_not_updated`:
+ *  the quick-unlock record could not be re-stamped (it keeps its earlier window). `session_not_saved`: the session could
+ *  not be written to this browser's session storage, so a worker that stops before the next lock comes back locked. */
+export type UnlockNotice = QuickUnlockNotice | "session_not_saved" | "account_remembered";
 
 /** Why the PIN entropy floor rejected an enrollment PIN (breaker A2⊕B8) — the popup renders a nudge. */
 export type PinWeakReason = "too_short" | "digits_need_length" | "trivial";
@@ -274,7 +347,7 @@ export type PinWeakReason = "too_short" | "digits_need_length" | "trivial";
 /** Quick-unlock enrollment-failure code. `weak_pin` additionally carries a `reason`. `unavailable` (A16): nothing here
  *  can keep the record — no session sealing key (no IndexedDB in this browser mode), or on Chrome the storage.session
  *  access level could not be confirmed — so nothing would ever arm. */
-export type EnrollCode = "locked" | "must_change_password" | "need_full_unlock" | "weak_pin" | "unavailable";
+export type EnrollCode = "locked" | "must_change_password" | "need_full_unlock" | "weak_pin" | "unavailable" | "switched_off";
 
 /** Biometric quick-unlock redeem failure (0.17.0). No `wrong_pin`/`exhausted` — a hardware-held
  *  full-entropy PRF secret has no offline oracle, so there is no attempt budget. `bio_cancelled` =
@@ -288,25 +361,45 @@ export type BioUnlockCode =
   | "stale_uvk"
   | "keys_damaged" // A13 (q38): the served account-key blob is not a readable envelope — terminal, blob kept
   | "revoked"
+  | "not_confirmed" // the record held no refresh token (a refresh got no answer before the lock): nothing sent, not revoked
   | "network"
   | "server_error"
   | "identity_mismatch"
+  | "memory_unreadable" // what this extension remembers of the server's accounts could not be read: nothing taken, try again
   | "kdf_policy"
-  | "confirm_server" // A15 review F1: a server is pending — nothing was sent anywhere
+  | "confirm_server" // no usable server (serverstate.ts) — nothing was sent anywhere
+  | "server_fork" // §4.4: the card chain forked — nothing was spent
+  | "card_invalid" // the served card chain does not verify — nothing was spent
+  | "operator_account" // §12.2 rule 7: the pinned card names this account as the operator — signed out
   | "aborted";
 
 /** Biometric enrollment refusal (0.17.0). `bio_unsupported` = no platform authenticator / no PRF;
  *  `bio_cancelled` = the enroll ceremony threw (nothing written — amendment 3). */
-export type EnrollBioCode = "locked" | "must_change_password" | "need_full_unlock" | "bio_unsupported" | "bio_cancelled" | "unavailable";
+export type EnrollBioCode = "locked" | "must_change_password" | "need_full_unlock" | "bio_unsupported" | "bio_cancelled" | "unavailable" | "switched_off";
 
 export type Req =
-  | { type: "status" }
-  /** A5b (security review 2026-10, root cause A): the popup confirms that the personal vault changed (a served
-   *  wrap named another vault than this browser's). Extension pages only; mints nothing. */
-  | { type: "personalAcceptChange" }
-  /** A6 fix round (A5b LOW-1 parity): load who the server reports on the NEW personal vault; "Use new" is
-   *  offered (and accepted by the SW) only after this succeeded for that vault. Extension pages only. */
-  | { type: "personalDescribeChange" }
+  /** [takeLost]: the popup's own render, which says the captures a lock deleted unsaved (Res<"status">.capturesLost);
+   *  that read takes them, so they are said once. Every other status read leaves them. */
+  | { type: "status"; takeLost?: boolean }
+  /** Popup + options (design 2026-11-15 §12.2): choose the server. `public` pins the baked public instance (no
+   *  gate) and switches to it; `own` fetches and verifies the typed origin's chain and answers the Trust Gate's card
+   *  line — nothing is kept until `confirmServer`. A server that already has a pin is refreshed against it, never
+   *  re-pinned (§4.4). Extension pages only. */
+  | { type: "chooseServer"; choice: "public" | "own"; origin?: string }
+  /** Popup + options: the Trust Gate's Connect for the card `chooseServer` showed (named by its hash). */
+  | { type: "confirmServer"; origin: string; hash: string }
+  /** Popup + options: "Forget this server" (§12.3) — the way out of a fork or a damaged pin: removes the current
+   *  server's pin and data and leaves no server chosen. */
+  | { type: "forgetServer" }
+  /** Popup: "Forget the earlier account on this device" (decided on 2026-11-17), after its second confirmation, for the
+   *  address of the refusal "another account under a known address". Keeps that account's key record and the pin. */
+  | { type: "forgetEarlierAccount"; email: string }
+  /** Popup: the person confirmed the pending move or `kind` change the card notice named (never the baked
+   *  instance's). `hash` is the pending card's. */
+  | { type: "followServerChange"; hash: string }
+  /** Popup: "Not now" at the `kind` change notice (approved wording, entry 10). The notice for that card (named by its
+   *  hash) stays closed until the next unlock, and the old `kind` stays in force; nothing is written. */
+  | { type: "deferServerChange"; hash: string }
   | { type: "unlock"; email: string; password: string }
   /** Popup: finish a TOTP-gated sign-in with the authenticator code (0.16.3). Follows an `unlock`
    *  that answered `totp_required`; the SW holds the already-derived keys so no second KDF runs.
@@ -348,13 +441,6 @@ export type Req =
    *  the user's confirm (display only until the Trust Gate commits it), or the trusted store did not answer. Pages
    *  never read the trusted store themselves; they ask here. Extension pages only. */
   | { type: "serverInfo" }
-  /** Options page ONLY (A15): commit a server origin after the Trust Gate's Connect (the grant gesture). The worker
-   *  canonicalizes, writes its trusted store and runs the origin-clean switch (§4.1) before answering. This message
-   *  is the ONLY way the server choice changes; a storage write is no longer a switch. */
-  | { type: "setServerUrl"; url: string }
-  /** Options page + popup (A15): drop the pending previous server without connecting to it ("Not mine"); the
-   *  default server is then in effect. */
-  | { type: "forgetLegacyServer" }
   /** Popup ONLY, Safari build: ask the andvari app for its server (native message) and adopt it when it differs — the
    *  app ran the Trust Gate, so the worker commits it as the options page's Connect does. `app` says what the app
    *  answered: its server (now in effect), none yet, or nothing (another browser, or no answer). */
@@ -372,7 +458,9 @@ export type Req =
   | { type: "ping" }
   /** Content: logins whose uris match `host` (state-aware). PASSIVE ([K13]): the dropdown's
    *  open-query rides the same trusted focusin a page can drive with HTMLElement.focus(), so it
-   *  must never re-arm the idle autolock — the pick (`reveal`) is the user-activity signal. */
+   *  must never re-arm the idle autolock — the pick (`reveal`) is the user-activity signal. A tab sender's `host` is
+   *  ignored (its browser-set origin decides); the popup names the active tab's ORIGIN here, scheme included, since a
+   *  plain-http page matches only an address saved as http (F4, spec 05 autofill (e)). */
   | { type: "matches"; host: string }
   /** Popup ONLY: all logins, optionally filtered by a query (name/username/uri contains). A tab
    *  sender gets an empty list (contract header). */
@@ -393,7 +481,8 @@ export type Req =
    *  item's uris, (b) a one-shot popup grant covers it, or (c) the POPUP sets `explicit` — its own
    *  reveal/copy buttons, extension-owned UI with no tab. The matched host is the browser-set
    *  `sender.origin`'s host for TAB senders ([A2], fail-closed on a missing/opaque origin); `host`
-   *  is read only from the popup, which has no tab and reads `activeTabHost()`.
+   *  is read only from the popup, which has no tab and names the active tab's origin (`activeTabPage()`; its scheme
+   *  decides the match, F4).
    *  Security review 2026-10 (root cause B): `explicit` from a TAB sender is IGNORED. It used to be
    *  checked ahead of the host gate for the in-page search-all pick, on the theory that a trusted
    *  click inside our closed shadow root could not be steered; it could — the shadow HOST is page
@@ -407,7 +496,7 @@ export type Req =
    *  whatever tab is ACTIVE, which need not be the sender's): user explicitly picked an item to
    *  fill into the active tab → SW mints a one-shot grant for (tabId,itemId) and forwards
    *  {type:"fillItem"} to that tab's top frame. */
-  | { type: "fillFromPopup"; itemId: string; /** Safari: the person confirmed filling a login saved for another site, on THIS page host (the worker requires the active tab to still be on it). */ confirmedOtherSite?: string; /** The origin of the page the popup showed (its "This site" list): the worker fills only while the active tab's top origin is still this one, and refuses without it. */ page?: string }
+  | { type: "fillFromPopup"; itemId: string; /** The person confirmed filling a login saved for another site: the `confirm` token of the question they answered yes to, which holds for that login on that top-level origin only. */ confirmedOtherSite?: string; /** The origin of the page the popup showed (its "This site" list): the worker fills only while the active tab's top origin is still this one, and refuses without it. */ page?: string }
   /** Popup ONLY (the SW refuses senders with a tab, i.e. content scripts): one card field
    *  for a copy — the value goes straight to the popup's clipboard write, never into a page
    *  or the popup DOM. Cards are deliberately not uri-bound, so there is no host gate; the
@@ -567,11 +656,17 @@ export type Res<T extends Req["type"]> = T extends "status"
       unlocked: boolean;
       count: number;
       email: string | null;
-      /** Rescue-issued temporary password in effect — the popup shows a persistent nudge (E1-6). */
-      mustChangePassword: boolean;
+      /** What the pinned card says beside a working server (§4.4); null when nothing. */
+      cardNotice: CardNoticeWire | null;
       /** Why the last lock happened, for the F26 reason line above the unlock form (E1-7);
-       *  null unless the most recent lock was an idle autolock. */
-      lockNotice: { kind: "idle"; seconds: number } | null;
+       *  null unless the most recent lock was an idle autolock, or the pinned card named the signed-in account as the
+       *  instance's operator and it was signed out (§12.2 rule 7), or a quick unlock found that the session's end could not
+       *  be confirmed (`not_confirmed`: standing until the next unlock, kept at rest). */
+      lockNotice: { kind: "idle"; seconds: number } | { kind: "operator" } | { kind: "not_confirmed" } | null;
+      /** An alarm this browser refused (twice) while the vault is open. `autolock`: its auto-lock timer (the
+       *  vault still locks at its time, at the next way into the worker); `resync`: its periodic check for changes made
+       *  elsewhere. Null when every alarm is set, or while locked. */
+      timerNotice: "autolock" | "resync" | null;
       /** Quick-unlock Tier B sub-state (spec 01 §8.4). `armed` = locked-armed + redeemable (the popup
        *  shows the PIN field on the locked screen); `enrolled` + `offerDismissed` drive the unlocked
        *  Settings toggle + the one-time offer card; `attemptsRemaining` for the "N tries left" copy. */
@@ -583,42 +678,69 @@ export type Res<T extends Req["type"]> = T extends "status"
        *  common case, since copying a code from an authenticator app closes it — re-renders the code
        *  field). Outranks the armed-PIN view. Null when there's no live challenge (or the SW evicted). */
       totpPending: { email: string; expiresAt: number } | null;
-      /** A5b: a served personal-vault record names another vault than this browser's; it keeps saving to its
-       *  own until the user confirms (popup notice). */
-      personalChange: boolean;
-      /** A5b LOW-3 (A6): the notice naming both the current and the new vault; null when nothing pends. */
-      personalChangeText: string | null;
-      /** A9 review MEDIUM-1: the pending record is a PROPOSAL (this browser never confirmed a personal vault). */
-      personalProposal: boolean;
-      /** Root cause A §1.7 (A6): shared vaults whose grant has no UVK wrap yet — the extension never opens a
-       *  grant seal (Q8), so they wait for a full client ("open andvari to review"). */
+      /** §12.2 rule 1: shared vaults whose key the extension will not open yet — no UVK wrap on the grant row, or no
+       *  `accept` decision in the account state — so they wait for a full client; and a vault closed in this session
+       *  and served again, which opens at the next unlock (errors.ts GRANTS_WAITING). */
       waitingGrants: number;
+      /** Design §4.4: the server ended this unlocked session — readable, nothing sent or saved; the popup says so. */
+      serverEnded: boolean;
+      /** With serverEnded: no server ended it; a refresh whose answer never came had no try left (the popup says that end). */
+      serverEndedUnconfirmed?: boolean;
       /** Root cause A §5.1 INV-HOME (A1b): rows the last snapshot sent under the wrong vault (not applied). */
       wrongVault: number;
       /** A15: while LOCKED, the email this browser last signed in with (non-secret; prefills the form). Kept by the
        *  worker in its trusted store — the popup no longer writes storage.local. Null while unlocked. */
       rememberedEmail: string | null;
+      /** Design §4.4 (decided on 2026-11-17): the logins and cards this browser captured on pages and has not saved to
+       *  the vault (each tab's pending save, and each tab's pending card save). The extension keeps no queue of changes:
+       *  everything else it changes is sent at once, or refused. A sign-out deletes these, and so does a lock of an open
+       *  vault (a page's password is not kept past a lock), so the popup says how many first. */
+      unsavedCaptures: number;
+      /** Design §4.4 (decided on 2026-11-17): how many such captures a lock or sign-out that nobody was asked about (the
+       *  idle lock; the full sign-out after the server ended the session for good, or after the card named the account
+       *  as the operator) deleted unsaved, since the popup last said so. Taken by a `takeLost` read while locked; 0
+       *  otherwise. Only the number is kept: never a page's password. */
+      capturesLost: number;
     }
-  : T extends "personalAcceptChange"
-    ? { ok: boolean; code?: "locked" | "none" | "storage" | "not_allowed" | "need_full_unlock" | "unverified" | "coholders_not_loaded" }
-  : T extends "personalDescribeChange"
-    ? { ok: boolean; code?: "locked" | "none" | "not_allowed" | "coholders_unavailable"; coHoldersLine?: string }
+  : T extends "chooseServer"
+    ? {
+        ok: boolean;
+        code?: ChooseServerCode;
+        gate?: TrustGateCardWire;
+        url?: string;
+        /** With `origin_mismatch` only: the origin the worker dialed, and the one the newest card of the chain it
+         *  verified names (approved wording, entry 8). */
+        mismatch?: { dialed: string; named: string };
+        /** With `redirected` only, when the browser let the worker read it: the address the redirect points to. */
+        redirectTo?: string;
+      }
+  : T extends "confirmServer"
+    ? { ok: boolean; code?: ChooseServerCode; url?: string }
+  : T extends "forgetServer"
+    ? { ok: boolean }
+  : T extends "forgetEarlierAccount"
+    ? { ok: boolean; code?: "not_offered" | "open" | "failed" }
+  : T extends "followServerChange"
+    ? { ok: boolean; code?: ChooseServerCode | "none"; url?: string }
+  : T extends "deferServerChange"
+    ? { ok: boolean }
   : T extends "unlock"
-    ? { ok: boolean; code?: UnlockCode; error?: string }
+    ? { ok: boolean; code?: UnlockCode; error?: string; notice?: UnlockNotice }
     : T extends "unlockTotp"
-      ? { ok: boolean; code?: UnlockCode; error?: string }
+      ? { ok: boolean; code?: UnlockCode; error?: string; notice?: UnlockNotice }
       : T extends "cancelTotp"
         ? { ok: boolean } // ok:false only when the A14 sender gate refused (nothing was done)
         : T extends "lock"
           ? { ok: boolean }
       : T extends "signOut"
-        ? { ok: boolean }
+        ? { ok: boolean; notice?: "session_not_confirmed" } // the end of a session of that account could not be confirmed
+
         : T extends "unlockWithPin"
-          ? { ok: boolean; code?: PinUnlockCode; attemptsRemaining?: number }
+          ? { ok: boolean; code?: PinUnlockCode; attemptsRemaining?: number; notice?: QuickUnlockNotice }
           : T extends "enrollQuickUnlock"
             ? { ok: boolean; code?: EnrollCode; reason?: PinWeakReason }
             : T extends "unlockWithBio"
-              ? { ok: boolean; code?: BioUnlockCode }
+              ? { ok: boolean; code?: BioUnlockCode; notice?: QuickUnlockNotice }
               : T extends "enrollQuickUnlockBio"
                 ? { ok: boolean; code?: EnrollBioCode }
             : T extends "disableQuickUnlock"
@@ -643,7 +765,7 @@ export type Res<T extends Req["type"]> = T extends "status"
                 ? /** Cut M (v2 #14): `ok` is the FILL outcome, not delivery — true only when the
                    *  content script reports it actually wrote into a field. `outcome` is the full
                    *  verdict; `code` is set on every failure (additive fields, same shape). */
-                  { /** Safari: the login is saved for [savedFor], not for [page]; nothing was filled. Ask, then send confirmedOtherSite. */ needsConfirm?: { savedFor: string; page: string }; ok: boolean; outcome?: FillOutcome; code?: FillFailCode; error?: string }
+                  { /** The login is saved for another site than this page's; nothing was filled. Ask, then send its `confirm` as confirmedOtherSite. */ needsConfirm?: OtherSiteQuestion; ok: boolean; outcome?: FillOutcome; code?: FillFailCode; error?: string }
                 : T extends "capturedCredential"
                   ? { ok: boolean; pending?: PendingSave }
                   : T extends "captureCard"
@@ -651,11 +773,21 @@ export type Res<T extends Req["type"]> = T extends "status"
                        *  discarded (cross-origin frame, non-Luhn, dedupe, locked). */
                       { ok: boolean; pending?: PendingCardSave }
                   : T extends "resolvePendingCardSave"
-                    ? { ok: boolean; code?: SaveErrorCode; error?: string }
+                    ? { ok: boolean; code?: SaveErrorCode; error?: string; /** `rejected`: the server's own reason for the refusal (its wire code), carried to the sentence. */ reason?: string }
                   : T extends "pendingSave"
                     ? { pending: PendingSave | null }
                     : T extends "resolvePendingSave"
-                      ? { ok: boolean; code?: SaveErrorCode; error?: string; /** Safari: handed to the andvari app, which saves it at its next unlock. */ viaApp?: boolean }
+                      ? {
+                          ok: boolean;
+                          code?: SaveErrorCode;
+                          error?: string;
+                          /** `rejected`: the server's own reason for the refusal (its wire code), carried to the sentence. */
+                          reason?: string;
+                          /** Safari: handed to the andvari app, which saves it at its next unlock. */
+                          viaApp?: boolean;
+                          /** Saved, in the account open when Save was chosen; another account is open now. */
+                          otherAccount?: true;
+                        }
                       : T extends "linkUri"
                         ? { ok: boolean; error?: string }
                         : T extends "generate"
@@ -726,11 +858,7 @@ export type Res<T extends Req["type"]> = T extends "status"
                                               : T extends "purgeServerData"
                                                 ? { ok: boolean }
                                               : T extends "serverInfo"
-                                                ? { url: string; trustedStore: boolean; block: ServerBlockWire | null }
-                                              : T extends "setServerUrl"
-                                                ? { ok: boolean; url?: string; code?: "invalid" | "storage" | "not_allowed" }
-                                              : T extends "forgetLegacyServer"
-                                                ? { ok: boolean }
+                                                ? { url: string; trustedStore: boolean; block: ServerBlockWire | null; /** the pinned card's name (§4.4: the password label names it beside the origin); null when none */ name?: string | null }
                                               : T extends "appServer" | "appServerAnswer"
                                                 ? { app: "set" | "none" | "unavailable" }
                                               : T extends "serverDiag"
@@ -766,7 +894,7 @@ export type TabMsg =
    *  ONLY when a write actually happened (a 2a-suppress commits silently: toasting "saved"
    *  over nothing-written would be a lie). Carries nothing — the sentence lives content-side
    *  (errors-canon rule: the SW never ships user-facing text). */
-  | { type: "pendingSaveCommitted" }
+  | { type: "pendingSaveCommitted"; /** It landed in the account open at the unlock; another is open now. */ otherAccount?: true }
   /** SW → content (S3): fill this card into the granted frame's card form. Sent to ONE frameId
    *  only; the frame redeems via `revealCardForFill` (the value round-trip), never receiving the
    *  card values on this message. Tier 2 [U12]: `sig` is the grant's kind-signature
@@ -795,7 +923,7 @@ export type ServerDiag = {
   stage: string;
   /** The migration's outcome kind, once known. */
   migration: string | null;
-  block: "confirm" | "unsettled" | null;
+  block: ServerBlockWire["kind"] | null;
   store: boolean;
   url: string;
   /** The last ask of the app: how the native call ended, its error text, what it said, and what adopting it came to. */

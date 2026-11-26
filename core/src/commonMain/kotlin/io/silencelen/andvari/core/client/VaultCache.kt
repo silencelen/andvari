@@ -32,6 +32,8 @@ data class DeletedItemView(
     val vaultId: String,
     val deletedAt: Long,
     val doc: ItemDoc?,
+    /** Not read yet: this device never held the item and has not fetched its last version; [doc] is null until it does. */
+    val notRead: Boolean = false,
 )
 
 /**

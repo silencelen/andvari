@@ -10,6 +10,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -31,7 +32,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.silencelen.andvari.app.AndvariTheme
-import io.silencelen.andvari.app.VaultSession
+import io.silencelen.andvari.app.trust.Placeholder
+import io.silencelen.andvari.app.trust.UiText
 import io.silencelen.andvari.core.client.VaultItem
 import io.silencelen.andvari.core.client.autofill.AppFillGate
 
@@ -69,20 +71,22 @@ class AppFillConfirmActivity : ComponentActivity() {
         // and on API 31+ other apps' overlay windows are hidden while this one is shown.
         window.decorView.filterTouchesWhenObscured = true
         if (Build.VERSION.SDK_INT >= 31) window.setHideOverlayWindows(true)
+        // It shows a login's name and user name, so it is a secure window.
+        window.setFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE, android.view.WindowManager.LayoutParams.FLAG_SECURE)
         val form = FillBinding.resolve(intent)
         val bake = AppFillBinding.resolve(intent)
         if (form == null || bake == null || form.appPackage != bake.identity.pkg) {
             finish(); return
         }
         if (!AppFillGate.unchangedSince(bake.identity, AppIdentityLookup.lookup(applicationContext, bake.identity.pkg))) {
-            Toast.makeText(applicationContext, "That app changed since you tapped — tap the field again.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(applicationContext, UiText.ph(Placeholder.FILL_CONFIRM_APP_CHANGED_BEFORE).shown(), Toast.LENGTH_SHORT).show()
             finish(); return
         }
         // N2: the card names the login it would release; with no unlocked vault nothing could fill, so
         // there is nothing to confirm (and nothing is remembered).
         val item = loginItem(bake)
         if (item == null) {
-            Toast.makeText(applicationContext, "Couldn't fill that login — open andvari and try again.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(applicationContext, UiText.ph(Placeholder.FILL_CONFIRM_LOGIN_NOT_FILLED).shown(), Toast.LENGTH_SHORT).show()
             finish(); return
         }
         val login = LoginLine(name = item.doc.name, username = item.doc.login?.username)
@@ -99,26 +103,32 @@ class AppFillConfirmActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * The login the confirm would release, from the app's own session on the new code: only while it is unlocked
+     * (after the idle lock had its say) and only from the vault content's working set.
+     */
     private fun loginItem(bake: AppFillBinding.Bake): VaultItem? =
-        VaultSession.getIfFresh()?.engine?.items()?.firstOrNull { it.itemId == bake.itemId && it.doc.type == "login" }
+        (ContentFillSession.access(applicationContext) as? ContentFillSession.Access.Open)
+            ?.let { ContentFill.loginById(it.content, bake.itemId) }
 
     private fun confirmAndFill(form: ParsedForm, bake: AppFillBinding.Bake) {
         if (!armed.value) return // N6: the state layer refuses an unarmed tap, not only the disabled button
         // N7: the identity at the TAP, not the one onCreate saw.
         if (!AppFillGate.unchangedSince(bake.identity, AppIdentityLookup.lookup(applicationContext, bake.identity.pkg))) {
-            Toast.makeText(applicationContext, "That app changed while this was open — nothing was filled.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(applicationContext, UiText.ph(Placeholder.FILL_CONFIRM_APP_CHANGED).shown(), Toast.LENGTH_SHORT).show()
             finish(); return
         }
         val item = loginItem(bake)
-        val dataset = item?.let { runCatching { DatasetBuilder.appLoginResultDataset(it, form) }.getOrNull() }
+        val dataset = item?.let { runCatching { DatasetBuilder.appLoginResultDataset(it, form, bake.pageDomain) }.getOrNull() }
         if (dataset != null) {
             // N7: remembered only now, with a fill actually delivered. A binding needs a signer to bind
-            // to: an unreadable identity confirms again next time.
-            bake.identity.signerDigest?.let { digest -> AppSignerBindings.remember(applicationContext, bake.identity.pkg, digest) }
-            AutofillHardLock.arm()
+            // to: an unreadable identity confirms again next time. A fill into a web
+            // page inside the app is never remembered, so that page asks again every time.
+            if (bake.pageDomain == null) bake.identity.signerDigest?.let { digest -> AppSignerBindings.remember(applicationContext, bake.identity.pkg, digest) }
+            ContentFillSession.HardLock.arm(applicationContext)
             setResult(RESULT_OK, Intent().putExtra(AutofillManager.EXTRA_AUTHENTICATION_RESULT, dataset))
         } else {
-            Toast.makeText(applicationContext, "Couldn't fill that login — open andvari and try again.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(applicationContext, UiText.ph(Placeholder.FILL_CONFIRM_LOGIN_NOT_FILLED).shown(), Toast.LENGTH_SHORT).show()
         }
         finish()
     }
@@ -141,31 +151,54 @@ class AppFillConfirmActivity : ComponentActivity() {
         super.onDestroy()
     }
 
+    private val obscuredTold = BooleanArray(1)
+
+    /** On Android 10 and 11 a touch while the window is partly covered is dropped ([FillWindow]). */
+    override fun dispatchTouchEvent(ev: android.view.MotionEvent): Boolean = FillWindow.dispatch(this, ev, obscuredTold) { super.dispatchTouchEvent(it) }
+
     companion object {
         /** N6: how long after gaining focus the Fill button starts accepting a tap. */
         const val ARM_DELAY_MS = 500L
     }
 }
 
-/** The login a confirm would release, as the vault holds it (escaped for display by the card). */
-private data class LoginLine(val name: String, val username: String?)
+/** The confirm's title: an app, or a web page inside an app. */
+internal fun confirmTitle(pageDomain: String?): String =
+    if (pageDomain == null) "Fill this login into an app?" else "Fill this app's login into a web page?"
 
+/** What the page line means. PLACEHOLDER wording: the owner's copy pass replaces it. */
+internal fun pageWarning(): String =
+    "The app says it is showing this web page. This login is saved for the app, not for this site, so andvari asks " +
+        "every time here and never remembers it. Continue only if this page is the app's own sign-in."
+
+/** The login a confirm would release, as the vault holds it (escaped for display by the card). */
+internal data class LoginLine(val name: String, val username: String?)
+
+/** Also shown by andvari's own chooser ([FillChooserActivity]) once the person picked a login there. */
 @Composable
-private fun ConfirmCard(bake: AppFillBinding.Bake, login: LoginLine, armed: Boolean, onFill: () -> Unit, onCancel: () -> Unit) {
+internal fun ConfirmCard(bake: AppFillBinding.Bake, login: LoginLine, armed: Boolean, onFill: () -> Unit, onCancel: () -> Unit) {
     // N6: the compose host view filters obscured touches too (the decor view already does).
     val view = LocalView.current
     SideEffect { view.filterTouchesWhenObscured = true }
     val id = bake.identity
     val app = AppFillGate.oneLine(id.label) ?: id.pkg
     Column(
-        Modifier.fillMaxSize().padding(24.dp),
+        // It scrolls, as the unlock card does: at the largest font Fill and Cancel were below the screen's edge.
+        Modifier.fillMaxSize().verticalScroll(androidx.compose.foundation.rememberScrollState()).padding(24.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(20.dp)) {
-                Text("Fill this login into an app?", style = MaterialTheme.typography.titleLarge)
+                Text(confirmTitle(bake.pageDomain), style = MaterialTheme.typography.titleLarge)
                 Spacer(Modifier.height(8.dp))
+                bake.pageDomain?.let { page ->
+                    // A web page inside an app: the page is named, and said to be the app's claim, before anything else.
+                    Text("Web page", style = MaterialTheme.typography.labelMedium)
+                    Text(AppFillGate.oneLine(page) ?: "?", style = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace))
+                    Text(pageWarning(), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+                    Spacer(Modifier.height(12.dp))
+                }
                 if (bake.verdict == AppFillGate.Verdict.CONFIRM_SIGNER_CHANGED) {
                     Text(
                         "This app's signer changed since you last allowed it. A real update keeps its signer; " +

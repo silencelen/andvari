@@ -1,0 +1,20 @@
+{
+  "name": "andvari-vector-oracle",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Independent oracle for the onboarding and trust conformance vectors. Written from docs/design/2026-11-15-onboarding-trust.md alone; it imports no andvari code.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "generate": "node src/main.mjs generate",
+    "check": "node src/main.mjs check"
+  },
+  "dependencies": {
+    "@noble/ciphers": "2.4.0",
+    "@noble/curves": "2.4.0",
+    "@noble/ed25519": "3.2.0",
+    "@noble/hashes": "2.4.0"
+  }
+}

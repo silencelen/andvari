@@ -26,6 +26,17 @@ object AppSignerBindings {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(pkg, digest).apply()
     }
 
+    /** Every remembered (package → signer digest), for Settings' list. */
+    fun all(context: Context): Map<String, String> =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).all
+            .mapNotNull { (k, v) -> (v as? String)?.let { k to it } }
+            .toMap()
+
+    /** Revoke one: the next fill into [pkg] asks again. */
+    fun forget(context: Context, pkg: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(pkg).apply()
+    }
+
     fun clearAll(context: Context) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().apply()
     }

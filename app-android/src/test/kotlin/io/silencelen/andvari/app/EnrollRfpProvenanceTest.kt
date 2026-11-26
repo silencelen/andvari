@@ -90,40 +90,10 @@ class EnrollRfpProvenanceTest {
         assertEquals("m@b.example", parsed.email)
     }
 
-    // ---- the seam ----
-
-    /** The form must feed [affirmableRfp], not the raw parse: the pure rule above decides nothing
-     *  if the composable goes back to reading `.rfp` straight into the posture. */
-    @Test
-    fun theEnrollFormRoutesTheLinkRfpThroughTheProvenanceGate() {
-        assertTrue(
-            mainCode.contains("val linkRfp = affirmableRfp((parsed as? InviteFieldParse.Link)?.rfp, inviteProvenance)"),
-            "EnrollForm must derive linkRfp through affirmableRfp",
-        )
-        assertTrue(
-            mainCode.contains("val inviteProvenance = InviteProvenance.Typed"),
-            "…with the field's one real channel named — the keyboard and the clipboard",
-        )
-    }
-
-    /** The affirm copy may not assert on the app's authority how the invite reached the human. */
-    @Test
-    fun theAffirmCopyDoesNotClaimAProvenanceTheAppCannotKnow() {
-        assertFalse(
-            mainSource.contains("this code came from the invite you scanned in person"),
-            "the app cannot know that — it is what the human is being asked to assert",
-        )
-        assertTrue(
-            mainSource.contains("Only confirm it if you scanned it in person from your admin's screen"),
-            "the honest form: state what is known, ask for what only the member knows",
-        )
-        // The member's own assertion stays a first-person tick — that one IS theirs to make.
-        assertTrue(mainSource.contains("I scanned this code in person from my household admin and it matches their screen."))
-    }
+    // The seam tests (EnrollForm's provenance routing, its affirm copy, its submit anchor) and the enrollReady
+    // gate went with the old EnrollForm. The pure rules above stay pinned while they exist.
 
     // ---- A5: the affirm leg compares the rfp at FULL length (the A2 carry-forward) ----
-
-    private val strong = "correct horse battery staple 42!"
 
     /** A machine value is compared whole: a 16-hex (the pre-A5 id) or 32-hex (the human form) prefix of
      *  the server's fingerprint never passes; only the exact 64 lowercase hex does. */
@@ -134,27 +104,5 @@ class EnrollRfpProvenanceTest {
         assertFalse(affirmRfpMatches(RFP.take(32), RFP), "the 32-hex HUMAN form is not a machine match")
         assertFalse(affirmRfpMatches(RFP.uppercase(), RFP))
         assertFalse(affirmRfpMatches(null, RFP))
-    }
-
-    /** The gate the form submits through: before A5 a prefix rfp that the 32-hex human helper accepted
-     *  made the affirm leg ready. Now a prefix is never ready, and a full match also needs the in-person code. */
-    @Test
-    fun theAffirmLegRejectsAPrefixRfp() {
-        val prefix = RFP.take(32)
-        assertFalse(
-            enrollReady(EnrollPosture.RequiredAffirm, "tok", "m@example.org", strong, strong, "", false, false, true, prefix, RFP),
-            "a 32-hex prefix rfp must not make the affirm leg ready",
-        )
-        assertFalse(enrollReady(EnrollPosture.RequiredAffirm, "tok", "m@example.org", strong, strong, "", false, false, true, RFP.take(16), RFP))
-        assertFalse(enrollReady(EnrollPosture.RequiredAffirm, "tok", "m@example.org", strong, strong, "", false, false, true, RFP, RFP), "no in-person code typed")
-        assertTrue(enrollReady(EnrollPosture.RequiredAffirm, "tok", "m@example.org", strong, strong, "", false, false, true, RFP, RFP, inPersonOk = true))
-    }
-
-    /** The submit path hands the full rfp to the ViewModel as the seal anchor, never through the human helper. */
-    @Test
-    fun theFormSubmitsTheFullRfpAsTheAnchor() {
-        assertTrue(mainCode.contains("val affirmMatches = affirmRfpMatches(linkRfp, fp)"))
-        assertTrue(mainCode.contains("affirmedRfp = if (affirming) linkRfp else null"))
-        assertFalse(mainCode.contains("Escrow.shortFormMatches(linkRfp"), "the rfp must never go through the 32-hex human helper")
     }
 }

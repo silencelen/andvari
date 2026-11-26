@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiClient, ApiError, type Tokens } from "./client";
+import { ApiClient, ApiError, RefreshUnansweredError, type Tokens } from "./client";
+import { WireApi } from "./wireclient";
+
+/** An authenticated pull over [client]: the item layer's wire client rides the transport's refresh and 401 retry. */
+const syncOver = (client: ApiClient) => new WireApi(client).sync(0);
 
 /**
  * F25 — the refresh token is SINGLE-USE and rotating, and the server's reuse heuristic
@@ -84,7 +88,7 @@ describe("ApiClient single-flight token refresh (F25)", () => {
     const client = new ApiClient("http://server", { ...STALE }, onTokens);
 
     // A WS-bell sync racing a user save at access expiry: both 401 concurrently.
-    const both = Promise.all([client.accountKeys(), client.sync(0)]);
+    const both = Promise.all([client.accountKeys(), syncOver(client)]);
     await flush();
     // Both callers are parked on the ONE in-flight rotation.
     expect(server.state.refreshPosts).toBe(1);
@@ -97,7 +101,9 @@ describe("ApiClient single-flight token refresh (F25)", () => {
     // Both first attempts used the stale token; both retries the rotated one.
     expect(server.state.dataAuths.filter((a) => a === "Bearer a-stale")).toHaveLength(2);
     expect(server.state.dataAuths.filter((a) => a === "Bearer a1")).toHaveLength(2);
-    expect(onTokens).toHaveBeenCalledTimes(1);
+    // Twice: the mark that the refresh is out, written with the pair before it went, then the rotated pair.
+    expect(onTokens).toHaveBeenCalledTimes(2);
+    expect(onTokens.mock.calls[0]![0]).toMatchObject({ refreshToken: "r0", refreshOutAt: expect.any(Number) });
     expect(client.getTokens()).toEqual({ accessToken: "a1", refreshToken: "r1" });
   });
 
@@ -145,12 +151,12 @@ describe("ApiClient single-flight token refresh (F25)", () => {
     vi.stubGlobal("fetch", vi.fn(server.fetchImpl));
     const client = new ApiClient("http://server", { ...STALE });
 
-    await client.sync(0); // 401 → rotation 1 → retry ok
+    await syncOver(client); // 401 → rotation 1 → retry ok
     expect(server.state.rotations).toBe(1);
 
     // An hour later the next access token has expired too.
     server.state.current = { ...server.state.current, accessToken: "a1-expired-server-side" };
-    await client.sync(0); // 401 → rotation 2 (spends r1, which is still current)
+    await syncOver(client); // 401 → rotation 2 (spends r1, which is still current)
     expect(server.state.rotations).toBe(2);
     expect(server.state.reuseDetected).toBe(false);
   });
@@ -165,7 +171,7 @@ describe("ApiClient single-flight token refresh (F25)", () => {
     const onTokens = vi.fn();
     const client = new ApiClient("http://server", { ...STALE }, onTokens, () => ({ ...persisted }));
 
-    await client.sync(0);
+    await syncOver(client);
 
     expect(server.state.refreshPosts).toBe(0); // no rotation POST at all
     expect(server.state.reuseDetected).toBe(false);
@@ -195,10 +201,11 @@ describe("ApiClient single-flight token refresh (F25)", () => {
       return null; // nothing newer persisted → proceed to rotate
     });
 
-    await client.sync(0);
+    await syncOver(client);
 
-    // The wait is BOUNDED (a signal is passed) and the re-read happens inside the lock.
-    expect(events).toEqual(["lock:andvari-refresh:bounded", "read-persisted", "unlock"]);
+    // The wait is BOUNDED (a signal is passed) and the re-read happens inside the lock, as does the read-back of the
+    // mark written before the request goes.
+    expect(events).toEqual(["lock:andvari-refresh:bounded", "read-persisted", "read-persisted", "unlock"]);
     expect(server.state.rotations).toBe(1);
     expect(server.state.reuseDetected).toBe(false);
   });
@@ -213,7 +220,7 @@ describe("ApiClient single-flight token refresh (F25)", () => {
     });
     const client = new ApiClient("http://server", { ...STALE });
 
-    await client.sync(0);
+    await syncOver(client);
     expect(server.state.rotations).toBe(1); // rotated anyway, without cross-tab exclusion
     expect(server.state.reuseDetected).toBe(false);
   });
@@ -239,9 +246,12 @@ describe("ApiClient single-flight token refresh (F25)", () => {
     });
     const client = new ApiClient("http://server", { ...STALE });
 
-    await expect(client.sync(0)).rejects.toThrow(/timed out/);
+    // Said to the caller as a renewal with no answer (never the request's own 401), carrying the failure itself.
+    const err = await syncOver(client).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RefreshUnansweredError);
+    expect(String((err as { cause?: unknown }).cause)).toMatch(/timed out/);
     expect(refreshPosts).toBe(1); // the granted-path failure was NOT re-run unlocked
-    expect(client.getTokens()).toEqual(STALE); // and the pair survives a transport failure
+    expect(client.getTokens()).toMatchObject(STALE); // and the pair survives a transport failure, marked as out
   });
 
   it("a transient non-2xx refresh (502) keeps the pair — a later retry still rotates", async () => {
@@ -251,16 +261,19 @@ describe("ApiClient single-flight token refresh (F25)", () => {
     const client = new ApiClient("http://server", { ...STALE }, onTokens);
 
     server.state.refreshFailStatus = 502; // proxy having a moment — NOT a refusal
-    const err = await client.sync(0).catch((e) => e);
-    expect(err).toBeInstanceOf(ApiError);
-    expect((err as ApiError).status).toBe(401); // the original data 401 surfaces to the caller
-    expect(client.getTokens()).toEqual(STALE); // the still-valid pair was NOT destroyed
+    const err = await syncOver(client).catch((e) => e);
+    // Not the original data 401, which its callers read as the session's end: a renewal with no answer of the server's.
+    expect(err).toBeInstanceOf(RefreshUnansweredError);
+    expect((err as RefreshUnansweredError).kind).toBe("unanswered");
+    expect(client.getTokens()).toMatchObject(STALE); // the still-valid pair was NOT destroyed
     // …and null was never persisted (that would 401 the next WS ticket mint and
-    // cascade a false "session ended" sign-out across every tab).
-    expect(onTokens).not.toHaveBeenCalled();
+    // cascade a false "session ended" sign-out across every tab). A page that is not the server's envelope leaves the
+    // mark that the refresh is out: the later retry is its one more try.
+    expect(onTokens).not.toHaveBeenCalledWith(null);
+    expect(client.getTokens()?.refreshOutAt).toEqual(expect.any(Number));
 
     server.state.refreshFailStatus = null; // server recovers
-    await client.sync(0);
+    await syncOver(client);
     expect(server.state.rotations).toBe(1); // the SAME pair still rotates fine
     expect(client.getTokens()).toEqual({ accessToken: "a1", refreshToken: "r1" });
     expect(server.state.reuseDetected).toBe(false);
@@ -274,7 +287,7 @@ describe("ApiClient single-flight token refresh (F25)", () => {
     const onTokens = vi.fn();
     const client = new ApiClient("http://server", { ...STALE }, onTokens);
 
-    const err = await client.sync(0).catch((e) => e);
+    const err = await syncOver(client).catch((e) => e);
     expect(err).toBeInstanceOf(ApiError);
     expect((err as ApiError).status).toBe(401);
     expect(client.getTokens()).toBeNull();
@@ -295,11 +308,13 @@ describe("ApiClient single-flight token refresh (F25)", () => {
 
     // The VPN blipped exactly at rotation time: the caller sees the failure, but the
     // still-valid pair must NOT be dropped — it is the only way back in.
-    await expect(client.sync(0)).rejects.toThrow(/network down/);
-    expect(client.getTokens()).toEqual(STALE);
+    const err = await syncOver(client).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RefreshUnansweredError);
+    expect(String((err as { cause?: unknown }).cause)).toMatch(/network down/);
+    expect(client.getTokens()).toMatchObject(STALE);
 
     refreshNetDown = false;
-    await client.sync(0); // the in-flight handle was released; this rotation succeeds
+    await syncOver(client); // the in-flight handle was released; this rotation succeeds
     expect(server.state.rotations).toBe(1);
     expect(client.getTokens()).toEqual({ accessToken: "a1", refreshToken: "r1" });
   });

@@ -14,12 +14,20 @@ package io.silencelen.andvari.core.client
 interface DeviceState {
     fun get(key: String): String?
     fun set(key: String, value: String?)
+
+    /**
+     * Every key held, or null when this store cannot list them. Following a move (design §4.4 "A namespace's trust
+     * records move with its pin") needs it to carry every per-origin record; a store that answers null cannot follow
+     * a move, and the move is refused before either pin is touched.
+     */
+    fun keys(): Set<String>? = null
 }
 
 /** In-memory [DeviceState] (tests, and hosts that persist nothing). */
 class MemoryDeviceState : DeviceState {
     private val map = HashMap<String, String>()
     override fun get(key: String): String? = map[key]
+    override fun keys(): Set<String> = map.keys.toSet()
     override fun set(key: String, value: String?) {
         if (value == null) map.remove(key) else map[key] = value
     }

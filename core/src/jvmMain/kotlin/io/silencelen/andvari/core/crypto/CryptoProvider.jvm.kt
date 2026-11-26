@@ -78,7 +78,7 @@ private val loaded: Result<CryptoProvider> by lazy {
                     "(${t::class.qualifiedName}: ${t.message}); falling back to the bundled loader",
             )
         }
-        Result.success(LazySodiumCryptoProvider(LazySodiumJava(sodium)))
+        Result.success(watched(LazySodiumCryptoProvider(LazySodiumJava(sodium))))
     } catch (t: Throwable) {
         // A VM-level failure is not a loader verdict: let it out of the initializer un-memoized
         // (the lazy stays uninitialized and the next touch tries again). Everything else — the
@@ -88,5 +88,5 @@ private val loaded: Result<CryptoProvider> by lazy {
     }
 }
 
-actual fun createCryptoProvider(): CryptoProvider =
-    loaded.getOrElse { throw CryptoUnavailableException(it) }
+// A test run's tripwire, when one is on the class path, decorates the provider ([watched]); nothing that ships has one.
+actual fun createCryptoProvider(): CryptoProvider = loaded.getOrElse { throw CryptoUnavailableException(it) }

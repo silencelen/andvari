@@ -3,13 +3,9 @@ package io.silencelen.andvari.recovery
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
-import java.nio.file.Files
-import java.nio.file.attribute.PosixFilePermission
 import java.time.LocalDate
-import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -49,7 +45,8 @@ class CliHardeningTest {
     fun keygenSheet_carriesGenerationDateAndRecoveryPointer() {
         val sheet = keygenSheet(ByteArray(32) { 1 }, LocalDate.of(2026, 7, 14))
         assertTrue("Generated: 2026-07-14" in sheet, "sheet must carry its generation date (spec 04 §1)")
-        assertTrue("recovery-cli recover" in sheet, "sheet must carry the recovery one-liner (spec 04 §1)")
+        assertTrue("recovery-cli assist" in sheet, "sheet must carry the recovery one-liner (spec 04 §1)")
+        assertFalse("recovery-cli recover" in sheet, "the temporary-password command is gone (spec 04 §7)")
         // The pre-existing anchors stay put.
         assertTrue("ANDVARI_RECOVERY_PUBKEY" in sheet)
         assertTrue("canary verify" in sheet)
@@ -66,47 +63,6 @@ class CliHardeningTest {
         val shortLine = sheet.lines().dropWhile { !it.startsWith("Short fingerprint") }.drop(1).first().trim()
         assertEquals(fp.take(32), shortLine.replace(" ", ""), "32 hex, grouped")
         assertTrue(fp in sheet, "the full fingerprint is on the sheet")
-    }
-
-    /**
-     * H60: the upload bundle carries `tempAuthKey` — the recovered member's live login credential
-     * until the forced change — so it must be created owner-only (0600) BEFORE any byte lands,
-     * exactly like update-signer's private key. On POSIX, assert the perms; everywhere, assert the
-     * bytes and the returned absolute path.
-     */
-    @Test
-    fun recoveryBundle_isWrittenOwnerOnly() {
-        val dir = createTempDirectory("recovery-cli-perms")
-        try {
-            val out = dir.resolve("andvari-recovery-u1.json")
-            val abs = writeBundleOwnerOnly(out, "{\"userId\":\"u1\"}\n")
-            assertEquals(out.toAbsolutePath(), abs)
-            assertEquals("{\"userId\":\"u1\"}\n", Files.readString(out))
-            if (out.fileSystem.supportedFileAttributeViews().contains("posix")) {
-                assertEquals(
-                    setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
-                    Files.getPosixFilePermissions(out),
-                    "the recovery bundle (a login credential) must be 0600 (owner-only)",
-                )
-            }
-        } finally {
-            dir.toFile().deleteRecursively()
-        }
-    }
-
-    /** H60: never clobber a bundle from an earlier ceremony; leave the existing bytes intact. */
-    @Test
-    fun recoveryBundle_refusesToOverwrite() {
-        val dir = createTempDirectory("recovery-cli-overwrite")
-        try {
-            val out = dir.resolve("andvari-recovery-u1.json")
-            Files.writeString(out, "PRE-EXISTING")
-            val e = assertFailsWith<IllegalStateException> { writeBundleOwnerOnly(out, "new") }
-            assertTrue("refusing to overwrite" in (e.message ?: ""), e.message ?: "")
-            assertEquals("PRE-EXISTING", Files.readString(out), "the existing bundle must be left byte-for-byte intact")
-        } finally {
-            dir.toFile().deleteRecursively()
-        }
     }
 
     @Test

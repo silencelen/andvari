@@ -153,20 +153,21 @@ echo "==> CI tripwires: CodeQL Kotlin-emptiness + doc-leak scanner self-tests (f
 # functions against a scratch directory — no docker.
 (cd "$REPO_DIR" && bash scripts/ci/deploy-hardening.test.sh)
 
-echo "==> Brand icons match a fresh render of the source mark"
-# H138 / R49: every tile in the fleet is derived from assets/brand/andvari-mark.svg by
-# scripts/gen-brand-icons.sh, and the web brand-assets test can only assert that each derivative
-# EXISTS and is non-empty — a raster's bytes are not derivable in JS. So the exact failure the
-# single-source rule exists to prevent (the geometry changes and nobody re-runs the script; or a
-# raster is hand-edited) shipped green. `--check` renders into a scratch tree and diffs, which
-# makes the renderer the oracle. Skipped, loudly, where librsvg/ImageMagick are absent: this is a
-# staleness check on committed artifacts, not a correctness gate on the code under test, and
-# failing a release on a missing apt package would teach the next operator to skip the gate.
-if command -v rsvg-convert >/dev/null && command -v convert >/dev/null; then
+echo "==> Brand icons match a fresh render of the sources"
+# Every rendered icon (web, extension, desktop, the iPhone app icon) is made from the sources under
+# assets/brand/ by scripts/gen-brand-icons.sh. The web brand-assets test can only say that each
+# rendered file exists, because a picture's pixels cannot be worked out in a unit test, so the
+# failure the one-source rule exists to prevent (a source changes and nobody re-renders, or a
+# rendered icon is edited by hand) would ship green. `--check` renders into a temporary folder and
+# compares the decoded pixels with the committed files, so the renderer itself is the reference.
+# Skipped, loudly, where librsvg, ImageMagick or Python's Pillow library are absent: this checks
+# committed pictures, not the code under test, and failing a release on a missing package would
+# teach the next person to skip the gate.
+if command -v rsvg-convert >/dev/null && command -v convert >/dev/null && python3 -I -c 'import PIL' 2>/dev/null; then
   (cd "$REPO_DIR" && bash scripts/gen-brand-icons.sh --check)
-  echo "    every generated icon matches a fresh render of assets/brand/andvari-mark.svg"
+  echo "    every rendered icon matches a fresh render of the sources in assets/brand/"
 else
-  echo "    SKIPPED — rsvg-convert/convert not installed (apt install librsvg2-bin imagemagick)" >&2
+  echo "    SKIPPED: rsvg-convert, convert or Python's Pillow library is not installed (apt install librsvg2-bin imagemagick python3-pil)" >&2
 fi
 
 echo "==> Native-crypto coordinates come from the version catalog, never a literal"
@@ -197,27 +198,60 @@ echo "==> Kotlin: :core + :server + :app-desktop + the tools/ CLIs (RFC pins, ve
 # never even COMPILED by the gate: a desktop-only regression once got through and was caught by a
 # hand-run :app-desktop:classes. `test` compiles it transitively, so that hole closes with it.
 #
-# :tools:backup-cli and :tools:update-signer were the same hole, found again (audit F39). Nothing
+# :tools:backup-cli and :tools:update-signer were the same hole, found again by an audit. Nothing
 # in the build depends on them — `grep -rn 'project(":tools' --include=*.kts` is empty — so neither
 # their main nor their test sources were compiled by any automated path, and 16 real tests sat inert
 # behind a green banner: the extractor's path-separator sanitizer (`..\..\pwn.bin` must not escape
 # outDir), the dump-redacts-secrets default, the no-network-classes-on-the-classpath assert for an
-# offline tool, and update-signer's 0600-and-refuse-to-clobber guards over the ONE copy of the H2
+# offline tool, and update-signer's 0600-and-refuse-to-clobber guards over the ONE copy of the
 # Ed25519 release-signing root. The harm had already materialized: backup-cli's TestBackups.kt was
 # edited 2026-07-16 and had never once been through a compiler in this clone.
 #
+# The same rule covers the two modules the onboarding and trust design added: :tools:andvari-cli
+# (the engine's command-line host, with its own suite) and :tools:hostile-harness (tests only: a
+# lying proxy between the real engine and the real server, about four minutes).
+#
 # :tools:vector-gen ships no suite, so it joins by `classes` — it authors the generated majority of
 # the shared vector corpus (the per-file provenance and the counts live in ONE place,
-# spec/test-vectors/README.md — audit H115 found this comment restating them a release behind), and
-# a generator that no longer compiles is a generator nobody can regenerate from.
-(cd "$REPO_DIR" && flock "$LOCK" ./gradlew :core:jvmTest :server:test :app-desktop:test \
-  :tools:recovery-cli:test :tools:backup-cli:test :tools:update-signer:test :tools:vector-gen:classes \
+# spec/test-vectors/README.md — an audit found this comment restating them a release behind), and
+# a generator that no longer compiles is a generator nobody can regenerate from. :tools:uitest-seed
+# (the iPhone UI tests' seeding tool) joins the same way: those tests run on a Mac only, so this is
+# the one place a Linux checkout compiles it.
+#
+# :core:compileCommonMainKotlinMetadata compiles the shared code as the iPhone targets see it: a
+# JVM-only call in common code (HashMap.putIfAbsent, Map.toSortedMap) passes every JVM suite here
+# and breaks only the iPhone build.
+#
+# The three installDist tasks build what the web journeys (web/src/journeys/) run: the real server,
+# the engine's command-line module and recovery-cli, from this working copy. See the check before the
+# TypeScript leg below.
+(cd "$REPO_DIR" && flock "$LOCK" ./gradlew :core:compileCommonMainKotlinMetadata :core:jvmTest :server:test \
+  :app-desktop:test :tools:recovery-cli:test :tools:backup-cli:test :tools:update-signer:test \
+  :tools:andvari-cli:test :tools:hostile-harness:test :tools:vector-gen:classes :tools:uitest-seed:classes \
+  :server:installDist :tools:andvari-cli:installDist :tools:recovery-cli:installDist \
   --console=plain -q)
 
 echo "==> Android: :app-android:testDebugUnitTest (originKey byte-parity pins) + assembleDebug (app/autofill compile gate)"
 (cd "$REPO_DIR" && flock "$LOCK" ./gradlew :app-android:testDebugUnitTest :app-android:assembleDebug --console=plain -q)
 
-echo "==> TypeScript: web vitest (RFC pins + vector consumption) + typecheck"
+echo "==> TypeScript: web vitest (RFC pins + vector consumption + the journeys against a real server) + typecheck"
+# Every web journey starts the real server and the engine's own command-line module from this working
+# copy's Gradle output, and SKIPS itself when either is not built (journeysUnavailable() and
+# recoveryCliUnavailable() in web/src/journeys/harness.ts) — and vitest counts a skipped file as a
+# pass, so a gate that never built them printed green over every journey. The Kotlin leg above builds
+# them; this asserts each one is where harness.ts looks, and that harness.ts still looks there, so a
+# moved output fails here rather than turning the journeys into skips.
+for p in server/build/install/server/bin/server tools/andvari-cli/build/install/andvari-cli/lib \
+         tools/recovery-cli/build/install/recovery-cli/bin/recovery-cli; do
+  if ! grep -qF "\"$p\"" "$REPO_DIR/web/src/journeys/harness.ts"; then
+    echo "    WEB JOURNEYS: web/src/journeys/harness.ts no longer reads $p — point this check at what it reads now." >&2
+    exit 1
+  fi
+  if [ ! -e "$REPO_DIR/$p" ]; then
+    echo "    WEB JOURNEYS WOULD SKIP: $p is missing after the Kotlin leg (its installDist task builds it)." >&2
+    exit 1
+  fi
+done
 (cd "$REPO_DIR/web" && npx vitest run --silent && npx tsc --noEmit)
 
 echo "==> Extension: typecheck + node --test (the LIVE browser fill path runs the same shared vectors)"
@@ -227,11 +261,11 @@ echo "==> Extension: typecheck + node --test (the LIVE browser fill path runs th
 # so the two JS legs of one gate disagree about what "collected nothing" means — and the one that
 # stays quiet is the one guarding the browser. Move the suites to a sibling test/ dir (the layout
 # every other module uses), rename them off *.test.ts, or land on a node whose glob semantics
-# shifted, and all 271 extension tests leave the gate with the final green banner still printing —
+# shifted, and every extension test leaves the gate with the final green banner still printing —
 # including the extension's ONLY cross-engine crypto proof (crypto.vectors.test.ts) and its entire
 # signed-update suite (updateverify.test.ts). Neither the file count nor the runner's own count is
-# something the exit code will tell you, so assert both. Floors are set well under the current
-# 23 files / 271 tests: they catch a suite that vanished, not one that was pruned.
+# something the exit code will tell you, so assert both. Floors are set well under the 112 files /
+# 1,038 tests of 2026-11-21: they catch a suite that vanished, not one that was pruned.
 EXT_FILES=$(find "$REPO_DIR/extension/src" -maxdepth 1 -name '*.test.ts' 2>/dev/null | wc -l) || true
 if [ "${EXT_FILES:-0}" -lt 20 ]; then
   echo "    EXT SUITE MISSING: ${EXT_FILES:-0} *.test.ts files under extension/src, expected 20+ — did the suites move?" >&2
@@ -267,4 +301,4 @@ else
 fi
 
 echo "==> verify: Kotlin + TypeScript green off the same spec/test-vectors; server + crypto suites pass"
-echo "    (run scripts/e2e.sh for the live server + WebSocket + crash-idempotency E2E)"
+echo "    (scripts/e2e.sh builds and runs only the web journeys against a real server, and fails if one skips)"

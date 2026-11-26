@@ -59,9 +59,9 @@ Privacy · Distribution** (plus one-time Account items). Everything below is pas
 ### Package tab
 - Draft package = `andvari-extension-chrome-<version>.zip` (0.14.0 on the day). The **Summary** ("description" in
   `manifest.json`) and the item name come from the package, not the form — read the live value out of
-  `extension/manifest.json` rather than trusting this file; as of the endpoint-agnostic rewrite it is
-  *"Zero-knowledge password manager — fill and save logins. Works with any andvari server; set your
-  own in Options."* (111 chars). **The cap is 132 characters** and the store rejects the package for
+  `extension/manifest.json` rather than trusting this file; since 21 November 2026 it is
+  *"Fill and save passwords from your andvari vault. Free and open source, with our server or your
+  own."* (99 characters). **The cap is 132 characters** and the store rejects the package for
   exceeding it — a past release was bounced for exactly that, so count before you edit the manifest.
   Nothing to do on this tab unless a newer version ships before submission.
 
@@ -96,8 +96,8 @@ Privacy policy: https://monahanhosting.com/andvari/privacy/
 
 - **Store icon (128×128):** upload `extension/icons/icon128.png` — the **dark-background ᛅ brand
   mark**, the same one the desktop, phone and web surfaces carry, rendered from
-  `assets/brand/andvari-mark.svg` by `scripts/gen-brand-icons.sh` (H138 moved the source there and
-  onto the wordmark geometry; `app-desktop/icons/andvari.svg` is now a copy of it, not the source,
+  `assets/brand/andvari-mark-gilded.svg` by `scripts/gen-brand-icons.sh` (the sources of every icon
+  are under `assets/brand/`; `app-desktop/icons/andvari.svg` is a copy of the small tile, not a source,
   and no icon in the tree is hand-edited — re-run the script instead). (0.26.3 replaced the older treasury-coin artwork this line
   used to describe; a maintainer who uploads what the doc *says* rather than the file it names
   puts a different mark on the store listing than the one in the browser toolbar — audit H120.
@@ -190,8 +190,8 @@ through Cloudflare. If the markdown policy changes, re-render + redeploy both co
 ## D. Store assets (generated 2026-07-14 — `extension/store-assets/`)
 
 3× 1280×800 screenshots (real popup UI driven by a chrome-API shim + fixture data, headless
-capture) + optional 440×280 promo tile. Owner-facing submission kit with every field paste-ready +
-downloadable assets: kept by the maintainer, outside this repository.
+capture) + optional 440×280 promo tile, all in `extension/store-assets/`. The owner-facing submission
+kit, with every field paste-ready, is kept outside the repository.
 
 ---
 

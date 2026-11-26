@@ -2,7 +2,7 @@
 #
 #   docker compose -f docker-compose.yml -f docker-compose.caddy.yml up -d
 #
-# (bringup.sh --caddy writes COMPOSE_FILE into .env so plain `docker compose`
+# (set COMPOSE_FILE in .env so plain `docker compose`
 # picks both files up from then on.)
 #
 # Caddy terminates TLS for ${ANDVARI_DOMAIN} (Let's Encrypt / ZeroSSL, ports
@@ -16,6 +16,8 @@
 # published on the andvari service (the namespace owner) below.
 # If the app container is ever re-created, run `docker compose up -d` again so
 # caddy reattaches to the fresh namespace.
+# Ports 80 and 443 are the host's own: on a host that runs two andvari stacks,
+# at most one of them can use this overlay; the other needs its own front.
 
 services:
   andvari:
@@ -35,9 +37,9 @@ services:
     network_mode: "service:andvari"
     depends_on:
       - andvari
-    # ANDVARI_DOMAIN comes from deploy/.env (bringup.sh writes it from the
-    # canonical origin's host).
-    command: caddy reverse-proxy --from ${ANDVARI_DOMAIN:?set ANDVARI_DOMAIN in deploy/.env} --to 127.0.0.1:8080
+    # ANDVARI_DOMAIN comes from .env beside the compose files: set it to the host of
+    # ANDVARI_CANONICAL_ORIGIN.
+    command: caddy reverse-proxy --from ${ANDVARI_DOMAIN:?set ANDVARI_DOMAIN in .env beside the compose files} --to 127.0.0.1:8080
     volumes:
       - caddy-data:/data
       - caddy-config:/config

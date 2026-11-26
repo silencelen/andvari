@@ -24,19 +24,23 @@ Nothing in either tree needs a hook: esbuild's postinstall only swaps in the pla
 its optional `@esbuild/<platform>` package already provides. A password manager's build host is
 the last place a transitive package should get to run code at install time.
 
-You need **JDK 17**, **Node ≥ 22**, and — because `verify.sh` includes the Android client — an
-**Android SDK**, found via `ANDROID_HOME` or an `sdk.dir` line in `local.properties`. Without one,
-run the suites individually and skip the `:app-android` line; everything else stands alone.
+You need **JDK 17**, **Node ≥ 22**, and an **Android SDK**, found via `ANDROID_HOME` or an
+`sdk.dir` line in `local.properties`: `:core` has an Android target, so Gradle needs the SDK to
+configure the build at all, the JVM suites included. Without one, the web and extension suites
+still run by themselves. `scripts/ci/release-scripts.test.sh`, which `verify.sh` runs, also needs
+the tools its header lists (`dpkg-deb`, `unzip`, `python3` and others).
 
 **What runs when you open a PR, and what does not** (the full record is docs/ROADMAP.md's
 "CI posture" section). `.github/workflows/verify-js.yml` runs the two JS/TS suites plus both
 typecheck legs — web and extension — on every pull request. **The Kotlin half of the gate is not
 run in CI at all**: `:core`, `:server`, `:app-desktop`, `:app-android` and `tools/` want ~8-12 GB
-and do not fit a GitHub-hosted runner. So a green check on a PR touching `core/`, `server/`,
-`app-*/` or `tools/` proves the JS half only; such a PR still needs a local `scripts/verify.sh`
-before merge, and nothing enforces that but the release gate.
+and do not fit a GitHub-hosted runner. So a green check on a PR touching `server/`,
+`app-android/`, `app-desktop/` or `tools/` proves the JS half only, and one touching `core/` or
+`app-ios/` adds only the iPhone build and `:core`'s iPhone-simulator tests
+(`.github/workflows/ios-core.yml`); such a PR still needs a local `scripts/verify.sh` before
+merge, and nothing enforces that but the release gate.
 
-`scripts/verify.sh` is the gate every release goes through. In order, it:
+`scripts/verify.sh` is the gate every release goes through. Among its steps, in order:
 
 1. **Release-version consistency** — core, Android, desktop, and web must all report the same
    client version, and the top `CHANGELOG.md` heading must name it. One skew fails the gate.
@@ -55,19 +59,23 @@ before merge, and nothing enforces that but the release gate.
    exempt, each for a reason stated in the script: they are history, not instructions. Its own
    fixtures (`scripts/ci/fixtures/doc-leak/`) are checked by the gate too, so a pattern that
    stops firing fails here.
-3. **Kotlin** — `:core`, `:server`, `:app-desktop` and every `tools/` CLI (`recovery-cli`,
-   `backup-cli`, `update-signer`, plus a compile of `vector-gen`): RFC pins for the primitives, the
-   shared vectors, and full server integration.
+3. **Kotlin** — `:core` (its JVM tests, and a compile of the shared code as the iPhone targets
+   see it), `:server`, `:app-desktop` and the `tools/` modules (the `recovery-cli`, `backup-cli`,
+   `update-signer`, `andvari-cli` and `hostile-harness` suites, plus compiles of `vector-gen` and
+   `uitest-seed`): RFC pins for the primitives, the shared vectors, and full server integration.
+   It also builds the server, `andvari-cli` and `recovery-cli` that the web journeys run.
 4. **Android** — unit tests plus a compile gate over the app and its autofill service.
-5. **TypeScript (web)** — `vitest` plus `tsc --noEmit`. This suite also carries the extension's
-   cross-engine pins (see below).
+5. **TypeScript (web)** — `vitest` plus `tsc --noEmit`, the journeys in `web/src/journeys/`
+   included: they drive the web client's flows against a real server that step 3 built. This
+   suite also carries the extension's cross-suite pins (see below).
 6. **Extension** — `tsc --noEmit` plus its `node --test` suites, with a floor on both the number of
    suite files and the number of tests the runner reports back. `node --test` exits 0 when its glob
    matches nothing, so "the runner found the suite" has to be asserted separately from "the suite
    passed".
 
-`scripts/e2e.sh` goes further: it starts a real server, drives it with real client code over a real
-WebSocket, and `SIGKILL`s it mid-flight to prove crash-durable idempotency.
+`scripts/e2e.sh` runs only those journeys: it builds the server, `andvari-cli` and `recovery-cli`,
+runs every test file under `web/src/journeys/` (each journey starts its own server in test mode on
+127.0.0.1), and fails if any of them skipped instead of running.
 
 ## What the vectors prove
 
@@ -84,9 +92,10 @@ which file is which, and the counts — so it is not repeated here. Both engines
 them either way.
 
 Some safety-critical extension values are pinned from the **web** suite, in
-`web/src/extension-pins.test.ts`, because the extension has no cross-engine harness of its own.
-That file says so at the top; if you change a pinned constant, that test is designed to break
-first, deliberately.
+`web/src/extension-pins.test.ts`: values and code shapes that must stay identical across the
+extension/web seam, and the text of extension modules that cannot be imported under node. That
+file says so at the top; if you change a pinned constant, that test is designed to break first,
+deliberately.
 
 ## Working on the code
 
@@ -99,18 +108,19 @@ first, deliberately.
   length, especially around anything security-relevant.
 - Gradle is tuned for a small build host; serialize concurrent invocations with
   `flock /tmp/andvari-gradle.lock`.
-- **The brand mark has one source: `assets/brand/andvari-mark.svg`.** Every tile icon in the tree
-  (web favicon + manifest icons, `extension/icons/*`, `app-desktop/icons/*`) is rendered from it by
-  `scripts/gen-brand-icons.sh` — never hand-edit a derivative, re-run the script
-  (`scripts/gen-brand-icons.sh --check`, which the release gate runs, fails when a committed
-  raster no longer matches a fresh render). **Eight** files cannot be generated and re-draw the
-  same geometry by hand, because they are code rather than assets: `web/src/ui/Sigil.tsx`
-  BrandSigil, the Android adaptive foreground drawable, the extension popup and options headers
-  (inline SVG), `extension/src/popup.ts` and `extension/src/content-ui.ts` (programmatic paths),
-  `app-android/.../Theme.kt` (a Compose ImageVector) and `app-desktop/.../Ui.kt` (a Canvas draw).
-  Change the geometry and you change ALL of them in the same commit.
-  `web/src/ui/brand-assets.test.ts` reads every one and fails when they drift apart, which is how
-  the fleet ended up carrying two subtly different runes before 0.27.0.
+- **The brand has one source: the files under `assets/brand/`.** The icons take the pixel-fitted
+  tiles `andvari-mark-16.svg`, `-24.svg` and `-32.svg` at those sizes, the small tile
+  `andvari-mark.svg` at 48 and 64 px, and the gilded rune on polished hardwood
+  `andvari-mark-gilded.svg` from 128 px up (`assets/brand/BRAND.md`, "The icon"). Every rendered
+  icon in the tree (the web favicon and manifest icons, `extension/icons/*`, `app-desktop/icons/*`,
+  the desktop's window icon and the iPhone app icon) comes from `scripts/gen-brand-icons.sh`: never
+  edit a rendered icon by hand, change its source and re-run the script.
+  `scripts/gen-brand-icons.sh --check`, which the release gate runs, fails when a committed icon no
+  longer matches a fresh render of its source. The apps draw the rune and the name as code (inline
+  SVG, an Android vector drawable, Compose path calls), from the numbers of
+  `assets/brand/andvari-rune.svg` and `assets/brand/wordmark.svg`; `web/src/ui/brand-assets.test.ts`
+  reads every such drawing, and the Android launcher drawables, and fails when one no longer
+  matches its source.
 
 ## Reporting a vulnerability
 

@@ -14,7 +14,6 @@ import {
   adIdkey,
   adItem,
   adUvk,
-  adVk,
   adVkPersonal,
   authKey,
   boxKeypairFromSeed,
@@ -22,9 +21,7 @@ import {
   fromB64,
   hkdfSha256,
   open,
-  openSharedGrant,
   seal,
-  sealOpen,
   toB64,
   wrapKey,
   type KdfParams,
@@ -33,6 +30,9 @@ import {
 const vectorsDir = fileURLToPath(new URL("../../spec/test-vectors/", import.meta.url));
 const load = (name: string) => JSON.parse(readFileSync(vectorsDir + name, "utf-8"));
 const utf8 = (s: string) => new TextEncoder().encode(s);
+/** The v1 owner-wrap AD the vectors' chains still use (`andvari/v1|vk|{vaultId}|{userId}`). The extension itself opens
+ *  no such wrap any more (`adVk` was removed), so it is spelled out here, for the vectors. */
+const adVk = (vaultId: string, userId: string) => utf8(`andvari/v1|vk|${vaultId}|${userId}`);
 const fromUtf8 = (u: Uint8Array) => new TextDecoder().decode(u);
 // kdf.json's argon2id cases carry only ops/memBytes; deriveMasterKey takes the full params record.
 const kdfParams = (ops: number, memBytes: number): KdfParams => ({ v: 1, alg: "argon2id13", ops, memBytes });
@@ -141,50 +141,11 @@ test("wrap.json — the whole enrollment chain reproduces through crypto.ts", ()
   );
 });
 
-// The THIRD SharedGrant twin (H93): the production open the unlock path calls from buildVaultKeys,
-// graded by the same sharedgrant.json core VectorsTest and web vectors.test.ts run — the payload
-// contract {v, vaultId, vk}, the vaultId binding, and the 32-byte VK guard the other two always had.
-test("sharedgrant.json — openSharedGrant yields the VK, refuses a reseated vaultId and a short VK", () => {
-  const v = load("sharedgrant.json");
-  const kp = boxKeypairFromSeed(fromB64(v.memberSeedB64));
-  assert.equal(toB64(kp.publicKey), v.memberIdentityPubB64);
-  assert.equal(toB64(openSharedGrant(kp.publicKey, kp.privateKey, v.vaultId, fromB64(v.sealedB64))), v.vkB64);
-  // A seal naming a different vaultId must be refused under the real vaultId (a reseated grant).
-  assert.throws(() =>
-    openSharedGrant(kp.publicKey, kp.privateKey, v.rejectVaultMismatch.expectedVaultId, fromB64(v.rejectVaultMismatch.sealedB64)),
-  );
-  // A seal whose payload carries a non-32-byte "vk" under the RIGHT vaultId must be refused
-  // here, loudly — not accepted into vaultKeys to fail one item at a time later.
-  assert.notEqual(v.rejectVkLength.vkLen, 32);
-  assert.throws(
-    () => openSharedGrant(kp.publicKey, kp.privateKey, v.rejectVkLength.expectedVaultId, fromB64(v.rejectVkLength.sealedB64)),
-    /32 bytes/,
-  );
-  // R48: the third recipient check — a payload whose `v` is not 1 is refused on the version.
-  assert.notEqual(v.rejectVersion.v, 1);
-  assert.throws(
-    () => openSharedGrant(kp.publicKey, kp.privateKey, v.rejectVersion.expectedVaultId, fromB64(v.rejectVersion.sealedB64)),
-    /version/,
-  );
-});
-
-test("seal.json — sealOpen reads a libsodium crypto_box_seal (the shared-vault grant path)", () => {
-  const v = load("seal.json");
-  const kp = boxKeypairFromSeed(fromB64(v.recoverySeedB64));
-  assert.equal(toB64(kp.publicKey), v.recoveryPubB64);
-  assert.equal(toB64(kp.privateKey), v.recoveryPrivB64);
-
-  for (const c of v.open) {
-    assert.equal(toB64(sealOpen(kp.publicKey, kp.privateKey, fromB64(c.sealedB64))), c.plaintextB64);
-  }
-  // Escrow payloads are out of the extension's surface (no escrow module here), but the sealed-box
-  // open under them is the same primitive — assert the payload it yields, not just that it decodes.
-  const escrow = JSON.parse(fromUtf8(sealOpen(kp.publicKey, kp.privateKey, fromB64(v.escrowUvk.sealedB64))));
-  assert.equal(escrow.userId, v.escrowUvk.userId);
-  assert.equal(escrow.key, v.escrowUvk.uvkB64);
-
-  const wrong = boxKeypairFromSeed(fromB64(v.rejectWrongKey.wrongSeedB64));
-  assert.throws(() => sealOpen(wrong.publicKey, wrong.privateKey, fromB64(v.rejectWrongKey.sealedB64)));
+// The files sharedgrant.json and seal.json are no longer graded here. The extension opens no grant
+// and no sealed box (design §12.2 rule 1), so it carries neither open; core and the web twin grade those files.
+test("the grant and sealed-box opens are gone from the extension's crypto", () => {
+  const src = readFileSync(fileURLToPath(new URL("./crypto.ts", import.meta.url)), "utf-8");
+  for (const gone of ["export function sealOpen", "export function openSharedGrant", "export const adVk ="]) assert.ok(!src.includes(gone), gone);
 });
 
 // Security review 2026-10, root cause A §4.1 (A5): the extension opens AccountKeys.personalWrap at unlock

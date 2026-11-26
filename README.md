@@ -3,6 +3,12 @@
 A zero-knowledge household password manager you can host yourself. Named for the dwarf
 who guards the treasure hoard.
 
+**Releases and branches.** The tagged versions of andvari are released ones, and the branch
+`main` holds the newest of them. Any other branch of this repository, `public-next` among them,
+is a line of work and not a release: parts of it can be unfinished, its documents can describe
+the released version where its code has moved on, and it is not meant for a server or a vault
+that you depend on.
+
 The server only ever stores ciphertext: every encryption key derives from a user's master
 password **on the device**, and account recovery goes through an offline escrow key the
 server never holds. A hostile or compromised server can deny you service; it cannot read
@@ -65,7 +71,7 @@ served, but the clients' "get andvari on your other devices" hub reads
 Each platform key — `android`, `windows`, `linux` (the `.deb`), `linuxArch` (the pacman
 package) — wants a `version` **and** a `url`; with either missing the row stays "isn't
 published yet". A same-origin path is fine (it inherits the page's scheme; only an http(s)
-result is ever rendered as a link). This is the phone-shaped half of audit F09: the
+result is ever rendered as a link). This is the phone-shaped half of an earlier fault: the
 `android` key did not exist at all before 0.21.0, so an APK served exactly as this table
 documented could never appear in any client. `linuxArch` is additive the same way: a
 manifest without it is still valid, and only the Arch row stays unpublished.
@@ -91,30 +97,30 @@ against the vectors.
 
 ## Self-hosting
 
-The distribution channel is the container image **`ghcr.io/silencelen/andvari`**. **It is not
+The distribution channel is the container image **`ghcr.io/silencelen/andvari-server`** (from 1.0.0 on; the old name `ghcr.io/silencelen/andvari` stays at 0.30.0). **It is not
 anonymously pullable yet** — the GHCR package is still private, so a `docker pull` without a
 GitHub login fails. Until the owner flips it public (a release step, `scripts/publish-image.sh`),
-build it yourself: clone the repo and run `./deploy/bringup.sh --build`, which builds the image
-locally from the top-level `Dockerfile` and is otherwise the identical bring-up. Nothing else
-about self-hosting depends on the registry.
+build it yourself: clone the repo and build the image from the top-level `Dockerfile`, with the
+repository root as the build context; the bring-up is otherwise the same. Nothing else about
+self-hosting depends on the registry.
 
 The full walkthrough — TLS options, the escrow ceremony, the policy variables, backup and
 updates — is **[`docs/self-hosting.md`](docs/self-hosting.md)**, which every running
 instance also serves at `<your-origin>/selfhost` alongside downloadable copies of
-`deploy/docker-compose.yml`, `deploy/andvari.env.template`, and `deploy/bringup.sh`.
+`deploy/docker-compose.yml`, `deploy/docker-compose.caddy.yml`, and `deploy/andvari.env.template`.
 
 ## Layout
 
 | Path | What |
 |---|---|
 | `spec/` | **Normative** protocol + crypto spec (00–07) and `test-vectors/` — code follows spec, never the reverse |
-| `core/` | Kotlin Multiplatform (android + jvm): crypto, models, sync engine, client cache |
+| `core/` | Kotlin Multiplatform (android + jvm, and iOS, built on macOS only): crypto, models, sync engine, client cache |
 | `server/` | ktor JVM sync server (depends on `:core`) |
 | `app-android/` | Android client |
 | `app-desktop/` | Compose for Desktop client (Windows `.msi`, Linux `.deb` + Arch `.pkg.tar.zst`) |
 | `web/` | Independent TypeScript implementation of the spec (Vite + React) |
 | `extension/` | MV3 browser extension, Chromium + Firefox — in-browser fill/save (pure-JS @noble crypto) |
-| `deploy/` | The self-host bundle: `docker-compose.yml`, the caddy overlay, `andvari.env.template`, `bringup.sh` |
+| `deploy/` | The self-host bundle: `docker-compose.yml`, the caddy overlay, `andvari.env.template`, and the image's `docker-entrypoint.sh` |
 | `tools/vector-gen` | Emits most of `spec/test-vectors/*.json` from the Kotlin reference implementation (the rest are hand-authored — see below) |
 | `tools/recovery-cli` / `tools/backup-cli` | Offline escrow ceremony/recovery + offline `.andvari` backup reader (verify/dump/extract) |
 | `tools/update-signer` | Signs the `/downloads` update manifest the extension's update channel verifies |
@@ -127,21 +133,23 @@ them either way, so the lockstep holds regardless of provenance.
 
 ## Build
 
-JDK 17, Node ≥ 22, and — for `:app-android` — an Android SDK, located via `ANDROID_HOME`
-or an `sdk.dir` line in `local.properties`. `gradle.properties` is tuned for a small
+JDK 17, Node ≥ 22, and an Android SDK (Gradle needs one to configure the build, as `:core`
+has an Android target), located via `ANDROID_HOME` or an `sdk.dir` line in `local.properties`. `gradle.properties` is tuned for a small
 (8–12 GB) build host; raise the heaps if yours is bigger. Serialize concurrent Gradle
 invocations with `flock /tmp/andvari-gradle.lock`.
 
 ```sh
 bash scripts/verify.sh   # the ship gate: release-version consistency across the clients,
-                         # then the Kotlin suites (:core, :server, :app-desktop,
-                         # recovery-cli), :app-android unit tests + compile gate, web
-                         # vitest + tsc, and the extension typecheck + tests — Kotlin and
-                         # TS crypto both graded off spec/test-vectors
+                         # the docs, CI and release-script checks, then the Kotlin suites
+                         # (:core, :server, :app-desktop, the tools/ modules), :app-android
+                         # unit tests + compile gate, web vitest (the journeys against a
+                         # real server included) + tsc, and the extension typecheck, tests
+                         # and packaging check — Kotlin and TS crypto both graded off
+                         # spec/test-vectors
 ```
 
-`scripts/e2e.sh` adds a live end-to-end run (real server, real WebSocket, crash
-idempotency across a `SIGKILL`). **[`CONTRIBUTING.md`](CONTRIBUTING.md)** walks the
+`scripts/e2e.sh` runs only the web journeys, each against a real server that the journey
+starts on 127.0.0.1, and fails if one skips itself. **[`CONTRIBUTING.md`](CONTRIBUTING.md)** walks the
 clone → verify path and says what each suite proves.
 
 ## Accessibility

@@ -373,7 +373,7 @@ private fun sharedGrant(): JsonObject = buildJsonObject {
 
 /** spec 06 — CSV import. Expectations are produced by the :core reference impl. */
 private fun importVectors(): JsonObject {
-    val bom = "﻿"
+    val bom = "\uFEFF"
     // name is a plain counter so the docs list is order-stable (itemId is not pinned).
     var counter = 0
     fun newId(): String = "id-${counter++}"

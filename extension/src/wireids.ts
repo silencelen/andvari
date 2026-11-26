@@ -1,4 +1,4 @@
-import type { AccountKeys, SessionResponse, SyncResponse, VaultMemberSummary } from "./api.ts";
+import type { AccountKeys, SessionResponse, SyncResponse } from "./api.ts";
 
 /**
  * The id grammar at the wire boundary (security review 2026-10, plugin scan F1/F2; branch A10). Twin of core
@@ -55,9 +55,20 @@ export function sanitizeSync(resp: SyncResponse): Sanitized<SyncResponse> {
   return { value: { ...resp, vaults, grants, items }, refused: c.refused };
 }
 
-export function sanitizeMembers(rows: VaultMemberSummary[]): Sanitized<VaultMemberSummary[]> {
-  const c = new Collector();
-  return { value: rows.filter((m) => c.ok("userId", m.userId)), refused: c.refused };
+/**
+ * The vaults a sync answer still grants to this account, as the one decision that takes a held vault key away needs
+ * them: every vault id its list of grants names, a row refused by [sanitizeSync] for its other ids included. Null when
+ * the answer cannot say which vaults are no longer granted: it sent no list as a list, or a row's vault id is itself
+ * unusable. Read from the answer as served, before or beside its sanitizing; the extension's own, not a wire field.
+ */
+export function grantedVaultIdsOf(resp: SyncResponse): ReadonlySet<string> | null {
+  if (!Array.isArray(resp.grants)) return null;
+  const ids = new Set<string>();
+  for (const g of resp.grants) {
+    if (!isUuid(g?.vaultId)) return null;
+    ids.add(g.vaultId);
+  }
+  return ids;
 }
 
 /** The served personal wrap names a vault: a malformed id drops the wrap (the session then has no served wrap). */

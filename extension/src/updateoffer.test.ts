@@ -8,10 +8,9 @@
 // read, in the worker AND in the popup.
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import { DEFAULT_SERVER_URL } from "./serverurl.ts";
-import { offerDownloadUrl, readUpdateOffer } from "./updateoffer.ts";
+import { offerDownloadUrl, readUpdateOffer, UPDATE_ORIGIN } from "./updateoffer.ts";
 
-const D = DEFAULT_SERVER_URL;
+const D = UPDATE_ORIGIN;
 
 test("the manifest's relative /downloads/<basename> becomes an absolute link on the default origin", () => {
   assert.equal(offerDownloadUrl("/downloads/andvari-extension-chrome-0.29.0.zip", D), `${D}/downloads/andvari-extension-chrome-0.29.0.zip`);

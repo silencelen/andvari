@@ -1,18 +1,28 @@
 import { useEffect, useMemo, useState } from "react";
 import { ApiClient, ApiError } from "../api/client";
-import { KdfPolicyError, WEAK_KDF_MESSAGE } from "../crypto/keys";
-import type { ClientPolicy, TotpSetupResponse, TotpStatus } from "../api/types";
+import { KdfPolicyError } from "../crypto/keys";
+import type { TotpSetupResponse, TotpStatus } from "../api/types";
+import type { ClientPolicyV2 as ClientPolicy } from "../api/wire";
 import { backupNudge, readLastExportAt } from "../export/plan";
 import { qrModules } from "../vendor/qrcode-generator";
-import { Account, ReauthStaleSessionError } from "../vault/account";
+import { Account, ReauthFailedError, ReauthStaleSessionError } from "../vault/account";
+import { PasswordRuleRefused } from "../vault/kitflow";
+import { SERVER_REFUSED_PROOF, TWO_STEP_CHECK_FAILED, TWO_STEP_QR_LABEL, TWO_STEP_REQUIRED_HERE, TWO_STEP_SECRET_CLEARS, TWO_STEP_TITLE, TWO_STEP_TURN_ON, TWO_STEP_TURNED_ON } from "./copy";
+import { fill, kdfRefusalText, OFFLINE_COPY_ABOUT, passwordRuleText, OFFLINE_COPY_LIMIT, OFFLINE_SETTINGS_WAIT, SERVER_KEYS_NOT_KNOWN_SETTINGS, TOTP_OFF_PASSWORD_LABEL, TOTP_WRONG_CODE, TOTP_WRONG_PASSWORD } from "./copy";
+import { UNSENT_ALL_SENT, UNSENT_SEND_FIRST, UNSENT_SEND_FIRST_FAILED, unsentLine } from "./copy";
+import { unsentArmStep } from "./SignOutLink";
 import type { VaultStore } from "../vault/store";
 import { BackLink } from "./BackLink";
 import { Busy } from "./Busy";
 import { scheduleClipboardClear, writeClipboard } from "./clipboard";
 import { DeleteAccountCard, type DeletionEnd, type DeletionTrack } from "./DeleteAccount";
 import { DevicesCard } from "./Devices";
-import { beginTotpEnrolment } from "./totp-enrol";
-import { CLIPBOARD_FAILED, CLIPBOARD_NOT_CLEARED, UNREACHABLE } from "./errors";
+import { AccountDevicesCard } from "./AccountDevices";
+import { RecoveryPostureCard } from "./RecoveryPostureCard";
+import { RotateKitCard } from "./KitCard";
+import { changePassword, NO_SESSION_WRAP, type SettingsSession, setUpTwoStep, turnOffTwoStep, type TwoStepOff, type TwoStepSetup } from "../vault/settingsflow";
+import { passwordChangedText, passwordChangeText, twoStepOffText, twoStepSetupText, waitText } from "./reauthtext";
+import { answerLimitText, CLIPBOARD_FAILED, CLIPBOARD_NOT_CLEARED, UNREACHABLE } from "./errors";
 import { Field } from "./Field";
 import { fmtDate, humanSize } from "./format";
 import { Announcer, Msg } from "./Msg";
@@ -21,7 +31,6 @@ import { MasterPasswordHint } from "./passwordadvice";
 import { clampClipboardClearSeconds } from "./policyclamp";
 import {
   orgOfflineCacheDisallowed,
-  refreshCachedAccountKeys,
   setOfflineCopyEnabled,
   webCacheEnabled,
   wipeVaultCache,
@@ -29,11 +38,14 @@ import {
 import { meetsMasterPasswordFloor } from "./strength";
 import { useThemePref, type ThemePref } from "./useTheme";
 import { ViewHeader } from "./ViewHeader";
-import { HouseholdCard, PersonalVaultCard } from "./Household";
+import { PersonalVaultCard } from "./Household";
+import { quotaLineText } from "./quotatext";
 
 interface Props {
   client: ApiClient;
   account: Account;
+  /** The session the post-cut-over Settings flows act for (vault/settingsflow.ts); absent in old callers. */
+  settings?: SettingsSession;
   /** design 2026-07-13-web-offline-cache §E.3.4: the Offline-copy card reads the live cache state
    *  (cacheDurable/cacheDemoted/lastSyncAt/queuedMutationCount) from the store — the store owns the
    *  live truth while a vault is open (session.pendingSyncCount is the signed-out choke-point twin). */
@@ -56,40 +68,59 @@ interface Props {
   onOpenVaultSettings?: (vaultId: string) => void;
   /** The last-admin blocker's link (admins only). */
   onOpenAdmin?: () => void;
+  /**
+   * The vault was opened from this browser's offline copy and no sync has landed since (spec 02 §8): the cards that need
+   * the server are shown disabled under one line that says why, and come back when a sync lands.
+   */
+  offline?: boolean;
 }
 
-export function Settings({ client, account, store, policy, onPasswordChanged, onBackup, onCsv, email, onAccountDeleted, onDeletionTrack, onOpenVaultSettings, onOpenAdmin }: Props) {
+export function Settings({ client, account, store, policy, onPasswordChanged, onBackup, onCsv, email, onAccountDeleted, onDeletionTrack, onOpenVaultSettings, onOpenAdmin, settings, offline = false }: Props) {
   // IA P2: the install hub (a whole feature) was Settings' last card and dominated it — its own
   // sub-page now, reached from a link, symmetric with how the natives reach Autofill status.
   const [sub, setSub] = useState<"main" | "devices">("main");
+  const keysNotKnown = settings?.wrap?.serverKeysNotKnown === true;
   if (sub === "devices") {
     return (
       <div>
         <ViewHeader title="Your devices" actions={<BackLink label="Back to settings" onClick={() => setSub("main")} />} />
-        <DevicesCard canonicalOrigin={policy?.canonicalOrigin} />
+        <DevicesCard canonicalOrigin={policy?.canonicalOrigin} client={client} />
       </div>
     );
   }
   return (
     <div>
       <ViewHeader title="Settings" />
-      <IdentityCard account={account} />
-      <HouseholdCard client={client} account={account} store={store} />
-      <PersonalVaultCard client={client} account={account} store={store} />
+      <PersonalVaultCard account={account} store={store} />
+      <QuotaLine store={store} />
       <BackupCard account={account} onBackup={onBackup} onCsv={onCsv} />
       <OfflineCopyCard store={store} userId={account.userId} />
-      <TotpCard client={client} policy={policy} account={account} />
-      <PasswordCard client={client} account={account} policy={policy} onPasswordChanged={onPasswordChanged} />
+      {offline && <div className="msg info" style={{ display: "block", marginTop: 16 }} role="status">{OFFLINE_SETTINGS_WAIT}</div>}
+      {/* Spec 01 §7, "leaves both": while the session is marked, every action below proves the master password to a
+          server that serves keys this browser does not know, and would be refused. They are shown unavailable, under one
+          line that says why, instead of offered and then refused. */}
+      {!offline && keysNotKnown && <div className="msg info" style={{ display: "block", marginTop: 16 }} role="status">{SERVER_KEYS_NOT_KNOWN_SETTINGS}</div>}
+      {/* The cards below need the server. Keyed on `offline` so that they load again once a sync lands. */}
+      <fieldset key={offline ? "offline" : "online"} className="needs-server" disabled={offline || keysNotKnown}>
+        <TotpCard client={client} policy={policy} account={account} settings={settings} offline={offline} />
+        {settings && <PasswordCard account={account} policy={policy} onPasswordChanged={onPasswordChanged} settings={settings} />}
+        {settings && <AccountDevicesCard settings={settings} offline={offline} />}
+        {settings && <RotateKitCard settings={settings} />}
+        {settings && store.sharedLogs() !== null && <RecoveryPostureCard settings={settings} shared={store.sharedLogs()!} />}
+      </fieldset>
       <AppearanceCard />
       <div className="sheet">
         <button type="button" className="link" onClick={() => setSub("devices")}>Get andvari on your other devices →</button>
       </div>
       {/* Spec 03 §13 (store policy: in-app account deletion). Last on the page, where the irreversible action belongs. */}
       {onAccountDeleted && (
+        <fieldset key={offline ? "delete-offline" : "delete-online"} className="needs-server" disabled={offline || keysNotKnown}>
         <DeleteAccountCard
           client={client}
           account={account}
           store={store}
+          settings={settings}
+          shared={store.sharedLogs()}
           email={email ?? ""}
           onDeleted={onAccountDeleted}
           onTrack={onDeletionTrack}
@@ -97,9 +128,42 @@ export function Settings({ client, account, store, policy, onPasswordChanged, on
           onOpenAdmin={onOpenAdmin}
           onBackup={onBackup}
         />
+        </fieldset>
       )}
     </div>
   );
+}
+
+/** Spec 03 §14.4: the account's own use and limits, as the newest sync served them; nothing when it served none. */
+function QuotaLine({ store }: { store: VaultStore }) {
+  const line = quotaLineText(store.quota());
+  if (line === null) return null;
+  return (
+    <div className="sheet">
+      <p className="muted" style={{ margin: 0 }}>{line}</p>
+    </div>
+  );
+}
+
+/** What the two-step card says when a step failed. */
+export function totpErrorText(e: unknown): string {
+  const limit = answerLimitText(e);
+  if (limit !== null) return limit;
+  // #23 household voice (errors.ts canon): a fetch rejection (TypeError) is transport, never the user's fault; everything
+  // else gets the neutral retryable sentence.
+  if (e instanceof ApiError && e.code === "bad_totp_code") return TOTP_WRONG_CODE;
+  if (e instanceof ReauthFailedError) return TOTP_WRONG_PASSWORD;
+  // Spec 01 §7: a proof the server refused was made here first (a wrong password is the line above, and sends nothing).
+  if (e instanceof ApiError && e.code === "reauth_failed") return SERVER_REFUSED_PROOF;
+  // The proofs' own back-off and the codes' (spec 03, 2026-11-16; neither blocks a sign-in), and the per-minute limit:
+  // "too many tries" with the wait the server named (the sign-in back-off's sentence when it named none), never
+  // "wrong password", and nothing is retried by itself.
+  if (e instanceof ApiError && e.status === 429) return waitText(e.retryAfterS);
+  if (e instanceof ReauthStaleSessionError) return e.message;
+  if (e instanceof KdfPolicyError) return kdfRefusalText(e);
+  if (e instanceof PasswordRuleRefused) return passwordRuleText(e.decision);
+  if (e instanceof TypeError) return UNREACHABLE;
+  return "Something went wrong — please try again.";
 }
 
 // ---- backups (spec 07 §2.6 — lastExportAt is recorded LOCALLY, never server-side) ----
@@ -209,6 +273,7 @@ export function OfflineCopyBody({
   onWipe,
   onConfirm,
   onCancelConfirm,
+  onSendFirst,
 }: {
   model: OfflineCopyModel;
   busy: boolean;
@@ -220,6 +285,8 @@ export function OfflineCopyBody({
   onWipe: () => void;
   onConfirm: () => void;
   onCancelConfirm: () => void;
+  /** Design §4.4: "try sending them first", offered in the armed confirm where sending is possible (absent: it is not). */
+  onSendFirst?: () => void;
 }) {
   return (
     <div className="sheet">
@@ -240,16 +307,8 @@ export function OfflineCopyBody({
           app the old wording said DID open cold. Same code, same limitation: no service-worker
           shell means the launcher icon gets the browser's error page too. "The andvari apps you
           install" is the honest boundary until D1 ships. */}
-      <p className="muted" style={{ marginTop: 0 }}>
-        An encrypted copy of your vault kept in this browser, so you can open it in a tab you
-        already have open, even when the server can't be reached. Everything in it stays sealed —
-        only your master password can open it, and your password itself is never stored.
-      </p>
-      <p className="muted">
-        A fresh tab still needs the server: this copy keeps a tab that is already open working, it
-        doesn't load the app from nothing — a home-screen shortcut for this site included. The
-        andvari apps you install for your computer and phone do open offline from cold.
-      </p>
+      <p className="muted" style={{ marginTop: 0 }}>{OFFLINE_COPY_ABOUT}</p>
+      <p className="muted">{OFFLINE_COPY_LIMIT}</p>
       {notice && <Msg kind="info">{notice}</Msg>}
       {/* BL-1 idiom: toggle/wipe results AND the armed confirm are async info — announce both
           off this one persistent region (an armed confirm the SR user never hears is no confirm). */}
@@ -277,6 +336,11 @@ export function OfflineCopyBody({
           {pendingConfirm && (
             <div className="confirm-row">
               <span>{pendingConfirm.question}</span>
+              {onSendFirst && (
+                <button type="button" className="ghost" disabled={busy} onClick={onSendFirst}>
+                  {UNSENT_SEND_FIRST}
+                </button>
+              )}
               <button
                 type="button"
                 className="ghost"
@@ -360,22 +424,20 @@ export function OfflineCopyBody({
  * persistent Announcer. The count is still RE-READ at click time from the live store — it reads
  * the SHARED per-account DB, so edits another tab queued after this card mounted are counted too.
  * Gating on the mount-time model would stale-zero those and skip the confirm, silently destroying
- * that tab's unsynced edits (S5 review F2 — App.signOut's twin gate re-reads the same way). A
- * failing re-read falls back to the mount-time count: a stale confirm beats a skipped one, and a
- * count failure must never wedge the control.
+ * that tab's unsynced edits (S5 review F2 — App.signOut's twin gate re-reads the same way).
+ * Design §4.4 (decided on 2026-11-17): the count is the shared code's (the queue and the vaults held
+ * back), and a failing re-read is said as "this browser can't tell" and still asks: a count failure
+ * is never said as none, and never a number it did not read.
  */
-export async function queueLossQuestion(
-  store: Pick<VaultStore, "queuedMutationCount">,
-  mountCount: number,
-): Promise<string | null> {
-  let queued = mountCount;
+export async function queueLossQuestion(store: Pick<VaultStore, "unsentChangeCount">): Promise<{ question: string; unsent: number | null } | null> {
+  let unsent: number | null;
   try {
-    queued = await store.queuedMutationCount();
+    unsent = await store.unsentChangeCount();
   } catch {
-    /* count unreadable — the mount-time count still gates */
+    unsent = null;
   }
-  if (queued === 0) return null;
-  return `${queued} unsynced ${queued === 1 ? "change" : "changes"} on this device will be permanently lost.`;
+  const question = unsentLine(unsent);
+  return question === undefined ? null : { question, unsent };
 }
 
 function OfflineCopyCard({ store, userId }: { store: VaultStore; userId: string }) {
@@ -384,7 +446,7 @@ function OfflineCopyCard({ store, userId }: { store: VaultStore; userId: string 
   const [notice, setNotice] = useState("");
   // H135: the armed inline confirm. `run` is the destructive action the second click performs —
   // held here (not re-derived) so the confirm and the deed can never drift apart.
-  const [pendingConfirm, setPendingConfirm] = useState<{ question: string; verb: string; run: () => Promise<void> } | null>(null);
+  const [pendingConfirm, setPendingConfirm] = useState<{ question: string; unsent: number | null; verb: string; run: () => Promise<void> } | null>(null);
 
   // (Re-)assemble the model; guarded so a slow probe never lands state on an unmounted card.
   useEffect(() => {
@@ -442,9 +504,31 @@ function OfflineCopyCard({ store, userId }: { store: VaultStore; userId: string 
   /** Arm the inline confirm when there is queued work to lose; otherwise just do it. */
   const guard = async (verb: string, run: () => Promise<void>) => {
     setNotice("");
-    const question = await queueLossQuestion(store, model.queued);
-    if (!question) return run();
-    setPendingConfirm({ question, verb, run });
+    const ask = await queueLossQuestion(store);
+    if (!ask) return run();
+    setPendingConfirm({ ...ask, verb, run });
+  };
+
+  /** Design §4.4: "try sending them first", where the vault is open and its traffic not stopped. The count is read
+   *  again after it: with none left the confirm goes (the act is one click again); otherwise it shows the new number. */
+  const sendFirst = async () => {
+    const armed = pendingConfirm;
+    if (!armed) return;
+    setBusy(true);
+    try {
+      const left = await store.sendBeforeDelete().catch(() => null);
+      const line = unsentLine(left);
+      if (line === undefined) {
+        setPendingConfirm(null);
+        setNotice(UNSENT_ALL_SENT);
+      } else {
+        setPendingConfirm({ ...armed, question: line, unsent: left });
+        setNotice(UNSENT_SEND_FIRST_FAILED);
+      }
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -460,40 +544,21 @@ function OfflineCopyCard({ store, userId }: { store: VaultStore; userId: string 
         else void guard("Turn it off and lose them", () => toggleNow(false));
       }}
       onWipe={() => void guard("Remove it and lose them", wipeNow)}
+      onSendFirst={pendingConfirm && pendingConfirm.unsent !== null && !store.isReadOnlyCopy() ? () => void sendFirst() : undefined}
       onConfirm={() => {
+        // The second click counts again: a count that moved since the first arms the confirm again with the new number.
         const armed = pendingConfirm;
-        setPendingConfirm(null);
-        if (armed) void armed.run();
+        if (!armed) return;
+        void queueLossQuestion(store).then((now) => {
+          const step = unsentArmStep({ text: armed.question, unsent: armed.unsent }, now === null ? null : { text: now.question, unsent: now.unsent });
+          if (step.act) {
+            setPendingConfirm(null);
+            void armed.run();
+          } else if (now !== null) setPendingConfirm({ ...armed, ...now });
+        });
       }}
       onCancelConfirm={() => setPendingConfirm(null)}
     />
-  );
-}
-
-// ---- identity code (spec 01 §5 — seed-derived fingerprint, for sharing verification) ----
-
-function IdentityCard({ account }: { account: Account }) {
-  const [code, setCode] = useState("");
-  useEffect(() => {
-    // Derived on this device from the decrypted identity seed — never a server value.
-    account.identityFingerprintShort().then((fp) => setCode(fp.match(/.{4}/g)!.join(" ")));
-  }, [account]);
-  return (
-    <div className="sheet">
-      <h2>Identity code</h2>
-      <p className="muted" style={{ marginTop: 0 }}>
-        Someone sharing a vault with you will ask you to read this out.
-      </p>
-      <div className="field">
-        {/* BL-2: secret-row (input + copy) is multi-child, so the label can't associate via
-            Field — name the inner input directly. */}
-        <label>My identity code</label>
-        <div className="secret-row">
-          <input readOnly className="mono" aria-label="My identity code" value={code || "…"} />
-          <CopyButton value={code} />
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -545,7 +610,7 @@ function CopyButton({ value, label = "Copy", clearSeconds = 0 }: { value: string
 
 // ---- server TOTP (spec 03 §2 — optional second factor, verified at every sign-in) ----
 
-function TotpCard({ client, policy, account }: Pick<Props, "client" | "policy" | "account">) {
+function TotpCard({ client, policy, account, settings, offline = false }: Pick<Props, "client" | "policy" | "account" | "settings" | "offline">) {
   const [status, setStatus] = useState<TotpStatus | null>(null);
   const [setup, setSetup] = useState<TotpSetupResponse | null>(null);
   const [code, setCode] = useState("");
@@ -564,9 +629,11 @@ function TotpCard({ client, policy, account }: Pick<Props, "client" | "policy" |
   // number a hostile policy value can't inflate).
   const clipClear = clampClipboardClearSeconds(policy?.clipboardClearSeconds ?? 30);
 
+  // On the offline copy the server can't be reached: its state is not asked for (Settings says why in its own line).
   useEffect(() => {
-    client.totpStatus().then(setStatus).catch(() => setErr("Couldn't check two-factor sign-in — reload to try again."));
-  }, [client]);
+    if (offline) return;
+    client.totpStatus().then(setStatus).catch(() => setErr(TWO_STEP_CHECK_FAILED));
+  }, [client, offline]);
 
   const run = async (fn: () => Promise<void>) => {
     setBusy(true);
@@ -575,58 +642,63 @@ function TotpCard({ client, policy, account }: Pick<Props, "client" | "policy" |
     try {
       await fn();
     } catch (e) {
-      // #23 household voice (errors.ts canon): a fetch rejection (TypeError) is transport,
-      // never the user's fault; everything else gets the neutral retryable sentence.
-      setErr(
-        e instanceof ApiError && e.code === "bad_totp_code"
-          ? "That code is wrong or expired — try the current one."
-          : e instanceof ApiError && e.code === "reauth_failed"
-            ? "That master password isn't right — try again."
-            : e instanceof TypeError
-            ? UNREACHABLE
-            : "Something went wrong — please try again.",
-      );
+      setErr(totpErrorText(e));
     } finally {
       setBusy(false);
     }
   };
 
+  // Server rule of 2026-11-17: every setup takes the master password, also on an account with no factor yet and right
+  // after a sign-in. The password is proven here first, as when turning it off (a wrong one sends nothing), and the
+  // field is emptied whatever the answer. Without the session's Settings flows nothing is sent.
   const begin = () =>
     run(async () => {
+      let r: TwoStepSetup;
       try {
-        setSetup(await beginTotpEnrolment(client, password, account));
+        r = settings ? await setUpTwoStep(settings, password) : { kind: "refused", code: NO_SESSION_WRAP };
       } finally {
         setPassword("");
       }
       setCode("");
+      if (r.kind === "setup") setSetup(r.setup);
+      else setErr(twoStepSetupText(r));
     });
 
   // §2.6 model: an enrolled second factor is verified on EVERY sign-in, every origin —
   // the copy says "every sign-in", never the retired "outside your home network" framing.
-  // (An armed break-glass origin is the only place location still matters; its refusal
-  // copy lives in Welcome.tsx / HouseholdCopy.PUBLIC_LOGIN_REQUIRES_TOTP.)
+  // (The break-glass twin origin and its refusal went with design §15.)
   const confirm = () =>
     run(async () => {
-      setStatus(await client.totpConfirm(code.replace(/\s/g, "")));
+      // The route answers the plain-text `ok`, never a status (spec 03 §0.1 row 15): on once it resolves.
+      await client.totpConfirm(code.replace(/\s/g, ""));
+      setStatus({ enrolled: true, pendingSetup: false });
       setSetup(null);
       setCode("");
-      setMsg("Two-factor sign-in is on. Every sign-in now also asks for a code from your authenticator app.");
+      setMsg(TWO_STEP_TURNED_ON);
     });
 
+  // Server rule of 2026-11-16: turning it off takes the master password as well as a current code. The password is
+  // proven here first (a wrong one sends nothing), and the field is emptied whatever the answer.
   const disable = () =>
     run(async () => {
-      setStatus(await client.totpDisable(code.replace(/\s/g, "")));
-      setCode("");
-      setMsg(
-        policy?.totpRequired
-          ? "Two-factor sign-in is off. This server requires it, so your next sign-in will ask you to set it up again."
-          : "Two-factor sign-in is off. Signing in now asks only for your master password.",
-      );
+      let r: TwoStepOff;
+      try {
+        r = settings ? await turnOffTwoStep(settings, code.replace(/\s/g, ""), password) : { kind: "refused", code: NO_SESSION_WRAP };
+      } finally {
+        setPassword("");
+      }
+      const t = twoStepOffText(r, policy?.totpRequired === true);
+      if (r.kind === "done") setStatus({ enrolled: false, pendingSetup: false });
+      // The code is spent or stale on every answer of the server; it stays only when nothing was sent.
+      if (r.kind === "done" || r.kind === "wrong_code" || r.kind === "wait") setCode("");
+      if (r.kind === "unknown") void client.totpStatus().then(setStatus).catch(() => undefined);
+      if (t.kind === "info") setMsg(t.text);
+      else setErr(t.text);
     });
 
   return (
     <div className="sheet">
-      <h2>Two-factor sign-in (server)</h2>
+      <h2>{TWO_STEP_TITLE}</h2>
       <p className="muted" style={{ marginTop: 0 }}>
         An extra one-time code the server asks for each time you sign in. Recommended:
         even someone who learns your master password can't sign in without your
@@ -634,7 +706,7 @@ function TotpCard({ client, policy, account }: Pick<Props, "client" | "policy" |
         alone still unseals the hoard.
       </p>
       {policy?.totpRequired && (
-        <p className="muted">This server requires two-factor sign-in for every account.</p>
+        <p className="muted">{TWO_STEP_REQUIRED_HERE}</p>
       )}
       {err && <Msg kind="err">{err}</Msg>}
       {msg && <Msg kind="info">{msg}</Msg>}
@@ -644,15 +716,21 @@ function TotpCard({ client, policy, account }: Pick<Props, "client" | "policy" |
       <Announcer text={msg} />
 
       {!status ? (
-        <p className="muted"><Busy>Loading…</Busy></p>
+        offline ? null : <p className="muted"><Busy>Loading…</Busy></p>
       ) : status.enrolled ? (
         <>
           <div className="msg info">On ✓ — every sign-in asks for your authenticator code.</div>
           <div className="field">
+            <label>{TOTP_OFF_PASSWORD_LABEL}</label>
+            <div className="secret-row">
+              <input type="password" autoComplete="current-password" aria-label={TOTP_OFF_PASSWORD_LABEL} value={password} onChange={(e) => setPassword(e.target.value)} />
+            </div>
+          </div>
+          <div className="field">
             <label>One-time code (required to turn off)</label>
             <div className="secret-row">
-              <input className="mono" inputMode="numeric" aria-label="One-time code (required to turn off)" placeholder="123 456" value={code} onChange={(e) => setCode(e.target.value)} />
-              <button type="button" className="ghost" style={{ color: "var(--danger)" }} disabled={busy || !code.trim()} onClick={disable}>
+              <input className="mono" inputMode="numeric" aria-label="One-time code (required to turn off)" placeholder="123 456" value={code} onChange={(e) => setCode(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && password && code.trim() && !busy) disable(); }} />
+              <button type="button" className="ghost" style={{ color: "var(--danger)" }} disabled={busy || !code.trim() || !password} onClick={disable}>
                 {busy ? <Busy>Working…</Busy> : "Turn off"}
               </button>
             </div>
@@ -666,7 +744,7 @@ function TotpCard({ client, policy, account }: Pick<Props, "client" | "policy" |
           </p>
           {otpModules && (
             <div className="field">
-              <QrSvg modules={otpModules} ariaLabel="Two-factor enrollment QR code" />
+              <QrSvg modules={otpModules} ariaLabel={TWO_STEP_QR_LABEL} />
               <p className="muted" style={{ marginTop: 6 }}>
                 Scan with an authenticator app (Aegis, Google Authenticator…) — or copy the setup link or code below.
               </p>
@@ -691,8 +769,7 @@ function TotpCard({ client, policy, account }: Pick<Props, "client" | "policy" |
           {/* F25: say it, because a cleared clipboard the user wasn't told about reads as a bug —
               and because the value stays on screen, so the clear costs them nothing. */}
           <p className="muted" style={{ marginTop: 0 }}>
-            Both of these are your second factor — copying one clears it from your clipboard again after {clipClear} seconds.
-            The values stay on this screen until you finish.
+            {fill(TWO_STEP_SECRET_CLEARS, String(clipClear))} The values stay on this screen until you finish.
           </p>
           <div className="field">
             <label>Code from your app</label>
@@ -711,7 +788,7 @@ function TotpCard({ client, policy, account }: Pick<Props, "client" | "policy" |
               <input type="password" autoComplete="current-password" aria-label="Master password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && password && !busy) begin(); }} />
             </div>
           </div>
-          <button type="button" className="ghost" disabled={busy || !password} onClick={begin}>{busy ? <Busy>Working…</Busy> : "Turn on two-factor sign-in"}</button>
+          <button type="button" className="ghost" disabled={busy || !password} onClick={begin}>{busy ? <Busy>Working…</Busy> : TWO_STEP_TURN_ON}</button>
         </>
       )}
     </div>
@@ -720,7 +797,7 @@ function TotpCard({ client, policy, account }: Pick<Props, "client" | "policy" |
 
 // ---- master password change (spec 01 §6 — UVK never rotates) ----
 
-function PasswordCard({ client, account, policy, onPasswordChanged }: Pick<Props, "client" | "account" | "policy" | "onPasswordChanged">) {
+function PasswordCard({ account, policy, onPasswordChanged, settings }: Pick<Props, "account" | "policy" | "onPasswordChanged"> & { settings: SettingsSession }) {
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -737,26 +814,34 @@ function PasswordCard({ client, account, policy, onPasswordChanged }: Pick<Props
     setBusy(true);
     setErr("");
     setMsg("");
+    // The password rule, the proof on this device against the wrap the session keeps (spec 01 §7: a wrong password
+    // sends nothing), then the change at the account's present cost, raised to the policy's only when an upgrade is due.
     try {
-      const keys = await client.accountKeys();
-      // A9 (M-1): the current-password proof is the one fenced in-session derivation (the KDF fence, and only the
-      // salt this session unlocked with); a stale session says how to recover instead of deriving anything.
-      const currentAuthKey = await account.reauthAuthKey(current, keys);
-      const change = await account.buildPasswordChange(next, policy?.kdfParams ?? keys.kdfParams);
-      await client.changePassword({ currentAuthKey, ...change });
-      // §D.2c/§E.4 (S3-2): the durable offline cache still holds the OLD kdfSalt/kdfParams/wrappedUvk,
-      // so an offline unlock would reject the NEW password while the OLD (possibly compromised) one
-      // still opens the cached vault until the next online unlock (the spec 05 T3 window). Refresh it
-      // with the post-change accountKeys. Best-effort + gated (never creates a cache where caching is
-      // off) — see session.refreshCachedAccountKeys; a cache failure never fails the committed change.
-      await refreshCachedAccountKeys(client, account.userId);
+      const r = await changePassword(settings, current, next, policy?.kdfParams ?? null);
+      if (r.kind === "done") {
+        // The change's own keys, never a fetch: the session keeps them for later proofs, and the offline copy took them
+        // (changePassword did both) so the old password stops opening it (spec 05 T3). A copy that did not take them is
+        // said; the next online unlock repairs it.
+        setCurrent("");
+        setNext("");
+        setConfirm("");
+        setMsg(passwordChangedText(r.value));
+        onPasswordChanged();
+      } else {
+        setErr(passwordChangeText(r));
+        setCurrent(""); // as after any failure (and never kept for an automatic retry: nothing is retried by itself)
+        // An outcome nobody knows may have made the new password the account's: it is not left typed in the form, ready
+        // to be sent again (a walk saw both new-password fields still filled under "We couldn't tell…").
+        if (r.kind === "unknown") {
+          setNext("");
+          setConfirm("");
+        }
+      }
+    } catch (e) {
+      setErr(passwordChangeText({ kind: "unknown", error: e }));
       setCurrent("");
       setNext("");
       setConfirm("");
-      setMsg("Master password changed — sessions on other devices were signed out.");
-      onPasswordChanged();
-    } catch (e) {
-      setErr(e instanceof KdfPolicyError ? WEAK_KDF_MESSAGE : e instanceof ReauthStaleSessionError ? e.message : e instanceof ApiError && e.status === 401 ? "Current master password is wrong." : "Password change failed."); // H1 (spec 05 T1); A9
     } finally {
       setBusy(false);
     }

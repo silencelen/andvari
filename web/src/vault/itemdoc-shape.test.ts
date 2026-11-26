@@ -9,11 +9,11 @@ import { seal } from "../crypto/envelope";
 import { fingerprint } from "../crypto/escrow";
 import type { KdfParams } from "../crypto/keys";
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
-import { sealSharedGrant } from "../crypto/sharedgrant";
 import { initSodium } from "../crypto/sodium";
 import { Account } from "./account";
+import { FakeSharedLogs } from "./fakesharedlogs.testkit";
 import { itemDocProblem, vaultMetaName } from "./itemdoc-shape";
-import { VaultStore } from "./store";
+import { type ItemWire, VaultStore } from "./store";
 
 /**
  * Security review 2026-10 (root cause D): a document that opens under a vault key was still
@@ -51,11 +51,16 @@ class FakeApi {
     this.rev = Math.max(this.rev, resp.rev);
     return resp;
   }
-  async push(mutations: Mutation[]): Promise<PushResponse> {
+  async pushMutations(mutations: Mutation[]): Promise<PushResponse> {
     return { rev: ++this.rev, results: mutations.map((m) => ({ mutationId: m.mutationId, status: "applied" as const, newItemRev: 1 })) };
   }
   asClient(): ApiClient {
     return this as unknown as ApiClient;
+  }
+
+  /** The item routes the store calls (its ItemWire): this fake serves them too. */
+  asWire(): ItemWire {
+    return this as unknown as ItemWire;
   }
 }
 
@@ -87,7 +92,7 @@ describe("a hostile co-member's malformed item is quarantined, not rendered", ()
     // A shared vault whose VK the attacker also holds — they can seal any plaintext under it.
     const vaultId = member.newItemId();
     const vk = randomBytes(32);
-    const grant: WireGrant = { vaultId, userId: member.userId, role: "writer", wrappedVk: "", rev: 2, sealedVk: toB64(sealSharedGrant(member.identityPub, vaultId, vk)) };
+    const grant: WireGrant = { vaultId, userId: member.userId, role: "writer", wrappedVk: "", rev: 2 }; // a hint only: the log decides
     const metaBlob = toB64(seal(vk, utf8(JSON.stringify({ name: { evil: true }, metaV: 1 })), adVaultMeta(vaultId)));
     const vault: WireVault = { vaultId, type: "shared", rev: 2, metaBlob, createdAt: 0 };
     const sealRaw = (itemId: string, plaintext: string) => toB64(seal(vk, utf8(plaintext), adItem(vaultId, itemId, 1)));
@@ -106,7 +111,8 @@ describe("a hostile co-member's malformed item is quarantined, not rendered", ()
     ];
 
     const api = new FakeApi();
-    const store = new VaultStore(api.asClient(), member);
+    const store = new VaultStore(api.asClient(), member, undefined, undefined, api.asWire());
+    new FakeSharedLogs(member).attachTo(store).share(vaultId, vk, "writer"); // the verified log lists the member
     api.queue.push({ rev: 8, full: true, vaults: [vault], grants: [grant], items, removedGrants: [] });
     await store.sync();
 

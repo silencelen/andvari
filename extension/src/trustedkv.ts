@@ -122,9 +122,10 @@ async function runTx<T>(
   mode: IDBTransactionMode,
   body: (store: IDBObjectStore) => () => T,
   timeoutMs: number,
+  storeName: string = TRUSTED_STORE_NAME,
 ): Promise<T> {
   const started = Date.now();
-  const db = await openBoundedIdb(resolve, name, TRUSTED_STORE_NAME, timeoutMs);
+  const db = await openBoundedIdb(resolve, name, storeName, timeoutMs);
   return new Promise<T>((res, rej) => {
     let collect: () => T;
     let tx: IDBTransaction | undefined;
@@ -149,8 +150,8 @@ async function runTx<T>(
       Math.max(0, timeoutMs - (Date.now() - started)),
     );
     try {
-      tx = db.transaction(TRUSTED_STORE_NAME, mode);
-      collect = body(tx.objectStore(TRUSTED_STORE_NAME));
+      tx = db.transaction(storeName, mode);
+      collect = body(tx.objectStore(storeName));
     } catch (e) {
       finish(() => {
         try {
@@ -180,8 +181,9 @@ const keyList = (keys: string | readonly string[]): string[] => (typeof keys ===
 /** A [KvArea] over one IndexedDB object store. [resolve] is called on every operation, so a store that failed to
  *  open is simply tried again next time (no sticky failure, no cached connection to go stale). Each operation is bounded
  *  by [opts.timeoutMs] (default [TRUSTED_OP_TIMEOUT_MS]). */
-export function idbKv(resolve: () => IdbFactoryLike | null | undefined, name: string = TRUSTED_DB_NAME, opts: { timeoutMs?: number } = {}): KvArea {
+export function idbKv(resolve: () => IdbFactoryLike | null | undefined, name: string = TRUSTED_DB_NAME, opts: { timeoutMs?: number; storeName?: string } = {}): KvArea & OnceArea {
   const timeoutMs = opts.timeoutMs ?? TRUSTED_OP_TIMEOUT_MS;
+  const storeName = opts.storeName ?? TRUSTED_STORE_NAME;
   return {
     get(keys) {
       return runTx(resolve, name, "readonly", (store) => {
@@ -204,29 +206,46 @@ export function idbKv(resolve: () => IdbFactoryLike | null | undefined, name: st
           for (const [k, r] of reqs) if (r.result !== undefined) out[k] = r.result;
           return out;
         };
-      }, timeoutMs);
+      }, timeoutMs, storeName);
     },
     set(items) {
       return runTx(resolve, name, "readwrite", (store) => {
         for (const [k, v] of Object.entries(items)) store.put(v, k);
         return () => undefined;
-      }, timeoutMs);
+      }, timeoutMs, storeName);
     },
     remove(keys) {
       return runTx(resolve, name, "readwrite", (store) => {
         for (const k of keyList(keys)) store.delete(k);
         return () => undefined;
-      }, timeoutMs);
+      }, timeoutMs, storeName);
+    },
+    setWhereAbsent(items) {
+      return runTx(resolve, name, "readwrite", (store) => {
+        for (const [k, v] of Object.entries(items)) {
+          // Where the KEY is absent: a key that holds anything (null, or a value that is not a record) is kept as it is.
+          const r = store.getAllKeys(k);
+          r.onsuccess = () => {
+            if (!(r.result as IDBValidKey[]).includes(k)) store.put(v, k);
+          };
+        }
+        return () => undefined;
+      }, timeoutMs, storeName);
     },
   };
 }
 
+/** A write that never replaces a value: in one transaction, each key is written only where the store has no such key. */
+export interface OnceArea {
+  setWhereAbsent(items: Record<string, unknown>): Promise<void>;
+}
+
 const globalIdb = (): IdbFactoryLike | null | undefined => (globalThis as { indexedDB?: IdbFactoryLike }).indexedDB;
 
-let shared: KvArea | null = null;
+let shared: (KvArea & OnceArea) | null = null;
 /** The extension's trusted store (the service worker's; pages ask the worker). Resolves `globalThis.indexedDB` on
  *  every call — never chrome.storage. */
-export function trustedStore(): KvArea {
+export function trustedStore(): KvArea & OnceArea {
   shared ??= idbKv(globalIdb);
   return shared;
 }

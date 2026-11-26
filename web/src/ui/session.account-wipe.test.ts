@@ -1,6 +1,7 @@
 import "fake-indexeddb/auto";
 import { IDBFactory as FakeIDBFactory } from "fake-indexeddb";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { DEVICE_KEY, DeviceIdentity } from "../api/devicesecret";
 import type { AccountKeys } from "../api/types";
 import { initSodium } from "../crypto/sodium";
 import { openVaultCache, vaultDbName } from "../vault/idbcache";
@@ -62,6 +63,17 @@ function seedAccountKeys(userId: string): string[] {
     `andvari.autoLockSeconds.${userId}`,
     `andvari.lastExportAt.${userId}`,
     `andvari.selfIdentityPub.${userId}`,
+    // The post-cut-over stores: the vault logs, the account-state document, the recovery mirror and contact currency.
+    // The vault id equals GONE's userId on purpose: when OTHER's keys are seeded, wiping GONE must not take OTHER's
+    // log state for a vault whose id a server chose (the old match took any segment).
+    `andvari.log2.${userId}.11111111-1111-4111-8111-111111111111.state`,
+    `andvari.log2.${userId}.11111111-1111-4111-8111-111111111111.hashes`,
+    `andvari.log2.${userId}.pending`,
+    `andvari.as2.${userId}.doc`,
+    `andvari.recmirror.${userId}`,
+    `andvari.current.${userId}`,
+    `andvari.onetap.${userId}`,
+    `andvari.how.${userId}`,
   ];
   for (const k of keys) localStorage.setItem(k, k === `andvari.selfIdentityPub.${userId}` ? PUB : "1");
   return keys;
@@ -87,7 +99,7 @@ afterEach(() => {
 describe("wipeLocalAccountState — what a confirmed deletion leaves in this browser: nothing of the account", () => {
   it("removes the session, the tab's pair, every userId-scoped key, the self-identity records and the offline copy", async () => {
     const accountKeys = seedAccountKeys(GONE);
-    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({ baseUrl: "", userId: GONE, personalVaultId: "pv", email: "Gone@X.com", isAdmin: false, tokens: null }));
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({ baseUrl: "", userId: GONE, personalVaultId: "pv", email: "Gone@X.com", tokens: null }));
     sessionStorage.setItem(TAB_TOKENS_KEY, JSON.stringify({ tabId: "t", userId: GONE, tokens: { accessToken: "a", refreshToken: "r" } }));
     localStorage.setItem("andvari.selfIdentityByEmail.gone@x.com", `${GONE}\n${PUB}`);
     await seedCache(GONE);
@@ -100,6 +112,22 @@ describe("wipeLocalAccountState — what a confirmed deletion leaves in this bro
     for (const k of accountKeys) expect(localStorage.getItem(k), k).toBeNull();
     expect(localStorage.getItem("andvari.selfIdentityByEmail.gone@x.com"), "the email binding naming the account goes").toBeNull();
     expect(await dbExists(GONE)).toBe(false);
+  });
+
+  it("the browser's device record forgets the account (its deviceId and its address hash) and keeps the secret and others", async () => {
+    const id = new DeviceIdentity();
+    const secret = id.secret();
+    const DEV1 = "33333333-3333-4333-8333-333333333333";
+    const DEV2 = "44444444-4444-4444-8444-444444444444";
+    id.remember("gone@x.com", GONE, DEV1);
+    id.remember("other@x.com", OTHER, DEV2);
+    await wipeLocalAccountState(GONE, "gone@x.com");
+    const raw = localStorage.getItem(DEVICE_KEY)!;
+    expect(raw).not.toContain(GONE);
+    expect(raw).not.toContain(DEV1);
+    expect(id.deviceIdFor("gone@x.com")).toBeNull();
+    expect(id.deviceIdFor("other@x.com")).toBe(DEV2);
+    expect(id.secret()).toBe(secret);
   });
 
   it("keeps device-wide settings and another account's state on a shared browser", async () => {

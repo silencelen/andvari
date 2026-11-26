@@ -4,7 +4,7 @@ name: iOS core
 
 on:
   push:
-    branches: [ios, ios-ui, ios-swiftui]
+    branches: [ios, ios-ui, ios-swiftui, public-next]
     paths:
       - "app-ios/**"
       - "extension/**"
@@ -102,9 +102,11 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # Not on public-next yet, for a push to it or a pull request into it: the app is rebuilt in pieces and builds there once they have landed.
   app:
     name: app builds for the iOS simulator
     runs-on: macos-26
+    if: github.ref != 'refs/heads/public-next' && github.base_ref != 'public-next'
     timeout-minutes: 60
     steps:
       - name: Checkout

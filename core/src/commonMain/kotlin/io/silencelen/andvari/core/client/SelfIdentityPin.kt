@@ -72,11 +72,27 @@ object SelfIdentityPin {
     /**
      * The pin logic over ONE origin's string key-value namespace (Android prefs; the desktop keeps files with the
      * same semantics). Keys: `selfIdentityPub.<userId>` (the pre-A11 pin, unchanged) and
-     * `selfIdentityByEmail.<normalised email>` (the [Binding]). Both are written once and never overwritten. Nothing here
-     * removes one: they go only with their whole origin, when the device that ran an account's deletion forgets that
-     * account's server (spec 03 §13; [io.silencelen.andvari.core.client.session.SessionPersistence.forgetServer]).
+     * `selfIdentityByEmail.<normalised email>` (the [Binding]). Both are written once and never overwritten.
      */
-    class KeyValueStore(private val get: (String) -> String?, private val put: (String, String) -> Unit) {
+    class KeyValueStore(
+        private val get: (String) -> String?,
+        private val put: (String, String) -> Unit,
+        /** Removes a record; null where the store cannot (then [forget] answers false and removes nothing). */
+        private val remove: ((String) -> Unit)? = null,
+    ) {
+        /**
+         * An account deletion the server confirmed (spec 03 §13): [userId]'s identity record goes, and the address's
+         * binding where it names [userId] (another account's binding of the same address stays). Without them the same
+         * address could not register again on this device: the next unlock would hold the new account to the deleted
+         * one's key. False when this store cannot remove anything.
+         */
+        fun forget(userId: String, email: String): Boolean {
+            val drop = remove ?: return false
+            drop(legacyKey(userId))
+            if (email.isNotBlank() && decodeBinding(get(bindingKey(email)))?.userId == userId) drop(bindingKey(email))
+            return true
+        }
+
         private fun legacyKey(userId: String) = "selfIdentityPub.$userId"
         private fun bindingKey(email: String) = "selfIdentityByEmail.${normalizeEmail(email)}"
 

@@ -44,6 +44,36 @@ object Ad {
      *  so one member's ledger can never be served into another's slot on a shared endpoint. */
     fun usage(userId: String): ByteArray = join("usage", userId)
 
+    // ---- andvari/v2 (design 2026-11-15 §2.3) ----------------------------------------------------------
+
+    private const val NS2 = "andvari/v2"
+
+    private fun join2(vararg parts: String): ByteArray {
+        for (p in parts) require('|' !in p) { "AD component must not contain '|'" }
+        return (NS2 + "|" + parts.joinToString("|")).encodeToByteArray()
+    }
+
+    /**
+     * Design 2026-11-15 §2.3, §3.6 (d) (T-B3): the UVK wrap of a SHARED vault's key, for the owner wrap and
+     * the member self-wrap alike: `andvari/v2|vk-shared|{vaultId}|{userId}|{genesisHash}`.
+     *
+     * [genesisHash] is `H(genesis frame)` of the vault's log, 64 lowercase hex
+     * ([io.silencelen.andvari.core.trust.VaultState.genesisHash]). A wrap therefore opens only for the log
+     * whose genesis the wrapping device verified: a server that serves a fabricated log with the copied
+     * commitment cannot make an existing wrap open. The personal wrap keeps [vkPersonal] (`andvari/v1`).
+     * Replaces [vk] for shared vaults at the cut-over.
+     */
+    fun vkShared(vaultId: String, userId: String, genesisHash: String): ByteArray = join2("vk-shared", vaultId, userId, genesisHash)
+
+    /** Design §2.3, §6.3, §6.4: the offer envelope of a link, `andvari/v2|link-offer|{linkId}`. */
+    fun linkOffer(linkId: String): ByteArray = join2("link-offer", linkId)
+
+    /** Design §2.3, §6.5: the answer envelope of a link, `andvari/v2|link-answer|{linkId}`. */
+    fun linkAnswer(linkId: String): ByteArray = join2("link-answer", linkId)
+
+    /** Design §2.3, §8.2 step 6: the device-link bundle envelope, `andvari/v2|device-link-bundle|{linkId}`. */
+    fun deviceLinkBundle(linkId: String): ByteArray = join2("device-link-bundle", linkId)
+
     /** spec 07 §2.4 — backup items envelope. Binds the plaintext header's `v` and the
      *  per-file `fileId`, so a future v2 file can never be downgrade-opened under v1 rules
      *  and a section 0 can never be transplanted between backup files. */

@@ -92,7 +92,8 @@ describe("SignedStatement hardening (A3 review, landed in A4)", () => {
     void asStatement;
     void asVerified;
     expect(parsed instanceof VerifiedStatement).toBe(false);
-    expect(Object.keys(parsed).sort()).toEqual(["purpose", "recoveryFp", "userId"]);
+    // Routing fields only, no key material: the address the copy claims (spec 04 §3; null for the old form) is one of them.
+    expect(Object.keys(parsed).sort()).toEqual(["email", "purpose", "recoveryFp", "userId"]);
     // A VerifiedStatement cannot be minted outside the module.
     // @ts-expect-error — the constructor needs the module-private token
     expect(() => new VerifiedStatement(Symbol("verified-statement"), escrow(m.identityPub), m.signer.publicKey)).toThrow();

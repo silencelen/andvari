@@ -42,31 +42,195 @@ class ClipboardGuardTest {
         assertEquals("Couldn't copy to the clipboard — try again.", CLIPBOARD_COPY_FAILED)
     }
 
-    // ---- ux-parity--5: only the NEWEST copy owns the scheduled clear ----
+    // ---- the clear is by ownership, with retries, on two clocks ----
 
-    /**
-     * The bug the generation counter fixes: copy the same password at t=0 and again at t=25 s with
-     * a 30 s window and the FIRST timer's `current == value` guard still passed at t=30 s — the
-     * clipboard emptied 5 s into a window the CopyRow had just promised was 30 s. The equal-value
-     * guard alone only ever covered the different-value case.
-     */
-    @Test
-    fun aSupersededTimerDoesNotClearTheNewerCopysWindow() {
-        assertFalse(
-            shouldClearClipboard(scheduledGeneration = 1, currentGeneration = 2, clipboardNow = "hunter2", copiedValue = "hunter2"),
-            "a re-copy of the SAME secret must retire the older timer, not truncate the new window",
-        )
-        assertTrue(
-            shouldClearClipboard(scheduledGeneration = 2, currentGeneration = 2, clipboardNow = "hunter2", copiedValue = "hunter2"),
-            "the newest copy still owns its own clear",
-        )
+    /** A clipboard as AWT runs one: the owner of what it replaces is told. [failClears] clears throw first. */
+    private class FakeBoard(var failClears: Int = 0, var failPuts: Int = 0) : ClipboardPort {
+        var owner: SensitiveTextSelection? = null
+        var text: String? = null
+        var clears = 0
+
+        override fun put(selection: SensitiveTextSelection) {
+            if (failPuts > 0) { failPuts--; throw IllegalStateException("cannot open system clipboard") }
+            owner?.lostOwnership(null, null)
+            owner = selection
+            text = selection.getTransferData(java.awt.datatransfer.DataFlavor.stringFlavor) as String
+        }
+
+        override fun clear() {
+            if (failClears > 0) { failClears--; throw IllegalStateException("cannot open system clipboard") }
+            owner?.lostOwnership(null, null)
+            owner = null
+            text = ""
+            clears++
+        }
+
+        /** Another program copies something. */
+        fun otherProgramCopies(t: String) {
+            owner?.lostOwnership(null, null)
+            owner = null
+            text = t
+        }
+
+        /** A clipboard manager (xfce4-clipman, parcellite, CopyQ) takes the clipboard over with the same text. */
+        fun managerTakesItOver() {
+            owner?.lostOwnership(null, null)
+            owner = null
+        }
+
+        var failReads = 0
+
+        override fun text(): String? {
+            if (failReads > 0) { failReads--; throw IllegalStateException("cannot open system clipboard") }
+            return text
+        }
     }
 
-    /** The pre-existing ownership guard is unchanged: never stomp something the user copied from
-     *  another app since, and never clear on an unreadable clipboard. */
+    // ---- a clipboard manager that takes the clipboard over ----
+
+    /** The path that showed it: the manager re-owns the copied password; the clear still happens at its time. */
     @Test
-    fun theClipboardIsOnlyClearedWhileItStillHoldsOurSecret() {
-        assertFalse(shouldClearClipboard(1, 1, clipboardNow = "a url the user copied after pasting", copiedValue = "hunter2"))
-        assertFalse(shouldClearClipboard(1, 1, clipboardNow = null, copiedValue = "hunter2"), "null = can't verify ownership, NEVER 'still ours'")
+    fun aSecretAClipboardManagerTookOverIsStillClearedAtItsTime() {
+        val board = FakeBoard()
+        val c = clipboard(board)
+        assertTrue(c.copy("the-copied-password", 30))
+        board.managerTakesItOver()
+        pass(c, 5_000)
+        assertTrue(c.holding, "still the secret: the clear stays due")
+        assertEquals("the-copied-password", board.text, "not cleared before its time")
+        pass(c, 26_000)
+        assertEquals("", board.text)
+        assertEquals(1, board.clears)
+        assertFalse(c.holding)
+    }
+
+    @Test
+    fun aSecretAClipboardManagerTookOverIsClearedAtALockAndAtExit() {
+        val board = FakeBoard()
+        val c = clipboard(board)
+        assertTrue(c.copy("the-copied-password", 30))
+        board.managerTakesItOver()
+        c.clearNow()
+        assertEquals("", board.text, "the lock's clear")
+        assertFalse(c.holding)
+    }
+
+    @Test
+    fun aCopyThePersonMadeAfterTheTakeOverIsNeverCleared() {
+        val board = FakeBoard()
+        val c = clipboard(board)
+        assertTrue(c.copy("the-copied-password", 30))
+        board.managerTakesItOver()
+        pass(c, 2_000)
+        assertTrue(c.holding)
+        board.text = "a url the person copied after pasting"
+        pass(c, 30_000)
+        c.clearNow()
+        assertEquals("a url the person copied after pasting", board.text)
+        assertEquals(0, board.clears)
+        assertFalse(c.holding)
+    }
+
+    @Test
+    fun aLookThatFailsIsTriedAgainAndNeverForgetsTheSecret() {
+        val board = FakeBoard()
+        val c = clipboard(board)
+        assertTrue(c.copy("the-copied-password", 30))
+        board.managerTakesItOver()
+        board.failReads = 3
+        pass(c, 3_000)
+        assertTrue(c.holding, "not forgotten for a read that failed")
+        pass(c, 28_000)
+        assertEquals("", board.text)
+    }
+
+    private var mono = 0L
+    private var wall = 1_700_000_000_000L
+
+    private fun clipboard(board: FakeBoard) = SecretClipboard({ board }, { mono }, { wall })
+
+    private fun pass(c: SecretClipboard, ms: Long) {
+        var left = ms
+        while (left > 0) {
+            val step = minOf(1000L, left)
+            mono += step; wall += step; left -= step
+            c.tick()
+        }
+    }
+
+    @Test
+    fun aNewerCopyOwnsTheOnlyClear() {
+        val board = FakeBoard()
+        val c = clipboard(board)
+        assertTrue(c.copy("hunter2", 30))
+        pass(c, 25_000)
+        assertTrue(c.copy("hunter2", 30))
+        pass(c, 5_000)
+        assertEquals("hunter2", board.text, "the older copy's clear does not cut the newer one's window short")
+        pass(c, 25_000)
+        assertEquals("", board.text)
+        assertFalse(c.holding)
+    }
+
+    @Test
+    fun aClearThatFailsIsTriedAgainAndTheSecretIsForgottenOnlyOnceItWorked() {
+        val board = FakeBoard(failClears = 2)
+        val c = clipboard(board)
+        assertTrue(c.copy("hunter2", 30))
+        pass(c, 30_000)
+        assertTrue(c.holding, "the first clear failed: still due")
+        assertEquals("hunter2", board.text)
+        pass(c, 1000)
+        assertTrue(c.holding, "and the second")
+        pass(c, 1000)
+        assertFalse(c.holding)
+        assertEquals("", board.text)
+    }
+
+    @Test
+    fun aLockClearsNowAndAFailedLockClearIsTriedAgainAtTheNextTick() {
+        val board = FakeBoard(failClears = 1)
+        val c = clipboard(board)
+        assertTrue(c.copy("hunter2", 30))
+        c.clearNow()
+        assertTrue(c.holding, "the lock's clear failed")
+        pass(c, 1000)
+        assertFalse(c.holding, "the next tick cleared it, long before the window's end")
+        assertEquals("", board.text)
+    }
+
+    @Test
+    fun somethingElseOnTheClipboardIsNeverTouched() {
+        val board = FakeBoard()
+        val c = clipboard(board)
+        assertTrue(c.copy("hunter2", 30))
+        board.otherProgramCopies("a url the person copied after pasting")
+        pass(c, 31_000)
+        c.clearNow()
+        assertEquals("a url the person copied after pasting", board.text)
+        assertEquals(0, board.clears)
+        assertFalse(c.holding, "seen to hold something else: forgotten")
+    }
+
+    @Test
+    fun timeAsleepCountsTowardTheClear() {
+        val board = FakeBoard()
+        val c = clipboard(board)
+        assertTrue(c.copy("hunter2", 30))
+        wall += 60L * 60 * 1000
+        mono += 1
+        c.tick()
+        assertEquals("", board.text)
+    }
+
+    @Test
+    fun aCopyThatFailedLeavesTheOlderClearDue() {
+        val board = FakeBoard()
+        val c = clipboard(board)
+        assertTrue(c.copy("first", 30))
+        board.failPuts = 1
+        assertFalse(c.copy("second", 30))
+        pass(c, 30_000)
+        assertEquals("", board.text)
     }
 }

@@ -23,7 +23,6 @@ import io.silencelen.andvari.core.client.session.FakeNamespaces
 import io.silencelen.andvari.core.client.session.FakeQuickKeys
 import io.silencelen.andvari.core.client.session.FakeSessionPersistence
 import io.silencelen.andvari.core.client.session.HttpClients
-import io.silencelen.andvari.core.client.session.QuickEnroll
 import io.silencelen.andvari.core.client.session.QuickGate
 import io.silencelen.andvari.core.client.session.QuickRecover
 import io.silencelen.andvari.core.client.session.SessionPersistence
@@ -116,7 +115,7 @@ open class SessionControllerTest {
     private val headers = headersOf(HttpHeaders.ContentType, "application/json")
 
     /** Everything one test drives, built on the test's event loop. */
-    private inner class Rig(private val ui: CoroutineContext, origin: String?) {
+    private inner class Rig(ui: CoroutineContext, origin: String?) {
         val clocks = FakeClocks(wall = 100 * DAY, mono = 5 * DAY, boot = "7")
         val store = newStore(origin)
         val namespaces = FakeNamespaces()
@@ -159,12 +158,6 @@ open class SessionControllerTest {
         val pendingLog = InMemoryFillSnapshots()
         val pendingFiles = InMemoryBlobs()
         val controller = SessionController(
-            store, namespaces, http, quickKeys, clocks, setOf("127.0.0.1"), ui, { BiometricHost.None }, 0, { shared += it }, snapshots, queue, appliedLog, moveMemoLog,
-            pendingLog, pendingFiles,
-        )
-
-        /** A new process of the app over what this one left on the device: another controller on the same stores. */
-        fun newProcess() = SessionController(
             store, namespaces, http, quickKeys, clocks, setOf("127.0.0.1"), ui, { BiometricHost.None }, 0, { shared += it }, snapshots, queue, appliedLog, moveMemoLog,
             pendingLog, pendingFiles,
         )
@@ -1564,15 +1557,17 @@ open class SessionControllerTest {
     // ---- two-step sign-in ----
 
     @Test
-    fun twoStepSignInIsReadAndTurnedOffWithACodeAndNothingOutlivesTheScreen() = test {
+    fun twoStepSignInIsReadAndTurnedOffWithACodeAndThePasswordAndNothingOutlivesTheScreen() = test {
         unlocked()
+        // The account's keys at the KDF floor, so a password proof can be derived for the disable.
+        twoStepServer()
         var enrolled = true
-        var disabledWith: String? = null
+        var disabledWith: io.silencelen.andvari.core.model.wire.TotpDisableRequest? = null
         routes["/account/totp"] = {
             respond(json.encodeToString(io.silencelen.andvari.core.model.TotpStatus.serializer(), io.silencelen.andvari.core.model.TotpStatus(enrolled, false)), HttpStatusCode.OK, headers)
         }
         routes["/account/totp/disable"] = { request ->
-            disabledWith = json.decodeFromString(io.silencelen.andvari.core.model.TotpCodeRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString()).code
+            disabledWith = json.decodeFromString(io.silencelen.andvari.core.model.wire.TotpDisableRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
             enrolled = false
             respond(json.encodeToString(io.silencelen.andvari.core.model.TotpStatus.serializer(), io.silencelen.andvari.core.model.TotpStatus(false, false)), HttpStatusCode.OK, headers)
         }
@@ -1580,8 +1575,13 @@ open class SessionControllerTest {
         assertEquals(ActionResult.Ok, controller.loadTwoStep())
         assertEquals(TwoStepView(enrolled = true, settingUp = false), controller.state.twoStep)
         assertEquals(ActionResult.NotDone(null), controller.confirmTwoStep("123456"), "nothing is being set up")
-        assertEquals(ActionResult.Ok, controller.disableTwoStep(" 123456 "))
-        assertEquals("123456", disabledWith)
+        // The code alone (decided on 2026-11-16): nothing is sent, and the answer says the password is needed.
+        assertEquals(ActionResult.NotDone(ItemCopy.TWO_STEP_PASSWORD_NEEDED), controller.disableTwoStep(" 123456 "))
+        assertNull(disabledWith, "nothing was sent")
+        assertEquals(ActionResult.Ok, controller.disableTwoStep(" 123456 ", PASSWORD))
+        assertEquals("123456", disabledWith?.code)
+        assertTrue(disabledWith?.currentAuthKey.orEmpty().isNotEmpty(), "the password's proof beside the code")
+        assertFalse(disabledWith?.currentAuthKey.orEmpty().contains(PASSWORD), "never the password itself")
         assertEquals(TwoStepView(enrolled = false, settingUp = false), controller.state.twoStep)
         assertEquals(ItemCopy.TWO_STEP_OFF, controller.state.notice)
         controller.closeTwoStep()
@@ -1739,10 +1739,11 @@ open class SessionControllerTest {
     @Test
     fun aRefusedCodeOrAWeakServerSaysWhyAndChangesNothing() = test {
         unlocked()
+        twoStepServer()
         routes["/account/totp"] = { respond("""{"enrolled":true,"pendingSetup":false}""", HttpStatusCode.OK, headers) }
         routes["/account/totp/disable"] = { respond("""{"error":"bad_totp_code","message":"no"}""", HttpStatusCode.BadRequest, headers) }
         assertEquals(ActionResult.Ok, controller.loadTwoStep())
-        assertIs<ActionResult.Failed>(controller.disableTwoStep("000000"))
+        assertIs<ActionResult.Failed>(controller.disableTwoStep("000000", PASSWORD))
         assertEquals(TwoStepView(enrolled = true, settingUp = false), controller.state.twoStep, "still on")
         // Setting up needs the master password proven under the account's own key settings: this fixture's are below the
         // floor any server may send, so the proof is refused before anything is sent, and nothing is set up.
@@ -2464,155 +2465,144 @@ open class SessionControllerTest {
         assertEquals(EMAIL, open.email)
         val preview = assertNotNull(open.preview)
         assertTrue(preview.totpRequired)
-        assertEquals(listOf(DeletionCopy.IPHONE.blocker("shared_vault", null, 2), DeletionCopy.IPHONE.blocker("future_kind", null, 0)), preview.blockers, "an unknown kind is listed, never dropped")
+        assertEquals(listOf(DeletionCopy.blocker("shared_vault", null, 2), DeletionCopy.blocker("future_kind", null, 0)), preview.blockers, "an unknown kind is listed, never dropped")
         assertTrue(preview.deleted.any { it.startsWith("Your Personal vault") })
-        assertEquals(DeletionCopy.IPHONE.leaves(listOf(null)), preview.left)
+        assertEquals(DeletionCopy.leaves(listOf(null)), preview.left)
 
         // Checked here first, and nothing sent: the address, the code the account needs, the master password.
-        assertEquals(ActionResult.Failed(DeletionCopy.IPHONE.EMAIL_MISMATCH), controller.deleteAccount("someone@example.com", PASSWORD, "123456"))
-        assertEquals(ActionResult.Failed(DeletionCopy.IPHONE.CODE_REQUIRED), controller.deleteAccount(EMAIL, PASSWORD, " "))
+        assertEquals(ActionResult.Failed(DeletionCopy.EMAIL_MISMATCH), controller.deleteAccount("someone@example.com", PASSWORD, "123456"))
+        assertEquals(ActionResult.Failed(DeletionCopy.CODE_REQUIRED), controller.deleteAccount(EMAIL, PASSWORD, " "))
         assertEquals(ActionResult.Failed(HouseholdCopy.REAUTH_FAILED), controller.deleteAccount(EMAIL, "not it", "123456"))
         assertTrue(sent.isEmpty(), "a wrong password never leaves this device")
 
         // Refused for blockers: the server's show, and nothing was deleted.
-        assertEquals(ActionResult.Failed(DeletionCopy.IPHONE.BLOCKED), controller.deleteAccount(" $EMAIL ", PASSWORD, "123 456"))
+        assertEquals(ActionResult.Failed(DeletionCopy.BLOCKED), controller.deleteAccount(" $EMAIL ", PASSWORD, "123 456"))
         assertEquals(EMAIL, sent.single().confirmEmail)
         assertEquals("123456", sent.single().totp)
         assertEquals(AppScreen.VAULT, controller.state.screen)
 
         // No answer that says what happened: never "deleted" or "not deleted"; a check finds the account still here.
         fail502 = true
-        assertEquals(ActionResult.Failed(DeletionCopy.IPHONE.OUTCOME_UNKNOWN), controller.deleteAccount(EMAIL, PASSWORD, "123456"))
+        assertEquals(ActionResult.Failed(DeletionCopy.OUTCOME_UNKNOWN), controller.deleteAccount(EMAIL, PASSWORD, "123456"))
         assertTrue(assertNotNull(controller.state.accountDeletion).outcomeUnknown)
         assertEquals(ActionResult.Ok, controller.checkAccountDeletion())
         assertFalse(assertNotNull(controller.state.accountDeletion).outcomeUnknown)
-        assertEquals(DeletionCopy.IPHONE.NOT_DELETED_AFTER_CHECK, controller.state.notice)
+        assertEquals(DeletionCopy.NOT_DELETED_AFTER_CHECK, controller.state.notice)
         fail502 = false
 
         // The blockers resolved: a wrong code is refused, the right one deletes the account.
         blockers = emptyList()
-        assertEquals(ActionResult.Failed(DeletionCopy.IPHONE.BAD_CODE), controller.deleteAccount(EMAIL, PASSWORD, "000000"))
+        assertEquals(ActionResult.Failed(DeletionCopy.BAD_CODE), controller.deleteAccount(EMAIL, PASSWORD, "000000"))
         val namespace = "$homeKey/${reg.userId}"
         assertTrue(namespaces.devices.containsKey(namespace))
         assertNotNull(queue.key, "the save key the extensions seal to")
-        // The self-identity records this unlock left: the address answered with another account is the spec 01 §5 fault.
-        val newAccountAtTheSameAddress = "00000000-0000-4000-8000-0000000000aa"
-        val pins = store.origin(homeKey).identityPins()
-        pins.record(reg.userId, EMAIL, enrolled.account)
-        assertTrue(runCatching { pins.pinFor(EMAIL, newAccountAtTheSameAddress) }.isFailure)
-        // What else this device keeps: of another account that signed in to the same server here and signed out since
-        // (its device state, a stamp, its self-identity pin), and of another server, left by an earlier switch.
-        val earlier = "00000000-0000-4000-8000-0000000000bb"
-        val otherKey = OriginCanon.originKey("https://other.example")
-        namespaces.deviceState(homeKey, earlier).set("personal.last", "v1")
-        namespaces.deviceState(otherKey, earlier).set("personal.last", "v1")
-        store.origin(homeKey).setPasswordStamp(earlier, io.silencelen.andvari.core.client.session.PasswordStamp(10, 5, 5, "7"))
-        store.origin(otherKey).policyFetchedAt = 5
-        store.lastSyncAt = 7
-        assertNotNull(snapshots.read(), "the snapshot the extensions read")
-        assertEquals(HOME, shared.last(), "the server's address, as the extensions are told it")
-
         assertEquals(ActionResult.Ok, controller.deleteAccount(EMAIL, PASSWORD, "123456"))
         assertEquals(AppScreen.CHOOSE_SERVER, controller.state.screen)
-        assertEquals(DeletionCopy.IPHONE.deleted(EMAIL), controller.state.notice)
+        assertEquals(DeletionCopy.deleted(EMAIL), controller.state.notice)
         assertNull(controller.state.accountDeletion)
-        assertNull(controller.state.server, "no server chosen")
-        assertNull(controller.state.policy)
-        assertNull(controller.state.accountEmail)
-
-        // Nothing of the account (owner decision 2026-11-15: the device is left as a fresh install)...
         assertNull(store.load(), "no session and no tokens")
-        assertNull(snapshots.read(), "the snapshot the extensions read")
+        assertTrue(namespace in namespaces.deleted, "the vault cache")
+        assertFalse(namespaces.devices.containsKey(namespace), "the device state")
+        assertTrue(quickKeys.wiped.isNotEmpty(), "quick unlock")
         assertNull(queue.key, "the save queue and its key")
-        assertTrue(queue.entries().isEmpty())
-        assertNull(appliedLog.read(), "the list of automatic saves")
-        assertNull(pendingLog.read(), "kept saves")
-        assertTrue(pendingFiles.ids().isEmpty(), "and their files")
         assertNull(store.origin(homeKey).loadAccountKeys(reg.userId), "the account's keys")
-        // ...and nothing of its server: its address, and everything kept under its origin, whoever's.
-        assertNull(store.baseUrl, "the server's address")
-        assertNull(shared.last(), "nor the copy of it the extensions read")
-        assertEquals(listOf(homeKey), namespaces.deletedOrigins, "every namespace at that server")
-        assertFalse(namespaces.devices.keys.any { it.startsWith("$homeKey/") }, "every device state there")
-        assertTrue("$homeKey/${reg.userId}" in quickKeys.wiped && "$homeKey/$earlier" in quickKeys.wiped, "every quick-unlock key there: ${quickKeys.wiped}")
-        assertNull(store.origin(homeKey).passwordStamp(earlier), "the stamps")
-        assertNull(store.origin(homeKey).identityPins().pinFor(EMAIL, newAccountAtTheSameAddress), "the self-identity records: the address can register again here")
-        assertEquals(0L, store.origin(homeKey).policyFetchedAt, "the policy mirrors")
-        assertEquals(0L, store.lastSyncAt)
-        // §4.2: another server's namespace is not this deletion's.
-        assertTrue(namespaces.devices.containsKey("$otherKey/$earlier"))
-        assertEquals(5L, store.origin(otherKey).policyFetchedAt)
-        assertFalse(quickKeys.wiped.any { it.startsWith("$otherKey/") })
+    }
 
-        // A new process starts where a first launch does: at the server choice, with nothing to probe.
-        calls.clear()
-        val next = newProcess()
-        try {
-            next.startAndLand()
-            assertEquals(AppScreen.CHOOSE_SERVER, next.state.screen)
-            assertNull(next.state.server)
-            assertNull(next.state.accountEmail)
-            assertTrue(calls.isEmpty(), "no server, no probe")
-        } finally {
-            next.close()
+    /** A server that previews and deletes the account without blockers; [during] runs while the delete request is out. */
+    private fun Rig.deletingServer(during: () -> Unit = {}) {
+        routes["/account/delete/preview"] = {
+            val p = io.silencelen.andvari.core.model.AccountDeletePreview(emptyList(), deletedVaults = listOf(reg.personalVault.vaultId), leftVaults = emptyList(), totpRequired = true)
+            respond(json.encodeToString(io.silencelen.andvari.core.model.AccountDeletePreview.serializer(), p), HttpStatusCode.OK, headers)
+        }
+        routes["/account/delete"] = {
+            during()
+            respond("""{"deletedAt":5000}""", HttpStatusCode.OK, headers)
         }
     }
 
     /**
-     * After a deletion the device is as a fresh install, and a vault made on it afterwards works like any other: the same
-     * address can enroll again as a new account (the self-identity records of the deleted one are gone), the app opens
-     * the new vault, the snapshot the extensions read is written again, and the AutoFill extension opens it with the new
-     * account's quick-unlock key. In the same process as the deletion, which holds whatever the deleted session left in
-     * memory.
+     * A deletion the server confirmed forgets the account's identity records here too (the user-id-keyed one, and the
+     * address's binding that names it), so the same address can register again on this device. Before, the binding
+     * stayed, and the next account under the address was held to the deleted one's key at its first unlock.
      */
     @Test
-    fun aVaultMadeAfterADeletionOpensInTheAppAndInTheExtension() = test {
+    fun aConfirmedDeletionForgetsTheAccountsIdentityRecordsSoItsAddressCanRegisterAgain() = test {
         unlockedWithAPersonalVault()
         twoStepServer()
-        store.origin(homeKey).identityPins().record(reg.userId, EMAIL, enrolled.account)
-        assertEquals(ActionResult.Ok, controller.enableQuickUnlock(null))
-        routes["/account/delete/preview"] = {
-            val p = io.silencelen.andvari.core.model.AccountDeletePreview(emptyList(), deletedVaults = listOf(reg.personalVault.vaultId), leftVaults = emptyList(), totpRequired = false)
-            respond(json.encodeToString(io.silencelen.andvari.core.model.AccountDeletePreview.serializer(), p), HttpStatusCode.OK, headers)
+        deletingServer()
+        val remade = "00000000-0000-4000-8000-0000000000ab"
+        assertNotNull(store.origin(homeKey).identityPins().pinFor(EMAIL, reg.userId), "recorded at the unlock")
+        kotlin.test.assertFailsWith<io.silencelen.andvari.core.crypto.CryptoException>("the address is held to the deleted account") {
+            store.origin(homeKey).identityPins().pinFor(EMAIL, remade)
         }
-        routes["/account/delete"] = { respond("""{"deletedAt":5000}""", HttpStatusCode.OK, headers) }
         assertEquals(ActionResult.Ok, controller.openAccountDeletion())
-        assertEquals(ActionResult.Ok, controller.deleteAccount(EMAIL, PASSWORD, ""))
+        assertEquals(ActionResult.Ok, controller.deleteAccount(EMAIL, PASSWORD, "123456"))
+        assertNull(store.origin(homeKey).identityPins().pinFor(EMAIL, remade), "a remade account under the address is not held to the deleted one")
+        assertNull(store.origin(homeKey).identityPins().pinFor(EMAIL, reg.userId))
+    }
+
+    /**
+     * A deletion the server confirmed while something else ended the session here (a lock, a rejection heard by another
+     * request) still leaves nothing of the account on this device. Before, the answer was dropped and everything of the
+     * deleted account stayed.
+     */
+    @Test
+    fun aConfirmedDeletionWipesTheAccountAlsoWhenTheSessionEndedWhileTheRequestWasOut() = test {
+        unlockedWithAPersonalVault()
+        twoStepServer()
+        deletingServer(during = { controller.lock() })
+        val namespace = "$homeKey/${reg.userId}"
+        assertTrue(namespaces.devices.containsKey(namespace))
+        assertEquals(ActionResult.Ok, controller.openAccountDeletion())
+        assertEquals(ActionResult.Ok, controller.deleteAccount(EMAIL, PASSWORD, "123456"))
         assertEquals(AppScreen.CHOOSE_SERVER, controller.state.screen)
-        assertEquals(FillAvailability.OpenApp(AutofillVault.NO_SNAPSHOT), autofill().availability(), "nobody is signed in: the extension says to open the app")
-        assertFalse(quickKeys.isEnrolled(homeKey, reg.userId), "the deleted account's quick-unlock key is gone")
-        routes["/account/keys"] = { throw IOException("unreachable") } // the deleted account's keys are served no more
+        assertEquals(DeletionCopy.deleted(EMAIL), controller.state.notice)
+        assertNull(store.load(), "no session and no tokens")
+        assertTrue(namespace in namespaces.deleted, "the vault cache")
+        assertFalse(namespaces.devices.containsKey(namespace), "the device state")
+        assertNull(store.origin(homeKey).loadAccountKeys(reg.userId), "the account's keys")
+        assertNull(store.origin(homeKey).identityPins().pinFor(EMAIL, "00000000-0000-4000-8000-0000000000ab"))
+    }
 
-        // The same server again, through the Trust Gate as on a first launch, and a new account at the same address.
-        assertIs<ServerChoice.NeedsGate>(controller.chooseServer(HOME))
-        assertEquals(ActionResult.Ok, controller.confirmTrustGate())
-        assertEquals(AppScreen.WELCOME, controller.state.screen)
-        assertEquals(HOME, shared.last(), "the extensions are told the server again")
-        var newUserId = ""
-        routes["/auth/register"] = { request ->
-            val req = json.decodeFromString(RegisterRequest.serializer(), (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString())
-            newUserId = req.userId
-            val keys = AccountKeys(req.kdfSalt, req.kdfParams, req.wrappedUvk, req.encryptedIdentitySeed, req.identityPub, "", personalWrap = req.personalWrap)
-            respond(json.encodeToString(SessionResponse.serializer(), SessionResponse(req.userId, DEVICE, "a2", "r2", keys, false, recoveryPieceId = "piece-2")), HttpStatusCode.OK, headers)
-        }
-        routes["/sync"] = { respond(EMPTY_SYNC, HttpStatusCode.OK, headers) }
-        assertEquals(ActionResult.Ok, controller.enroll(EnrollForm("tok", EMAIL, "", PASSWORD, false, "")))
-        assertEquals(ActionResult.Ok, controller.confirmRecoveryPhrase(assertNotNull(controller.recoveryPhrase())))
-        assertEquals(AppScreen.VAULT, controller.state.screen, "the new vault opens")
-        assertNotEquals(reg.userId, newUserId, "a new account, at the address of the deleted one")
-        assertEquals(newUserId, store.load()?.userId)
-        settle { queue.key != null } // the key the extensions seal saves to is published again
+    /**
+     * After a confirmed deletion the device is as new for the deleted account's server: the store forgets the server it
+     * dials (its address goes with the session), so the next launch starts at the first screen. Before, only the session
+     * was cleared and the address stayed.
+     */
+    @Test
+    fun aConfirmedDeletionLeavesTheDeviceAsNewForItsServer() = test {
+        unlockedWithAPersonalVault()
+        twoStepServer()
+        deletingServer()
+        assertEquals(ActionResult.Ok, controller.openAccountDeletion())
+        assertEquals(ActionResult.Ok, controller.deleteAccount(EMAIL, PASSWORD, "123456"))
+        assertNull(store.baseUrl, "the server's address went")
+        assertNull(store.load())
+        assertEquals(AppScreen.CHOOSE_SERVER, controller.state.screen)
+    }
 
-        // The extension: nothing until Face ID is on for the new account (as after any sign-in), then the new vault.
-        val fill = autofill()
-        assertEquals(FillAvailability.OpenApp(AutofillVault.NOT_ENROLLED), fill.availability())
-        var uvk: ByteArray? = null
-        quickKeys.enrollNext = { account -> uvk = account.uvkCopyForPlatformWrap(); QuickEnroll.Ok }
-        assertEquals(ActionResult.Ok, controller.enableQuickUnlock(null))
-        assertEquals(FillAvailability.Ready(EMAIL), fill.availability(), "the snapshot is the new account's")
-        quickKeys.next = { QuickRecover.Ok(assertNotNull(uvk).copyOf()) }
-        assertEquals(FillUnlock.Unlocked, fill.unlock(BiometricHost.None), "the extension opens the vault made after the deletion")
-        fill.close()
+    /**
+     * The wipe after a confirmed deletion works under the session's own origin, also where the origin the store dials
+     * differs from it by then: the deleted account's records under its own server go, and nothing is wiped under the
+     * other one. Before, the wipe read the store's origin and worked under the other server's key.
+     */
+    @Test
+    fun aConfirmedDeletionWipesUnderTheSessionsOwnOriginWhereTheStoreDialsAnother() = test {
+        unlockedWithAPersonalVault()
+        twoStepServer()
+        val other = "https://other.example"
+        deletingServer(during = { store.moveOrigin(other) })
+        val namespace = "$homeKey/${reg.userId}"
+        val otherKey = OriginCanon.originKey(other)
+        assertTrue(namespaces.devices.containsKey(namespace))
+        assertEquals(ActionResult.Ok, controller.openAccountDeletion())
+        assertEquals(ActionResult.Ok, controller.deleteAccount(EMAIL, PASSWORD, "123456"))
+        assertEquals(other, store.baseUrl, "the store dials the other origin")
+        assertTrue(namespace in namespaces.deleted, "the vault cache under the session's own origin")
+        assertFalse(namespaces.devices.containsKey(namespace), "the device state")
+        assertNull(store.origin(homeKey).loadAccountKeys(reg.userId), "the account's keys")
+        assertNull(store.origin(homeKey).identityPins().pinFor(EMAIL, "00000000-0000-4000-8000-0000000000ab"), "the identity records")
+        assertTrue(namespaces.deleted.none { it.startsWith("$otherKey/") }, "nothing under the other origin")
     }
 
     // ---- vault health ----

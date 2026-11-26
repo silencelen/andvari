@@ -250,6 +250,35 @@ export function matchLogins(uris: string[], target: FillTarget, resolve: PslReso
   });
 }
 
+// ---- the page's scheme (spec 05 autofill (e)) ----
+//
+// Extension-only, OUTSIDE the verbatim port above, twin of core FillRules.matchesAny: matches() compares hosts only,
+// so a login saved for `https://bank.example` used to match a page at `http://bank.example`, where anyone on the
+// path can serve the page. A page is named here by an IDENTIFIER: its origin (`http://bank.example:8080`), or a bare
+// host. An identifier that starts with `http://` is a plain-http page, and such a page matches only an address saved
+// as `http://` (a scheme-less saved address is not one: it opens as https). Any other identifier matches as before.
+
+/** True when [identifier] names a plain-http page (core FillRules: `startsWith("http://", ignoreCase)`). */
+export function isPlainHttp(identifier: unknown): boolean {
+  return typeof identifier === "string" && /^http:\/\//i.test(identifier.trim());
+}
+
+/** The saved addresses a page may match: on a plain-http page only those saved as http. */
+export function offeredUris(uris: string[], plainHttp: boolean): string[] {
+  return plainHttp ? uris.filter((u) => isPlainHttp(u)) : uris;
+}
+
+/** [matchLogins] for a browser page at [host] (already normalized or not), with the scheme rule applied. */
+export function matchLoginsOnPage(uris: string[], host: string, plainHttp: boolean, resolve: PslResolve): boolean {
+  return matchLogins(offeredUris(uris, plainHttp), { webHost: host, packageName: "" }, resolve);
+}
+
+/** [matchLoginsOnPage] for a page named by an identifier (an origin, or a bare host). */
+export function matchLoginsAt(uris: string[], identifier: string, resolve: PslResolve): boolean {
+  const host = normalizeHost(identifier);
+  return host !== null && matchLoginsOnPage(uris, host, isPlainHttp(identifier), resolve);
+}
+
 // ---- field classification ----
 
 export type FieldKind = "username" | "password" | "none";

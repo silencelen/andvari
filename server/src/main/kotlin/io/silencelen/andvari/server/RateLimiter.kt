@@ -13,20 +13,46 @@ import java.util.concurrent.ConcurrentHashMap
  * until it passes. Production passes nothing and gets [now] verbatim.
  */
 class RateLimiter(private val clock: () -> Long = ::now) {
-    private class Window(var windowStart: Long, var count: Int, val windowMs: Long)
+    /** One window of one key. A window that lapses is replaced by a new object, so an object is exactly one window. */
+    internal class Window(var windowStart: Long, var count: Int, val windowMs: Long)
+
+    /**
+     * A call [draw] admitted, with the very window it was counted in, so [refund] gives it back there and nowhere else, and
+     * at most once ([givenBack]).
+     */
+    class Admitted internal constructor(internal val window: Window) {
+        internal val givenBack = java.util.concurrent.atomic.AtomicBoolean(false)
+    }
+
+    /** What [draw] did: [admitted] when the call was counted, else [waitMs], the milliseconds until its window resets. */
+    class Draw internal constructor(val admitted: Admitted?, val waitMs: Long?)
     private val windows = ConcurrentHashMap<String, Window>()
     private val callsSincePrune = java.util.concurrent.atomic.AtomicInteger()
 
-    fun allow(key: String, limit: Int, windowMs: Long): Boolean {
+    /**
+     * [retryAfterMs] as a yes or no. [at] is the reading of the clock the call is counted at; a caller that draws two
+     * budgets for one event passes the same reading to both, so that windows started by the same event start together.
+     */
+    fun allow(key: String, limit: Int, windowMs: Long, at: Long = clock()): Boolean = retryAfterMs(key, limit, windowMs, at) == null
+
+    /**
+     * Admits one call under [key], or returns the milliseconds until its window resets (for `Retry-After`). A window
+     * starts at the first call it counts and lasts [windowMs] from then: a budget "a day" is a budget per window of 24
+     * hours that starts at its first call, not per calendar day.
+     */
+    fun retryAfterMs(key: String, limit: Int, windowMs: Long, at: Long = clock()): Long? = draw(key, limit, windowMs, at).waitMs
+
+    /** [retryAfterMs], and for an admitted call the window it was counted in, which [refund] takes. */
+    fun draw(key: String, limit: Int, windowMs: Long, at: Long = clock()): Draw {
         prune()
-        val now = clock()
+        val now = at
         val w = windows.compute(key) { _, existing ->
             if (existing == null || now - existing.windowStart >= windowMs) Window(now, 0, windowMs) else existing
         }!!
         synchronized(w) {
-            if (w.count >= limit) return false
+            if (w.count >= limit) return Draw(null, (w.windowStart + windowMs - now).coerceAtLeast(1))
             w.count++
-            return true
+            return Draw(Admitted(w), null)
         }
     }
 
@@ -47,8 +73,62 @@ class RateLimiter(private val clock: () -> Long = ::now) {
         windows.entries.removeIf { now - it.value.windowStart >= it.value.windowMs }
     }
 
+    /**
+     * The milliseconds until [key]'s live window resets when it already holds [limit] calls, else null. Draws nothing:
+     * it lets a refusal by one budget name the longer wait of a second budget the same call also needs ([drawDevice]).
+     */
+    fun waitIfFull(key: String, limit: Int): Long? {
+        val w = windows[key] ?: return null
+        synchronized(w) {
+            val now = clock()
+            if (now - w.windowStart >= w.windowMs || w.count < limit) return null
+            return (w.windowStart + w.windowMs - now).coerceAtLeast(1)
+        }
+    }
+
+    /**
+     * Give back the call [admitted] names, when a second budget the same call also needs refused it ([drawDevice]): a
+     * refused call spends nothing. It goes back to the window it was counted in and to no other: when that window lapsed
+     * in between and another request's call started the key's next window, the next window keeps every call it counted.
+     * (Until 2026-11-17 the give-back went to whichever window of the key was current, so a window that started between
+     * a draw and its give-back lost a call it had counted and admitted one more than its limit.)
+     *
+     * A give-back is good for one use (decided on 2026-11-17): a second give-back of the same draw does nothing, so no
+     * caller, present or future, can give one call back twice and so admit more than the limit.
+     */
+    fun refund(admitted: Admitted) {
+        if (!admitted.givenBack.compareAndSet(false, true)) return
+        val w = admitted.window
+        synchronized(w) { if (w.count > 0) w.count-- }
+    }
+
+    /**
+     * A removed device takes its budgets with it: every window kept for [deviceId] ([Bucket.deviceKey]) goes. Its
+     * account's ceilings keep what the device spent, as they are the account's. A device id is never reused, so this
+     * changes no admission; it keeps the rule the device's back-offs follow, and the map holds no dead device.
+     */
+    fun forgetDevice(deviceId: String) {
+        val suffix = ":device:$deviceId"
+        windows.keys.removeIf { it.endsWith(suffix) }
+    }
+
+    /** Test hook: the calls counted in [key]'s live window (0 when it has none or it lapsed). */
+    internal fun count(key: String): Int {
+        val w = windows[key] ?: return 0
+        synchronized(w) { return if (clock() - w.windowStart >= w.windowMs) 0 else w.count }
+    }
+
+    /** Test hook: when [key]'s live window started (null when it has none or it lapsed). */
+    internal fun windowStart(key: String): Long? {
+        val w = windows[key] ?: return null
+        synchronized(w) { return if (clock() - w.windowStart >= w.windowMs) null else w.windowStart }
+    }
+
     /** Test hook: live entry count (RateLimiterTest pins the eviction bound). */
     internal fun size(): Int = windows.size
+
+    /** Test hook: forget every window, so a route test can walk past a small bucket it is not testing. */
+    internal fun clear() = windows.clear()
 
     internal companion object {
         const val PRUNE_EVERY = 4096
@@ -63,6 +143,14 @@ class RateLimiter(private val clock: () -> Long = ::now) {
  * consecutive failures, failure n locks the key for 2^(n-threshold) seconds, capped at [capMs]; any
  * success clears the key. A blocked attempt is refused up front (429) and does NOT extend the lock.
  * In-memory, single-process — the same deployment shape as [RateLimiter].
+ *
+ * The server keeps three of these, never sharing a count: `loginBackoff`, keyed on the
+ * submitted address, armed only by sign-ins (and device-link pickups, which are sign-ins) and refusing only them;
+ * `proofBackoff`, keyed on the session's device (`Services.deviceCounterKey`), armed only by password proofs made on
+ * that device's own sessions and refusing only them; and `codeBackoff`, keyed on the device too, armed only by
+ * two-step codes checked on that device's own sessions and refusing only the checking of a code. The key strings
+ * differ in kind, but each
+ * instance hashes whatever it is given.
  */
 class EmailBackoff(private val threshold: Int = 5, private val capMs: Long = 900_000) {
     private class State(var failures: Int = 0, var lockedUntil: Long = 0, var touchedAt: Long = 0)
@@ -115,29 +203,41 @@ class EmailBackoff(private val threshold: Int = 5, private val capMs: Long = 900
     }
 
     /**
-     * Reserve one attempt BEFORE any verifier work: atomically, false while the key is locked, else the
-     * attempt is counted as a failure now (arming the lock at the threshold). A verified attempt then calls
-     * [success], which clears it; an attempt that fails stays counted. Checking with [blocked] first and
-     * counting with [fail] after the verify let every request sent at the same moment pass the check, so a
-     * caller with many client addresses got five guesses per address per lock period instead of one.
+     * Reserve one attempt before any verifier work: atomically, false while the key is locked,
+     * else the attempt is counted as a failure NOW (arming the lock at the threshold). A verified attempt then
+     * calls [success], which clears it; an attempt that fails stays counted. Checking first and counting
+     * after the verify let every request sent at the same moment pass the check, so a caller with many
+     * client addresses got five guesses per address per lock period instead of one.
      */
-    fun reserve(email: String): Boolean {
+    fun reserve(email: String): Boolean = reserveOrWait(email) == null
+
+    /**
+     * [reserve], returning null when the attempt was reserved and otherwise the milliseconds until the lock lapses (at
+     * least 1). Only the back-offs a session's own device keeps name this wait (spec 03 §8, decided on 2026-11-17): the
+     * session can count it for itself. The sign-in's back-off, keyed by an address anyone can type, answers a fixed
+     * 60 seconds instead, since the real wait would tell how many wrong tries were made for that address lately.
+     */
+    fun reserveOrWait(email: String): Long? {
         prune()
         val s = states.computeIfAbsent(key(email)) { State() }
         synchronized(s) {
-            if (clock() < s.lockedUntil) return false
+            val now = clock()
+            if (now < s.lockedUntil) return (s.lockedUntil - now).coerceAtLeast(1)
             s.failures++
-            s.touchedAt = clock()
+            s.touchedAt = now
             if (s.failures >= threshold) {
                 val exp = (s.failures - threshold).coerceAtMost(20)
-                s.lockedUntil = clock() + (1000L shl exp).coerceAtMost(capMs)
+                s.lockedUntil = now + (1000L shl exp).coerceAtMost(capMs)
             }
-            return true
+            return null
         }
     }
 
-    /** A successful attempt clears the consecutive-failure state entirely (§2.5: reset on success). */
+    /** A successful attempt clears the consecutive-failure state entirely (§2.5: reset on success); also how a removed device's counters go. */
     fun success(email: String) { states.remove(key(email)) }
+
+    /** Test hook: when the lock on [email] lapses (0 when there is none), so a test can walk a day of the curve. */
+    internal fun lockedUntil(email: String): Long = states[key(email)]?.let { synchronized(it) { it.lockedUntil } } ?: 0
 
     /**
      * Bound the map against junk-email stuffing (emails are attacker-chosen strings, unlike the IP

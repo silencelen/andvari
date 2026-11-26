@@ -3,9 +3,11 @@
 # (design 2026-07-15 §8.1: one image carries both).
 #
 #   <no args> | server        run the andvari server
+#   setup [args...]           `andvari setup`: write andvari.env, create the database, mint the setup link
+#   admin <command> [args]    `andvari admin`: host commands on the database and env (spec 03 §7.4)
 #   recovery-cli [args...]    run the OFFLINE escrow/recovery tool
 #                             (use `docker run --rm --network none --log-driver none ... recovery-cli keygen`:
-#                             keygen prints the org recovery seed and recover a temporary password, and
+#                             keygen prints the org recovery seed and assist a signed recovery answer, and
 #                             docker copies an attached container's stdout to its log driver unless
 #                             that is turned off)
 #   anything else             exec'd verbatim (debug shell etc.)
@@ -28,9 +30,11 @@ drop_priv() {
 # verifiers, and a bind mount arrives with whatever mode docker or the operator gave it (0755 when
 # docker creates the source itself). So: ownership fixed when we are root, the directory 0700, and
 # any database file an older image left 0644 (-wal, -shm, -journal included) tightened to 0600.
-# Files created later are 0600 through the umask start_server sets. Nothing else in the container
-# reads /data: the server is the only process that opens the database, and the downloads files an
-# operator places under /data/downloads are only read by it.
+# Files created later are 0600 through the umask start_server sets. Besides the server, only the
+# host commands of the admin arm below open the database: in a container of their own, or, for the
+# snapshot (`admin backup`), inside the server's running container as the server's user, where this
+# function then changes no owner. The downloads files an operator places under /data/downloads are
+# only read by the server.
 prepare_data_dir() {
   dir="$1"
   db="$2"
@@ -69,6 +73,11 @@ fi
 case "${1:-server}" in
   server)
     start_server /data
+    ;;
+  setup|admin)
+    prepare_data_dir /data "${ANDVARI_DB:-/data/andvari.db}"
+    umask 077
+    drop_priv java -jar /opt/andvari/andvari-server.jar "$@"
     ;;
   recovery-cli)
     shift

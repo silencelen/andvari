@@ -11,7 +11,7 @@ test("Q8 fence: background.ts never opens a grant seal", () => {
   const bg = read("./background.ts");
   assert.ok(!/\bopenSharedGrant\s*\(/.test(bg), "background.ts must not call openSharedGrant");
   assert.ok(!/\bsealOpen\s*\(/.test(bg), "background.ts must not call sealOpen");
-  assert.ok(/buildVaultKeysFromWraps\(/.test(bg), "the key map is built by the UVK-wraps-only leaf");
+  assert.ok(/buildVaultKeys\(grants, uvk, userId, personalVaultId, records\)/.test(bg), "the key map is built by the UVK-wraps-only leaf");
 });
 
 test("Q8 fence: the leaf opens UVK wraps only, and no new dependency", () => {
@@ -22,11 +22,8 @@ test("Q8 fence: the leaf opens UVK wraps only, and no new dependency", () => {
   assert.ok(!("@noble/curves" in (pkg.dependencies ?? {})), "Q8: no curve dependency to verify grants in-extension");
 });
 
-test("LOW-4 fence: accepting a personal-vault change re-opens the staged wrap under the UVK", () => {
+test("§15 fence: the personal change and proposal code is gone (one personal wrap ever exists, §5.3)", () => {
   const bg = read("./background.ts");
-  const a = bg.indexOf("async function acceptPersonalChange(");
-  assert.ok(a > -1);
-  const body = bg.slice(a, bg.indexOf("\n}\n", a));
-  assert.ok(body.includes("reopenStagedPersonalWrap("), "the staged blob is re-authenticated, not trusted");
-  assert.ok(!body.includes("session.vaultKeys.has(served.vaultId)"), "a key-presence check is not authentication");
+  for (const gone of ["acceptPersonalChange", "readPersonalChange", "personalChangeNotice", "pickPersonal", "personalChange:"]) assert.ok(!bg.includes(gone), gone);
+  assert.ok(!read("./grantkeys.ts").includes("sealedVk"), "no v1-seal counting");
 });

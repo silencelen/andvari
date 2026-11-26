@@ -11,6 +11,7 @@ import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import * as C from "./copy.ts";
 
 const read = (p: string) => readFileSync(fileURLToPath(new URL(p, import.meta.url)), "utf-8");
 const popupTs = read("./popup.ts");
@@ -52,8 +53,10 @@ test("H133: every popup empty state is a sentence with terminal punctuation", ()
   for (const call of calls) {
     const emptyArg = splitArgs(call[1]!)[2];
     assert.ok(emptyArg, `renderList call has no empty-state argument: ${call[0]}`);
-    const literals = [...emptyArg!.matchAll(/(["`])((?:[^"`\\]|\\.)*)\1/g)].map((m) => m[2]!);
-    assert.ok(literals.length >= 1, `no empty-state literal in: ${emptyArg}`);
+    // Each empty state is a named line of copy.ts (T.NAME), never an inline literal.
+    assert.ok(!/["`]/.test(emptyArg!), `an inline empty-state literal in: ${emptyArg}`);
+    const literals = [...emptyArg!.matchAll(/\bT\.([A-Z][A-Z0-9_]*)\b/g)].map((m) => (C as Record<string, unknown>)[m[1]!]).filter((v): v is string => typeof v === "string");
+    assert.ok(literals.length >= 1, `no empty-state line in: ${emptyArg}`);
     for (const lit of literals) {
       checked++;
       assert.match(lit, /[.?!]$/, `popup empty state must end in terminal punctuation: "${lit}"`);

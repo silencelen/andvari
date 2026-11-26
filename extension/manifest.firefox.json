@@ -2,17 +2,17 @@
   "manifest_version": 3,
   "name": "andvari",
   "version": "0.30.0",
-  "description": "Zero-knowledge password manager — fill and save logins. Works with any andvari server; set your own in Options.",
+  "description": "Fill and save passwords from your andvari vault. Free and open source, with our server or your own.",
   "browser_specific_settings": {
     "gecko": {
       "id": "andvari@monahanhosting.com",
       "strict_min_version": "121.0",
-      "update_url": "https://andvari.monahanhosting.com/downloads/firefox-updates.json"
+      "update_url": "https://vault.andvaripass.com/downloads/firefox-updates.json"
     }
   },
   "permissions": ["storage", "activeTab", "scripting", "alarms", "clipboardWrite", "contextMenus"],
   "host_permissions": [
-    "https://andvari.monahanhosting.com/*",
+    "https://vault.andvaripass.com/*",
     "https://*/*",
     "http://localhost/*",
     "http://127.0.0.1/*"

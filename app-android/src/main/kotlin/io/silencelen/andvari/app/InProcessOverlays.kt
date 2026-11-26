@@ -48,6 +48,8 @@ object InProcessOverlays {
         "io.silencelen.andvari.app.autofill.AppFillConfirmActivity",
         // Android review 1, ruling 1: the card confirm.
         "io.silencelen.andvari.app.autofill.CardFillConfirmActivity",
+        // Andvari's own chooser behind the generic row.
+        "io.silencelen.andvari.app.autofill.FillChooserActivity",
     )
 
     @Volatile
@@ -67,13 +69,31 @@ object InProcessOverlays {
     fun noteStarted(isOverlay: Boolean) {
         lastEventWasOverlayStop = false
         lastStartWasOverlay = isOverlay
+        // The person is in andvari's own window again; whatever is open now is theirs, and
+        // leaving it locks.
+        if (!isOverlay) fillWindowOpenedVault = false
     }
 
     /** An activity stopped; [isOverlay] says whether it was one of the autofill overlays. */
     fun noteStopped(isOverlay: Boolean) { lastEventWasOverlayStop = isOverlay }
 
-    /** True when the process ON_STOP being handled was caused by an overlay closing. */
-    fun lastStopWasOverlay(): Boolean = lastEventWasOverlayStop
+    /**
+     * The vault open now was opened by an autofill window (the fill unlock, by password or quick
+     * unlock) in this run, and the person has not been in andvari's own window since.
+     */
+    @Volatile
+    private var fillWindowOpenedVault = false
+
+    /** The fill unlock opened the vault (never its fast path, which found it open). */
+    fun noteVaultOpenedByFillWindow() { fillWindowOpenedVault = true }
+
+    /**
+     * True when the process ON_STOP being handled was caused by an autofill window closing AND the vault was opened by
+     * an autofill window in this run. An app holding one of the autofill senders can raise a
+     * window of andvari's within the stop's debounce after the person left the unlocked main app; that window's close
+     * must not keep the vault the person opened in andvari open: leaving andvari locks it as before.
+     */
+    fun lastStopWasOverlay(): Boolean = lastEventWasOverlayStop && fillWindowOpenedVault
 
     /** True when the process ON_START being handled was caused by an overlay coming forward. */
     fun lastStartWasOverlay(): Boolean = lastStartWasOverlay

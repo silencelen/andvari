@@ -1,127 +1,75 @@
 package io.silencelen.andvari.server
 
-import io.silencelen.andvari.core.crypto.Attachments
-import io.silencelen.andvari.core.crypto.Bytes
-import io.silencelen.andvari.core.model.AttachmentMeta
-import io.silencelen.andvari.core.model.ClientPolicy
 import io.ktor.utils.io.ByteReadChannel
 import io.ktor.utils.io.readAvailable
+import io.silencelen.andvari.core.crypto.Attachments
+import io.silencelen.andvari.core.crypto.Bytes
+import io.silencelen.andvari.core.model.wire.AttachmentMeta
+import io.silencelen.andvari.core.model.wire.QuotaName
+import io.silencelen.andvari.core.model.wire.WireErrors
 import java.io.File
 import java.security.MessageDigest
 import java.sql.Connection
 import java.util.concurrent.ConcurrentHashMap
 
-class PayloadTooLarge(val reason: String) : Exception()
-
 /**
- * Encrypted attachment blobs (spec 02 §6). The DB row holds the server-visible
- * plaintext contract (ids, ciphertext size, sha256, secretstream header); the
- * ciphertext chunk stream lives on disk at blobDir/{attachmentId}. Upload is
- * blob-first: rows/files that no live item references are GC'd after 24 h.
+ * Attachment blobs (spec 03 §9, spec 02 §6): `header (24 B) || ciphertext chunks`, streamed to disk and
+ * never parsed. Bounded per file (`attachmentMaxBytes`), by the vault owner's account quota (§14.4, with
+ * in-flight `.part` bytes counted mid-stream) and by a per-user concurrent-upload cap. Ids are one global
+ * namespace; an id that already exists in another vault answers `403 no_grant` and is audited.
  */
-class AttachmentStore(
-    private val repo: Repo,
-    blobDirPath: String,
-    private val maxConcurrentUploadsPerUser: Int = 4,
-) {
-    private val dir = File(blobDirPath).apply { mkdirs() }
+class AttachmentStore(private val s: Services) {
+    private val dir = File(s.config.blobDir).apply { mkdirs() }
 
-    /**
-     * Per-user in-flight upload accounting (LOW-6): a concurrency cap plus streamed-but-
-     * uncommitted bytes counted toward the user quota mid-stream. One entry per userId
-     * for the process lifetime — bounded by the user table; deliberately never evicted
-     * (removing an entry another upload still holds would fork the semaphore and double
-     * the effective cap).
-     */
+    /** Test hook: the in-flight bytes counted against [ownerUserId]'s quota. */
+    internal fun inFlightBytesOf(ownerUserId: String): Long = ownerInFlight[ownerUserId]?.get() ?: 0L
+
     private class InFlight(max: Int) {
         val sem = java.util.concurrent.Semaphore(max)
-        val bytes = java.util.concurrent.atomic.AtomicLong()
     }
 
+    /** The concurrent-upload cap: per uploader. */
     private val inFlight = ConcurrentHashMap<String, InFlight>()
 
-    var orphanTtlMs = 24L * 3600 * 1000 // mutable so tests can force an immediate sweep
-
     /**
-     * Test seams (H97). The two concurrency tests around this class used to order their threads
-     * with `delay(250)` — "the first store has probably taken its permit and entered the read loop
-     * by now". That is a guess: on a loaded build host the second upload can run first, and the
-     * test then reds over no regression (or passes having exercised the non-race path, which is
-     * worse). They now AWAIT the real condition through these accessors, so the wait is as long
-     * as the host needs and the assertion is about the cap, not about the scheduler.
+     * In-flight `.part` bytes: per vault OWNER, whose quota they count against (spec 03 §9).
+     * Keyed per uploader, two members uploading into one owner's vault each saw only their own bytes.
      */
-    internal fun activeUploads(userId: String): Int =
-        inFlight[userId]?.let { maxConcurrentUploadsPerUser - it.sem.availablePermits() } ?: 0
+    private val ownerInFlight = ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicLong>()
 
-    /** Streamed-but-uncommitted bytes currently counted against [userId]'s quota (see [activeUploads]). */
-    internal fun inFlightBytes(userId: String): Long = inFlight[userId]?.bytes?.get() ?: 0L
+    /** Mutable so a test can force an immediate orphan sweep. */
+    var orphanTtlMs = 24L * 3_600_000
 
     fun file(attachmentId: String): File = File(dir, attachmentId)
 
-    /** Ciphertext budget for a plaintext quota: per-chunk secretstream overhead, header excluded (stored in the row). */
     fun maxCipherBytes(plainMax: Long): Long =
         plainMax + ((plainMax + Attachments.CHUNK - 1) / Attachments.CHUNK) * Attachments.STREAM_ABYTES
 
-    class AttachmentRow(val attachmentId: String, val itemId: String, val vaultId: String, val size: Long, val sha256: String, val header: String, val createdAt: Long)
+    class Row(val attachmentId: String, val itemId: String, val vaultId: String, val size: Long, val sha256: String, val createdAt: Long)
 
-    fun rowById(c: Connection, id: String): AttachmentRow? =
-        c.queryOne("SELECT * FROM attachments WHERE attachmentId=?", id) { rs ->
-            AttachmentRow(
-                rs.getString("attachmentId"), rs.getString("itemId"), rs.getString("vaultId"),
-                rs.getLong("size"), rs.getString("sha256"), rs.getString("header"), rs.getLong("createdAt"),
-            )
+    fun rowById(c: Connection, id: String): Row? =
+        c.queryOne("SELECT attachmentId,itemId,vaultId,size,sha256,createdAt FROM attachments WHERE attachmentId=?", id) { rs ->
+            Row(rs.getString(1), rs.getString(2), rs.getString(3), rs.getLong(4), rs.getString(5), rs.getLong(6))
         }
 
-    fun userBytes(c: Connection, userId: String): Long =
-        c.queryOne(
-            """SELECT COALESCE(SUM(a.size),0) FROM attachments a
-               JOIN grants g ON g.vaultId=a.vaultId WHERE g.userId=? AND g.revokedAt IS NULL""",
-            userId,
-        ) { it.getLong(1) } ?: 0
-
-    /**
-     * Persist an uploaded body (header || ciphertext chunks), enforcing the size cap
-     * while streaming. Idempotent: re-uploading the same id with the same bytes
-     * returns the stored meta; a different payload under a taken id is rejected.
-     */
-    suspend fun store(
-        userId: String,
-        attachmentId: String,
-        itemId: String,
-        vaultId: String,
-        body: ByteReadChannel,
-        policy: ClientPolicy,
-    ): AttachmentMeta {
+    suspend fun store(userId: String, attachmentId: String, itemId: String, vaultId: String, body: ByteReadChannel): AttachmentMeta {
+        val policy = s.policy.get()
         val maxCipher = maxCipherBytes(policy.attachmentMaxBytes)
-        val userMaxCipher = maxCipherBytes(policy.userAttachmentsMaxBytes)
-        val fl = inFlight.computeIfAbsent(userId) { InFlight(maxConcurrentUploadsPerUser) }
-        // Acquire BEFORE the try — a failed acquire must never reach the release in finally.
-        if (!fl.sem.tryAcquire()) throw RateLimited()
+        val fl = inFlight.computeIfAbsent(userId) { InFlight(s.config.uploadMaxConcurrentPerUser) }
+        if (!fl.sem.tryAcquire()) rateLimited(5_000)
         val digest = MessageDigest.getInstance("SHA-256")
         var header: ByteArray? = null
         var cipherBytes = 0L
         var inFlightAdded = 0L
         var tmp: File? = null
+        var bytes: java.util.concurrent.atomic.AtomicLong? = null
         try {
-            // The quota read and the temp-file creation live INSIDE the try so any throw (a DB
-            // error, or an IOException from createTempFile doing disk I/O) still reaches the
-            // finally that releases the semaphore permit — a leaked permit would permanently
-            // shrink this user's concurrent-upload cap for the process lifetime.
-            //
-            // An idempotent re-upload of an already-committed id is EXEMPT from the user quota
-            // (the authoritative commit path returns the stored meta before its quota check),
-            // so the mid-stream bound must exempt it too — else a retry near quota double-counts
-            // the existing bytes against itself and false-413s a request the commit path allows.
-            val (preexisting, committedBytes) = repo.db.read { c ->
-                (rowById(c, attachmentId) != null) to userBytes(c, userId)
+            val (preexisting, ownerRoom, owner) = s.db.read { c ->
+                val owner = Quotas.ownerOf(c, vaultId)
+                val room = owner?.let { o -> s.policy.quotaOf(c, o).accountBytes - Quotas.ownedBytes(c, o) } ?: Long.MAX_VALUE
+                Triple(rowById(c, attachmentId) != null, room, owner)
             }
-            // ATT-1: a UNIQUE temp file per in-flight upload. A deterministic "$attachmentId.part"
-            // let two concurrent PUTs for the SAME attachmentId (a client retry / double-tap Save /
-            // refresh that re-encrypts while the first body is still draining) interleave their bytes
-            // into one inode; the winner's committed row.sha256 then matched NEITHER the winner's nor
-            // the loser's on-disk bytes → permanent, silent, undecryptable ciphertext loss. Each
-            // upload now streams to its own inode; the commit-time row guard below still serializes
-            // the single winner's rename, and the finally-block deletes whichever temp did not commit.
+            val counter = ownerInFlight.computeIfAbsent(owner ?: "vault:$vaultId") { java.util.concurrent.atomic.AtomicLong() }.also { bytes = it }
             val part = File.createTempFile("$attachmentId.", ".part", dir).also { tmp = it }
             part.outputStream().use { out ->
                 val buf = ByteArray(64 * 1024)
@@ -141,65 +89,35 @@ class AttachmentStore(
                     if (n - off > 0) {
                         val delta = (n - off).toLong()
                         cipherBytes += delta
-                        if (cipherBytes > maxCipher) throw PayloadTooLarge("attachment_too_large")
+                        if (cipherBytes > maxCipher) throw ApiException(413, WireErrors.ATTACHMENT_TOO_LARGE)
                         if (!preexisting) {
                             inFlightAdded += delta
-                            // Mid-stream bound over committed + ALL of this user's in-flight
-                            // bytes. The commit-time check stays authoritative (serialized in
-                            // the tx); this only caps .part growth while bodies stream.
-                            if (committedBytes + fl.bytes.addAndGet(delta) > userMaxCipher) {
-                                throw PayloadTooLarge("user_attachment_quota")
-                            }
+                            if (counter.addAndGet(delta) > ownerRoom) quotaExceeded(QuotaName.ACCOUNT_BYTES)
                         }
                         digest.update(buf, off, n - off)
                         out.write(buf, off, n - off)
                     }
                 }
             }
-            val hdr = header ?: throw BadRequest("attachment_truncated")
-            if (cipherBytes <= Attachments.STREAM_ABYTES) throw BadRequest("attachment_truncated")
+            val hdr = header ?: badRequest("attachment_truncated")
+            if (cipherBytes <= Attachments.STREAM_ABYTES) badRequest("attachment_truncated")
             val sha = Bytes.toHexLower(digest.digest())
-            // Streaming done: hand this upload's bytes off to the commit's own userBytes
-            // read. Keeping them in fl.bytes THROUGH the commit tx would double-count them
-            // (committed row + fl.bytes) for a concurrent same-user upload → spurious 413.
-            if (inFlightAdded > 0) { fl.bytes.addAndGet(-inFlightAdded); inFlightAdded = 0 }
-
-            val meta = repo.db.tx { c ->
-                // Post-revocation blob-commit race (spec 03 §11 / design §4 matrix,
-                // attachment-upload-vs-delete): the route-level grant check ran before the
-                // body streamed; a vault delete or member removal can land in between.
-                // Re-check the grant inside the commit tx so a revoked writer can never
-                // land ciphertext into a vault they just lost.
-                val txRole = repo.grantRole(c, userId, vaultId)
-                if (txRole == null || txRole == "reader") {
-                    part.delete()
-                    throw Forbidden("no_grant")
-                }
+            if (inFlightAdded > 0) { counter.addAndGet(-inFlightAdded); inFlightAdded = 0 }
+            val meta = s.db.tx { c ->
+                val role = Quotas.role(c, userId, vaultId)
+                if (role == null || role == "reader") forbidden(WireErrors.NO_WRITE_GRANT)
                 val existing = rowById(c, attachmentId)
                 if (existing != null) {
-                    part.delete()
-                    // Server scan 2026-10-26 (F10): a row in a vault the caller is NOT writing to is
-                    // answered with the GET route's `403 no_grant` (spec 03 §8), not a distinct
-                    // `attachment_id_taken`. This does NOT close the oracle: attachment ids are one
-                    // global namespace, so a fresh id must insert (200) and a holder of a foreign id
-                    // still learns "exists" (403) vs "gone" (200) — an accepted LOW residual (spec 03,
-                    // spec 05 R4). What it does: ids are unguessable, so the ONLY way to reach this
-                    // branch is to hold an id synced while a member of that vault — an honest client
-                    // never does (copy/move mints fresh ids, the plan retry re-posts the same triple) —
-                    // so the branch is an anomaly and is audited (the tx commits the row; the 403 is
-                    // thrown after it, a throw in here would roll the row back).
                     if (existing.vaultId != vaultId) {
-                        repo.auditOn(c, "attachment_cross_vault", userId, null, null, "$attachmentId:$vaultId")
+                        s.audit.on(c, "attachment_cross_vault", userId, null, null, "$attachmentId:$vaultId")
                         return@tx null
                     }
-                    if (existing.sha256 != sha || existing.itemId != itemId) throw BadRequest("attachment_id_taken")
+                    if (existing.sha256 != sha || existing.itemId != itemId) badRequest(WireErrors.ATTACHMENT_ID_TAKEN)
                     return@tx AttachmentMeta(existing.attachmentId, existing.itemId, existing.vaultId, existing.size, existing.sha256, existing.createdAt)
                 }
-                if (userBytes(c, userId) + cipherBytes > maxCipherBytes(policy.userAttachmentsMaxBytes)) {
-                    part.delete()
-                    throw PayloadTooLarge("user_attachment_quota")
-                }
-                val t = now()
+                val owner = Quotas.ownerOf(c, vaultId)
+                if (owner != null && Quotas.ownedBytes(c, owner) + cipherBytes > s.policy.quotaOf(c, owner).accountBytes) quotaExceeded(QuotaName.ACCOUNT_BYTES)
+                val t = s.clock.now()
                 c.exec(
                     "INSERT INTO attachments(attachmentId,itemId,vaultId,size,sha256,header,createdAt) VALUES(?,?,?,?,?,?,?)",
                     attachmentId, itemId, vaultId, cipherBytes, sha, Bytes.toB64(hdr), t,
@@ -208,104 +126,108 @@ class AttachmentStore(
                     part.copyTo(file(attachmentId), overwrite = true)
                     part.delete()
                 }
-                repo.auditOn(c, "attachment_upload", userId, null, null, "$attachmentId:$cipherBytes")
+                s.audit.on(c, "attachment_upload", userId, null, null, "$attachmentId:$cipherBytes")
                 AttachmentMeta(attachmentId, itemId, vaultId, cipherBytes, sha, t)
             }
-            return meta ?: throw Forbidden("no_grant")
+            return meta ?: forbidden(WireErrors.NO_GRANT)
         } finally {
-            if (inFlightAdded > 0) fl.bytes.addAndGet(-inFlightAdded)
+            if (inFlightAdded > 0) bytes?.addAndGet(-inFlightAdded)
             fl.sem.release()
             tmp?.delete()
         }
     }
 
-    /**
-     * Delete the attachment ROWS for a tombstoned item inside the item's tx and return
-     * their ids. The blob FILES are deliberately NOT unlinked here — the caller unlinks
-     * them only after the batch tx commits, so a later mutation that rolls the tx back
-     * (restoring the item) does not leave the item referencing a vanished blob.
-     */
     fun deleteRowsForItem(c: Connection, itemId: String): List<String> {
         val ids = c.queryAll("SELECT attachmentId FROM attachments WHERE itemId=?", itemId) { it.getString(1) }
         if (ids.isNotEmpty()) c.exec("DELETE FROM attachments WHERE itemId=?", itemId)
         return ids
     }
 
-    /**
-     * GC (spec 02 §6): drop rows older than the TTL that their item does not
-     * reference (or whose item is gone/tombstoned), plus stray files with no row.
-     *
-     * F56: all filesystem work (the directory listing and every unlink) happens OUTSIDE the
-     * single-connection DB lock — the previous shape did both inside the tx, so a populated
-     * blob dir stalled EVERY route for the whole sweep (measured 591 ms max request stall at
-     * 10k files; ~0.1 ms after — perf addendum §3). Same post-commit-unlink pattern as
-     * Service.push: rows are the source of truth, files deleted only after the tx commits.
-     * A crash between commit and unlink leaves stray files the NEXT sweep removes (rows are
-     * already gone, so they fail the `known` check once past the TTL).
-     *
-     * TOCTOU guards (2026-07-09 review): moving the unlinks outside the lock opened a race
-     * the in-tx shape could not have — an idempotent re-upload of a swept id (a documented
-     * store() contract) whose commit tx was WAITING on the sweep's lock can INSERT a fresh
-     * row and rename its blob into place before the sweep thread reaches the unlink loop;
-     * the old code then deleted the just-committed ciphertext behind that upload's 200, and
-     * the idempotent branch never rewrites the file, so the loss was permanent. So each pass
-     * carries its own guard: the SWEPT-ROW pass re-checks row absence under a short db.read
-     * and additionally skips fresh-mtime files (renameTo/copyTo give a re-committed blob a
-     * fresh mtime; every legitimately swept file is > TTL old, so this skips nothing in the
-     * normal path); the STRAY pass re-stats lazily and is protected by the same mtime
-     * cutoff, which also protects in-flight .part files. A file skipped by a guard becomes
-     * a stray a FUTURE sweep removes once it is past the TTL and still rowless.
-     */
+    /** Unlink the files of [ids] that no row names any more (after the deleting transaction committed). */
+    fun unlinkOrphaned(ids: Collection<String>) {
+        if (ids.isEmpty()) return
+        val alive = s.db.read { c -> ids.filterTo(HashSet()) { rowById(c, it) != null } }
+        ids.filter { it !in alive }.forEach { file(it).delete() }
+    }
+
+    /** Uploads never referenced by a live item are removed after 24 hours (spec 02 §6). */
     fun sweepOrphans(): Int {
-        val cutoff = now() - orphanTtlMs
-        // Snapshot the directory before touching the DB (a big listing is pure fs work).
+        val cutoff = s.clock.now() - orphanTtlMs
         val dirFiles = dir.listFiles()?.toList() ?: emptyList()
         val toUnlink = mutableListOf<String>()
         var removed = 0
-        val known = repo.db.tx { c ->
-            val candidates = c.queryAll(
-                "SELECT attachmentId, itemId FROM attachments WHERE createdAt < ?", cutoff,
-            ) { rs -> rs.getString(1) to rs.getString(2) }
+        val known = s.db.tx { c ->
+            val candidates = c.queryAll("SELECT attachmentId, itemId FROM attachments WHERE createdAt < ?", cutoff) { it.getString(1) to it.getString(2) }
             for ((aid, itemId) in candidates) {
-                val referenced = c.queryOne("SELECT attachmentIds FROM items WHERE itemId=? AND deleted=0", itemId) { rs ->
-                    decodeIds(rs.getString(1))
-                }?.contains(aid) ?: false
+                val referenced = c.queryOne("SELECT attachmentIds FROM items WHERE itemId=? AND deleted=0", itemId) { decodeIds(it.getString(1)) }?.contains(aid) ?: false
                 if (!referenced) {
                     c.exec("DELETE FROM attachments WHERE attachmentId=?", aid)
                     toUnlink += aid
                     removed++
                 }
             }
-            // Read AFTER the deletes so the just-orphaned ids are not "known" to the stray pass.
             c.queryAll("SELECT attachmentId FROM attachments") { it.getString(1) }.toSet()
         }
-        // Post-commit: drop ids whose row was re-committed (idempotent re-upload) while we
-        // held or released the lock — one short indexed-PK read, then unlink outside it.
-        val resurrected = repo.db.read { c -> toUnlink.filterTo(HashSet()) { rowById(c, it) != null } }
-        toUnlink.forEach { aid ->
-            if (aid in resurrected) return@forEach
-            val f = file(aid)
-            // Belt to the row re-check: a commit landing between the read above and this
-            // delete gave the file a fresh mtime — leave it; if it somehow ends up rowless
-            // again, a future sweep's stray pass takes it once past the TTL.
-            if (f.lastModified() < cutoff) f.delete()
-        }
-        // …then stray files (crash between file write and row insert, or failed rename).
-        // Files already unlinked above fail delete() and are not double-counted.
+        unlinkOrphaned(toUnlink)
         dirFiles.forEach { f ->
-            // ONE predicate: rowless AND past the TTL. In-flight .part files need no separate
-            // arm — ATT-1 names them "$attachmentId.<random>.part" (createTempFile above), so
-            // stripping the suffix leaves "$attachmentId.<random>", which is never a bare
-            // attachmentId in [known]; a stale .part therefore always falls through here, and
-            // a live one is held back by the same mtime cutoff.
-            val name = f.name.removeSuffix(".part")
-            if (name !in known && f.lastModified() < cutoff) {
-                if (f.delete()) removed++
-            }
+            val name = f.name.substringBefore('.')
+            if (name !in known && f.lastModified() < cutoff && f.delete()) removed++
         }
         return removed
     }
 
-    fun stats(c: Connection): Pair<Int, Long> =
-        c.queryOne("SELECT COUNT(*), COALESCE(SUM(size),0) FROM attachments") { rs -> rs.getInt(1) to rs.getLong(2) } ?: (0 to 0L)
+    fun stats(c: Connection): Pair<Long, Long> =
+        c.queryOne("SELECT COUNT(*), COALESCE(SUM(size),0) FROM attachments") { it.getLong(1) to it.getLong(2) } ?: (0L to 0L)
+}
+
+/** Per-account quotas (spec 03 §14.4): counted over the vaults the account OWNS; writers use the owner's. */
+object Quotas {
+    fun role(c: Connection, userId: String, vaultId: String): String? =
+        c.queryOne("SELECT role FROM grants WHERE userId=? AND vaultId=? AND revokedAt IS NULL", userId, vaultId) { it.getString(1) }
+
+    /** The owner of [vaultId]: its active owner grant, or (while deleted) the owner grant revoked by the delete. */
+    fun ownerOf(c: Connection, vaultId: String): String? =
+        c.queryOne(
+            "SELECT userId FROM grants WHERE vaultId=? AND role='owner' AND (revokedAt IS NULL OR revokedReason='vault_delete') ORDER BY revokedAt IS NOT NULL LIMIT 1",
+            vaultId,
+        ) { it.getString(1) }
+
+    /** Item ciphertext plus attachment bytes in the vaults [ownerId] owns. */
+    fun ownedBytes(c: Connection, ownerId: String): Long =
+        (c.queryOne(
+            """SELECT COALESCE(SUM(i.blobSize),0) FROM items i JOIN grants g ON g.vaultId=i.vaultId
+               WHERE g.userId=? AND g.role='owner' AND (g.revokedAt IS NULL OR g.revokedReason='vault_delete') AND i.deleted=0""",
+            ownerId,
+        ) { it.getLong(1) } ?: 0L) + (c.queryOne(
+            """SELECT COALESCE(SUM(a.size),0) FROM attachments a JOIN grants g ON g.vaultId=a.vaultId
+               WHERE g.userId=? AND g.role='owner' AND (g.revokedAt IS NULL OR g.revokedReason='vault_delete')""",
+            ownerId,
+        ) { it.getLong(1) } ?: 0L)
+
+    /** Live items across the vaults [ownerId] owns. */
+    fun ownedItems(c: Connection, ownerId: String): Long =
+        c.count(
+            """SELECT COUNT(*) FROM items i JOIN grants g ON g.vaultId=i.vaultId
+               WHERE g.userId=? AND g.role='owner' AND (g.revokedAt IS NULL OR g.revokedReason='vault_delete') AND i.deleted=0""",
+            ownerId,
+        )
+
+    /** Shared vaults [ownerId] owns, live or in grace. */
+    fun ownedSharedVaults(c: Connection, ownerId: String): Long =
+        c.count(
+            """SELECT COUNT(*) FROM grants g JOIN vaults v ON v.vaultId=g.vaultId
+               WHERE g.userId=? AND g.role='owner' AND v.type='shared' AND v.purgedAt IS NULL AND (g.revokedAt IS NULL OR g.revokedReason='vault_delete')""",
+            ownerId,
+        )
+
+    /** Links [creatorId] created that are still open and not yet expired at [nowMs]: what `POST /links` counts. */
+    fun openLinks(c: Connection, creatorId: String, nowMs: Long): Long =
+        c.count("SELECT COUNT(*) FROM links WHERE creatorUserId=? AND state='open' AND expiresAt>?", creatorId, nowMs)
+
+    /** Bytes stored in one vault (items and attachments), for an ownership transfer's quota check. */
+    fun vaultBytes(c: Connection, vaultId: String): Long =
+        (c.queryOne("SELECT COALESCE(SUM(blobSize),0) FROM items WHERE vaultId=? AND deleted=0", vaultId) { it.getLong(1) } ?: 0L) +
+            (c.queryOne("SELECT COALESCE(SUM(size),0) FROM attachments WHERE vaultId=?", vaultId) { it.getLong(1) } ?: 0L)
+
+    fun vaultItems(c: Connection, vaultId: String): Long = c.count("SELECT COUNT(*) FROM items WHERE vaultId=? AND deleted=0", vaultId)
 }

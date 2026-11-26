@@ -311,7 +311,7 @@ class VaultKeyNotVerifiedException(val vaultId: String) :
  * from a zeroed key. Deliberately NOT a [CryptoException]: the save ladders read that as "wrong master
  * password", and nothing about the password is wrong.
  */
-class AccountWipedException : IllegalStateException("the session ended and this account's keys were wiped")
+class AccountWipedException : io.silencelen.andvari.core.crypto.KeysGoneException("the session ended and this account's keys were wiped")
 
 /** §1.6: a v2 grant from a sender this account has not pinned (or whose pin is not current on this device). The
  *  vault is NOT adopted; [fromUserId] is unverified routing data naming whom to verify. */
@@ -353,6 +353,16 @@ class Account private constructor(
     /** Whether [wipe] has run: this account's keys are zeros and it seals nothing more. */
     val isWiped: Boolean get() = wiped
 
+    /**
+     * The refusal of a use that only READS a key (an open, a comparison, a hash of a held key): once
+     * wiped, the key is zeros, and an open under it would fail as if the data were damaged or the password wrong, or a
+     * hash of it would be taken for the key. It answers as the lock it is instead. Not under the lock: a wipe that lands
+     * after this check is still met by the shared floor at the open itself.
+     */
+    private fun refuseIfWiped() {
+        if (wiped) throw AccountWipedException()
+    }
+
     /** Runs [block] with the keys held against [wipe], and refuses once they are wiped. Never nested. */
     private inline fun <T> withKeys(block: () -> T): T = synchronized(keyLock) {
         if (wiped) throw AccountWipedException()
@@ -365,7 +375,10 @@ class Account private constructor(
      * on an unlock that built an account it never bound. Idempotent; never throws.
      *
      * After it, the methods that seal, sign or copy key material out throw [AccountWipedException]; one that was
-     * already running finishes first, on whole keys. Opening still fails closed, as any open under a wrong key does.
+     * already running finishes first, on whole keys. Every use that only reads a key refuses the same way:
+     * an item, a grant row, a personal wrap, the account state, a vault's meta or name, the usage ledger, the
+     * password proof against the UVK, and a held key's tag. The shared floor stays behind them for a wipe that lands
+     * between the check and the open.
      */
     fun wipe() {
         synchronized(keyLock) {
@@ -550,7 +563,12 @@ class Account private constructor(
         heldKeyTags[vaultId] = tagOf(vk)
     }
 
-    private fun tagOf(vk: ByteArray): String = Bytes.toHexLower(crypto.sha256(vk))
+    private fun tagOf(vk: ByteArray): String {
+        // Item 5: a held key's tag after a wipe is the tag of zeros, which the vouch gate would read as another key and
+        // [authorizeLegacyKey] would persist as a vouch.
+        refuseIfWiped()
+        return Bytes.toHexLower(crypto.sha256(vk))
+    }
 
     /**
      * The §8.2 / §8.6 decision for a v1-only key, routed through the graded [LegacyGrant.decide] (A6 review LOW-3;
@@ -819,6 +837,9 @@ class Account private constructor(
             val userId = verifyResponse.userId
             // 1. Recover the SAME UVK (fail-closed: wrong secret / wrong-or-tampered blob → AEAD tag fail).
             val uvk = MemberRecovery.openUvk(crypto, recoverySecret, verifyResponse.recoveryWrappedUvk, userId)
+            // Spec 01 §8 rule 4: a recovery copy that opens to a key of zeros recovers nothing. It fails closed as a copy
+            // that does not open, here, before anything is opened or sealed under it.
+            if (io.silencelen.andvari.core.crypto.KeyFloor.allZero(uvk)) throw CryptoException("the recovery copy opens to an all-zero key")
 
             // 2. Route through the SHARED unlock tail purely for its identity-pubkey hard-fail (§F.8):
             //    it opens encryptedIdentitySeed under the recovered UVK and refuses if the seed-derived
@@ -904,11 +925,15 @@ class Account private constructor(
                     throw VaultKeyDamagedException("wrappedUvk is not valid base64url", e)
                 }
                 Envelope.structuralRefusal(envelope)?.let { throw VaultKeyDamagedException("wrappedUvk: $it") }
-                try {
+                val opened = try {
                     Envelope.open(crypto, wrapKey, envelope, Ad.uvk(userId))
                 } catch (e: CryptoException) {
                     throw CryptoException("wrong master password")
                 }
+                // Spec 01 §8 rule 4: no account key is all zeros. The password opened the wrap, so this is not a wrong
+                // password: the account's keys are damaged, said here as that, never met later by the floor as "locked".
+                if (io.silencelen.andvari.core.crypto.KeyFloor.allZero(opened)) throw VaultKeyDamagedException("wrappedUvk opens to an all-zero key")
+                opened
             } finally {
                 wrapKey.fill(0)
             }
@@ -951,7 +976,13 @@ class Account private constructor(
             keys: AccountKeys,
             crypto: CryptoProvider = createCryptoProvider(),
             selfIdentityPub: ByteArray? = null,
-        ): Account = unlockFromUvk(userId, uvk, keys, crypto, selfIdentityPub)
+        ): Account {
+            // Spec 01 §8 rule 4: a key of zeros from the platform is not this account's key. It is said as the invalid
+            // quick-unlock secret it is (the caller wipes the blob and asks for the password), never met by the floor at
+            // the seed's open as though the account were locked.
+            if (io.silencelen.andvari.core.crypto.KeyFloor.allZero(uvk)) throw CryptoException("the quick-unlock key is an all-zero key")
+            return unlockFromUvk(userId, uvk, keys, crypto, selfIdentityPub)
+        }
 
         /**
          * Shared unlock tail (spec 01 §5) reached by BOTH [unlock] (after it recovers the UVK
@@ -997,6 +1028,9 @@ class Account private constructor(
             }
             Envelope.structuralRefusal(seedEnvelope)?.let { throw VaultKeyDamagedException("encryptedIdentitySeed: $it") }
             val identitySeed = Envelope.open(crypto, uvk, seedEnvelope, Ad.idkey(userId))
+            // Spec 01 §8 rule 4: a seed of zeros would derive keys every signature under them is refused for, as though
+            // the account were locked. The account's key opened it, so the account's keys are damaged: said here.
+            if (io.silencelen.andvari.core.crypto.KeyFloor.allZero(identitySeed)) throw VaultKeyDamagedException("encryptedIdentitySeed opens to an all-zero seed")
             // ZEROIZATION (audit H80): the seed's only job is to derive the keypairs the Account
             // holds — it never needs to be resident after that (a compromise of the seed IS a
             // compromise of the identity key, so it gets the same care as the MK). Both the X25519
@@ -1067,6 +1101,8 @@ class Account private constructor(
      * not open: that vault stays keyless (no seal fallback) and [keyUnreadable] says so.
      */
     fun addGrant(grant: WireGrant) {
+        // Item 5: under a wiped UVK and identity key no row opens, and the row would be marked unreadable or refused.
+        refuseIfWiped()
         if (grant.role.isNotEmpty()) vaultRoles[grant.vaultId] = grant.role
         val held = vaultKeys[grant.vaultId]
         if (held != null) {
@@ -1158,6 +1194,7 @@ class Account private constructor(
 
     /** Run §1.4 on the row's v2 grant ([SignedGrant.open]); [heldVk] only when held from our OWN wrap. */
     private fun openSigned(grant: WireGrant, heldVk: ByteArray?): GrantOutcome {
+        refuseIfWiped()
         val sealed = try {
             Bytes.fromB64(grant.signedGrant ?: "")
         } catch (e: CryptoException) {
@@ -1201,6 +1238,7 @@ class Account private constructor(
      * blob the server can mint.
      */
     private fun openGrantVk(grant: WireGrant): OpenedVk {
+        refuseIfWiped()
         val sealed = grant.sealedVk
         if (grant.wrappedVk.isNotEmpty()) {
             val vk = try {
@@ -1216,6 +1254,9 @@ class Account private constructor(
             // length is a buggy writer, not a substitution: it keeps the audit F32 CryptoException
             // classification (still terminal, still no seal fallback).
             if (vk.size != 32) throw CryptoException("vault key for ${grant.vaultId} is not 32 bytes")
+            // Spec 01, "Keys in memory and the lock", rule 4: a key of 32 zero bytes is no key. Refused where it is taken
+            // out, with the same classification as a wrong length; held, every open under it would read as a lock.
+            if (io.silencelen.andvari.core.crypto.KeyFloor.allZero(vk)) throw CryptoException("vault key for ${grant.vaultId} is all zeros")
             val sealVk = if (sealed.isNullOrEmpty()) null else openSealOrNull(grant.vaultId, sealed)
             // A v2 grant beside our wrap is compared too; only a VERIFIED one can disagree with it. A9 (L-2): a VERIFIED
             // one that agrees names the pinned sender who granted us the vault: authenticated member provenance.
@@ -1272,11 +1313,15 @@ class Account private constructor(
         throw CryptoException("grant for ${grant.vaultId} carries no key")
     }
 
-    private fun openSealOrNull(vaultId: String, sealed: String): ByteArray? =
-        runCatching { SharedGrant.open(crypto, identityPub, identityPriv, vaultId, Bytes.fromB64(sealed)) }.getOrNull()
+    private fun openSealOrNull(vaultId: String, sealed: String): ByteArray? {
+        refuseIfWiped() // item 5: outside the runCatching, so a wipe is a lock, never "the seal does not open"
+        // A wipe on another thread after the check is met by the floor at the open: a lock, passed through.
+        return io.silencelen.andvari.core.crypto.orNullUnlessLocked { SharedGrant.open(crypto, identityPub, identityPriv, vaultId, Bytes.fromB64(sealed)) }
+    }
 
     /** A re-delivered row for a vault whose key we hold: does any key it carries differ from it? */
     private fun rowCarriesOtherKey(grant: WireGrant, held: ByteArray): Boolean {
+        refuseIfWiped()
         val fromWrap = if (grant.wrappedVk.isEmpty()) null else runCatching {
             Envelope.openB64(crypto, uvk, grant.wrappedVk, Ad.vk(grant.vaultId, userId))
         }.getOrNull()
@@ -1408,6 +1453,7 @@ class Account private constructor(
      * relabelled `role=owner`. A server `type` label or `role` never reaches this decision.
      */
     fun applyPersonalWrap(wrap: PersonalWrap?) {
+        refuseIfWiped() // item 5: no personal-vault state is decided on a wiped account
         if (wrap == null) {
             if (personalStatus == PersonalStatus.ABSENT || personalStatus == PersonalStatus.UNREADABLE) {
                 personalStatus = PersonalStatus.ABSENT
@@ -1457,6 +1503,7 @@ class Account private constructor(
      * force without the CHANGED notice, because the human is the one who named the vault.
      */
     fun installDesignatedPersonalWrap(wrap: PersonalWrap) {
+        refuseIfWiped() // item 5
         check(openAndInstallPersonalWrap(wrap)) { "the designated personal wrap does not open" }
         pendingPersonalChange = null
         proposedAgainstDesignation = null
@@ -1514,6 +1561,7 @@ class Account private constructor(
      * does not name. Otherwise withholding or junk would put the cached wrap in force where serving it would not.
      */
     fun applyCachedPersonalWrap(wrap: PersonalWrap, designation: String? = null) {
+        refuseIfWiped() // item 5
         if ((personalStatus == PersonalStatus.ABSENT || personalStatus == PersonalStatus.UNREADABLE) && designation != null && designation != wrap.vaultId) {
             val vk = openPersonalWrap(wrap)
             if (vk == null) {
@@ -1550,6 +1598,7 @@ class Account private constructor(
      * wrap stands and the caller re-caches it).
      */
     fun holdPersonalChange(cached: PersonalWrap): Boolean {
+        refuseIfWiped() // item 5
         val served = personalWrap ?: return false
         if (personalStatus != PersonalStatus.CONFIRMED || cached.vaultId == served.vaultId) return false
         if (!openAndInstallPersonalWrap(cached)) return false // openAndInstall mutates only on success
@@ -1561,6 +1610,7 @@ class Account private constructor(
     /** The human confirmed a [PersonalStatus.CHANGED] notice or a [PersonalStatus.PROPOSED] wrap (A9): the served
      *  wrap (already authenticated under our UVK) is now in force. Mints nothing. */
     fun acceptPersonalChange() {
+        refuseIfWiped() // item 5
         val served = pendingPersonalChange ?: throw IllegalStateException("no personal-vault change is pending")
         check(personalStatus == PersonalStatus.CHANGED || personalStatus == PersonalStatus.PROPOSED) { "no personal-vault change is pending" }
         check(openAndInstallPersonalWrap(served)) { "the served personal wrap no longer opens" }
@@ -1578,8 +1628,14 @@ class Account private constructor(
         private set
 
     /** The VK a personal wrap opens to under our UVK with the `vk-personal` AD, or null. */
-    private fun openPersonalWrap(wrap: PersonalWrap): ByteArray? =
-        runCatching { Envelope.openB64(crypto, uvk, wrap.wrappedVk, Ad.vkPersonal(wrap.vaultId, userId)) }.getOrNull()?.takeIf { it.size == 32 }
+    private fun openPersonalWrap(wrap: PersonalWrap): ByteArray? {
+        // Item 5: under a wiped UVK no wrap opens, and the personal vault would be marked UNREADABLE; refuse as the lock.
+        refuseIfWiped()
+        // A wipe on another thread after the check is met by the floor at the open: a lock, passed through.
+        // A key of 32 zero bytes is no key (spec 01, "Keys in memory and the lock", rule 4): such a wrap does not open.
+        return io.silencelen.andvari.core.crypto.orNullUnlessLocked { Envelope.openB64(crypto, uvk, wrap.wrappedVk, Ad.vkPersonal(wrap.vaultId, userId)) }
+            ?.takeIf { it.size == 32 && !io.silencelen.andvari.core.crypto.KeyFloor.allZero(it) }
+    }
 
     /** Hold a key a personal wrap (ours, UVK-authentic) opened to, WITHOUT making its vault the personal one. */
     private fun holdKeyFromPersonalWrap(vaultId: String, vk: ByteArray) {
@@ -1615,7 +1671,10 @@ class Account private constructor(
         if (!keyFromOwnUvkWrap(vaultId)) throw CryptoException("vault $vaultId is not wrapped under this account's key")
         val vk = vk(vaultId)
         val wrapped = Envelope.sealB64(crypto, uvk, vk, Ad.vkPersonal(vaultId, userId))
-        if (!Envelope.openB64(crypto, uvk, wrapped, Ad.vkPersonal(vaultId, userId)).contentEquals(vk)) {
+        // Compared with the key without an early exit, and the opened copy zeroed.
+        val back = Envelope.openB64(crypto, uvk, wrapped, Ad.vkPersonal(vaultId, userId))
+        val same = try { Bytes.ctEquals(back, vk) } finally { back.fill(0) }
+        if (!same) {
             throw CryptoException("personal wrap failed round-trip verification")
         }
         PersonalWrap(vaultId, wrapped)
@@ -1633,6 +1692,7 @@ class Account private constructor(
      * v1 document for this user.
      */
     fun openAccountState(sealed: String): AccountStateDoc {
+        refuseIfWiped() // item 5: a lock, not a substituted blob
         val plain = Envelope.openB64(crypto, uvk, sealed, Ad.accountState(userId)).decodeToString()
         return AccountState.decode(userId, plain)
     }
@@ -1679,6 +1739,9 @@ class Account private constructor(
      * pre-session [deriveAuthKey] is for sign-in only. MK and the raw key are wiped on the way out (audit H80).
      */
     fun reauthAuthKey(password: String, keys: AccountKeys): String {
+        // Item 5: the proof compares with the UVK this session holds; once wiped that is zeros and every password would
+        // read as wrong. A lock is not a wrong password.
+        refuseIfWiped()
         KdfUpgrade.requireServerKdfParams(keys.kdfParams)
         if (!sessionSaltCurrent(keys)) throw ReauthStaleSessionException()
         // A9 review LOW-1: the salt check above is only a pre-check. A quick-unlock session (the UVK came from the
@@ -1711,7 +1774,9 @@ class Account private constructor(
                 return null
             }
             try {
-                if (!Bytes.ctEquals(opened, uvk)) return null
+                // Compared under the key lock: a wipe during the slow derivation above answers
+                // as the lock it is (AccountWipedException), never as a verdict on the password against a zeroed UVK.
+                if (!withKeys { Bytes.ctEquals(opened, uvk) }) return null
             } finally {
                 opened.fill(0)
             }
@@ -1732,6 +1797,7 @@ class Account private constructor(
     }
 
     fun verifyPassword(password: String, keys: AccountKeys): Boolean {
+        refuseIfWiped() // item 5, as [reauthAuthKey]
         // A6b review LOW-3: the same KDF floor/ceiling fence unlock applies (throws KdfPolicyViolationException), and
         // only the salt THIS session unlocked with: a replayed older AccountKeys (before a password change) carries
         // another salt and a wrap of the same UVK under the OLD password, which must never pass for it.
@@ -1800,7 +1866,13 @@ class Account private constructor(
     fun identityFingerprintFull(): String = SharedGrant.fingerprint(crypto, identityPub)
 
     /** Decrypt a vault's display name from its metaBlob (null when the VK is missing). */
-    fun decryptVaultName(vaultId: String, metaBlob: String): String? = runCatching {
+    fun decryptVaultName(vaultId: String, metaBlob: String): String? {
+        refuseIfWiped()
+        return metaName(vaultId, metaBlob)
+    }
+
+    /** [decryptVaultName]'s body, after the wipe check (item 5: outside the runCatching, so a lock is not "no name"). */
+    private fun metaName(vaultId: String, metaBlob: String): String? = runCatching {
         val plain = Envelope.openB64(crypto, vk(vaultId), metaBlob, Ad.vaultMeta(vaultId)).decodeToString()
         // spec 02 §4: only a JSON string is a name (web/extension parity — ItemDocShape.vaultName).
         ItemDocShape.vaultName(Json.parseToJsonElement(plain))
@@ -1844,7 +1916,10 @@ class Account private constructor(
     private fun roundTripWrap(vaultId: String, what: String): String = withKeys {
         val vk = vk(vaultId)
         val wrapped = Envelope.sealB64(crypto, uvk, vk, Ad.vk(vaultId, userId))
-        if (!Envelope.openB64(crypto, uvk, wrapped, Ad.vk(vaultId, userId)).contentEquals(vk)) {
+        // Compared with the key without an early exit, and the opened copy zeroed.
+        val back = Envelope.openB64(crypto, uvk, wrapped, Ad.vk(vaultId, userId))
+        val same = try { Bytes.ctEquals(back, vk) } finally { back.fill(0) }
+        if (!same) {
             throw CryptoException("$what failed round-trip verification")
         }
         wrapped
@@ -1859,6 +1934,7 @@ class Account private constructor(
      * [MalformedVaultMetaException]; a blob that does not open still throws as before.
      */
     fun decryptVaultMeta(vaultId: String, metaBlob: String): JsonObject {
+        refuseIfWiped() // item 5
         val plain = Envelope.openB64(crypto, vk(vaultId), metaBlob, Ad.vaultMeta(vaultId)).decodeToString()
         return runCatching { Json.parseToJsonElement(plain) }.getOrNull() as? JsonObject
             ?: throw MalformedVaultMetaException(vaultId)
@@ -1899,7 +1975,13 @@ class Account private constructor(
      * soft-hidden vaults after a restart, but a removed vault must never become writable
      * again through the display path. Null when the grant/blob doesn't open.
      */
-    fun peekVaultName(grant: WireGrant, metaBlob: String): String? = runCatching {
+    fun peekVaultName(grant: WireGrant, metaBlob: String): String? {
+        refuseIfWiped()
+        return peekName(grant, metaBlob)
+    }
+
+    /** [peekVaultName]'s body, after the wipe check (item 5). */
+    private fun peekName(grant: WireGrant, metaBlob: String): String? = runCatching {
         // Same canonical-key precedence as [addGrant] (root cause A §3.1): our UVK wrap wins,
         // and a damaged wrap is null here, never a seal fallback.
         val heldVk = openGrantVk(grant).vk
@@ -1925,8 +2007,10 @@ class Account private constructor(
 
     /** Open a ledger sealed by [sealUsage] — on this device or any other client. Throws on a
      *  wrong key or a substituted blob, which callers treat as "no ledger", never an empty one. */
-    fun openUsage(sealedUsage: String): ByteArray =
-        Envelope.openB64(crypto, UsageKey.usageKey(crypto, vk(personalVaultId)), sealedUsage, Ad.usage(userId))
+    fun openUsage(sealedUsage: String): ByteArray {
+        refuseIfWiped() // item 5: a lock, not "no ledger"
+        return Envelope.openB64(crypto, UsageKey.usageKey(crypto, vk(personalVaultId)), sealedUsage, Ad.usage(userId))
+    }
 
     /** itemId → highest formatVersion this session decrypted or sealed it at. Reseals take
      *  maxOf(docFloor, this): the server enforces per-item monotonic fv, so an edit must
@@ -2027,6 +2111,9 @@ class Account private constructor(
         Hkdf.sha256(crypto, uvk, ByteArray(0), "andvari local record v1|$purpose".encodeToByteArray(), 32)
 
     fun decryptItem(item: WireItem): ItemDoc {
+        // The suite's tripwire saw a sync overlay that outlived a lock (SessionControllerTest, an automatic
+        // save the lock overtook) open an item under the wiped vault key; the floor refused it. Refuse it here, as a lock.
+        if (wiped) throw AccountWipedException()
         val blob = item.blob ?: throw CryptoException("item has no blob (tombstone?)")
         // Fail closed on documents from a NEWER format: unknown-field preservation (spec 02
         // §3) is scoped WITHIN a formatVersion, and editing a v2 doc here would re-seal it

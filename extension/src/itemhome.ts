@@ -99,7 +99,7 @@ export function sealGate(keyHeld: boolean, home: string | null | undefined, vaul
   return sealDecision(home, vaultId);
 }
 
-/** The popup line for a resync that refused rows (core HouseholdCopy.WRONG_VAULT_NOTICE, byte-equal; empty for none). */
+/** Approved wording (the released extension's own words): the popup line for a resync that refused rows (core HouseholdCopy.WRONG_VAULT_NOTICE, byte-equal; empty for none). */
 export const WRONG_VAULT_LINE =
   "The server sent an item under the wrong vault. andvari kept the item where it was and ignored the other copy. Tell your admin — the server may be misbehaving.";
 

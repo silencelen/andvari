@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import * as esbuild from "esbuild";
 import { loginFillOverlayAllowed } from "./buildtarget.ts";
+import * as T from "./copy.ts";
 
 /** The content bundle as build.mjs makes it for [target] (release settings), in memory. */
 async function contentBundle(target: "chrome" | "firefox" | "safari"): Promise<string> {
@@ -19,7 +20,9 @@ async function contentBundle(target: "chrome" | "firefox" | "safari"): Promise<s
 }
 
 // What only the in-page login menu contains: its rows, and the message that asks the worker for a site's logins.
-const MENU_MARKS = ["Search all logins", "Use a strong password", 'type:"matches"'];
+/** A line's words up to its first character outside printable ASCII (the bundle writes those as escapes). */
+const asciiHead = (s: string): string => s.split(/[^\x20-\x7e]/)[0]!;
+const MENU_MARKS = [asciiHead(T.MENU_SEARCH_ALL), asciiHead(T.MENU_STRONG_PASSWORD), 'type:"matches"'];
 // What the save capture needs, on every target.
 const CAPTURE_MARKS = ['type:"capturedCredential"', 'type:"pendingSave"'];
 

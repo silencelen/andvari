@@ -9,4 +9,10 @@
     <exclude domain="sharedpref" path="andvari.xml" />
     <!-- A14 review N5: the device-local app-fill signer bindings. -->
     <exclude domain="sharedpref" path="andvari_app_signer_bindings.xml" />
+    <!-- Trusted browsers, the debug toggle and the fill log. -->
+    <exclude domain="sharedpref" path="andvari_trusted_browsers.xml" />
+    <exclude domain="sharedpref" path="andvari_autofill_debug.xml" />
+    <exclude domain="sharedpref" path="andvari_autofill_owner.xml" />
+    <exclude domain="file" path="autofill-last.json" />
+    <exclude domain="file" path="autofill-log.jsonl" />
 </full-backup-content>

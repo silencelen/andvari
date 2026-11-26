@@ -127,27 +127,93 @@ object AutofillDebugLog {
             val app = context.applicationContext
             // EVERYTHING below runs on the writer thread — including the armed check, so
             // even the first-ever SharedPreferences load never lands on the fill thread.
-            writer.execute {
-                runCatching {
-                    val line = json.encodeToString(FillEvent.serializer(), event)
-                    if (event.reason != FillReason.SELF_FILL.name) File(app.filesDir, LAST_FILE).writeText(line)
-                    val log = File(app.filesDir, LOG_FILE)
-                    if (!debugEnabled(app)) {
-                        log.delete() // disarmed/expired → purge, don't just stop appending
-                        return@execute
-                    }
-                    val lines = (if (log.exists()) log.readLines().filter { it.isNotBlank() } else emptyList()) + line
-                    log.writeText(lines.takeLast(RING_MAX).joinToString("\n", postfix = "\n"))
+            recordIn(app.filesDir, event) { debugEnabled(app) }
+        }
+    }
+
+    /** [record] into [filesDir], with [armed] read on the writer thread. */
+    internal fun recordIn(filesDir: File, event: FillEvent, armed: () -> Boolean) {
+        writer.execute {
+            runCatching {
+                val line = json.encodeToString(FillEvent.serializer(), event)
+                if (event.reason != FillReason.SELF_FILL.name) File(filesDir, LAST_FILE).writeText(line)
+                val log = File(filesDir, LOG_FILE)
+                if (!armed()) {
+                    log.delete() // disarmed/expired → purge, don't just stop appending
+                    return@execute
                 }
+                val lines = (if (log.exists()) log.readLines().filter { it.isNotBlank() } else emptyList()) + line
+                log.writeText(lines.takeLast(RING_MAX).joinToString("\n", postfix = "\n"))
             }
         }
     }
+
+    /**
+     * A line of another part of the app ([io.silencelen.andvari.app.EngineDiagnostics]) into the ring, on [writer] after
+     * every fill queued before, only while debugging is [armed]: the last fill's summary is never touched by it (the status
+     * screen's "most recent fill" stays a fill). Disarmed, nothing is written; the ring's own purge is [recordIn]'s.
+     */
+    internal fun noteIn(filesDir: File, event: FillEvent, armed: () -> Boolean) {
+        writer.execute {
+            runCatching {
+                if (!armed()) return@execute
+                val line = json.encodeToString(FillEvent.serializer(), event)
+                val log = File(filesDir, LOG_FILE)
+                val lines = (if (log.exists()) log.readLines().filter { it.isNotBlank() } else emptyList()) + line
+                log.writeText(lines.takeLast(RING_MAX).joinToString("\n", postfix = "\n"))
+            }
+        }
+    }
+
+    /**
+     * An account deletion leaves this phone as a fresh install: the last fill's summary and the ring go, and the debug
+     * toggle is off, in this process and the next. They hold no value, but they say which apps and sites the deleted
+     * account filled on. A sign-out leaves them, as before.
+     */
+    fun forget(context: Context) {
+        runCatching {
+            val app = context.applicationContext
+            debugPrefs(app).edit().remove(K_DEBUG_UNTIL).commit()
+            forgetIn(app.filesDir)
+        }
+    }
+
+    /** [forget]'s files and the toggle's cached expiry; the files go on the writer thread, after every fill queued before. */
+    internal fun forgetIn(filesDir: File) {
+        debugUntilCache = 0L
+        writer.execute {
+            runCatching { File(filesDir, LAST_FILE).delete() }
+            runCatching { File(filesDir, LOG_FILE).delete() }
+        }
+    }
+
+    /** Waits until every write queued so far has run (tests). */
+    internal fun awaitWrites() {
+        writer.submit {}.get(10, java.util.concurrent.TimeUnit.SECONDS)
+    }
+
+    /** Whether the toggle's cached expiry says on now, without reading its preferences (tests). */
+    internal fun armedByCache(): Boolean = debugUntilCache > System.currentTimeMillis()
+
+    /** Arms the toggle's cached expiry only, as [setDebugUntil] does for this process (tests). */
+    internal fun armCacheUntil(until: Long) {
+        debugUntilCache = until
+    }
+
+    /**
+     * The toggle's expiry has its own preferences file, so a fill never constructs the old
+     * path's SessionStore (whose constructor runs the old store's migrations inside the new app).
+     */
+    private fun debugPrefs(context: Context) = context.applicationContext.getSharedPreferences(DEBUG_PREFS, Context.MODE_PRIVATE)
+
+    private const val DEBUG_PREFS = "andvari_autofill_debug"
+    private const val K_DEBUG_UNTIL = "debugUntil"
 
     /** True while the "Debug autofill (24h)" toggle is on and unexpired. */
     fun debugEnabled(context: Context): Boolean = runCatching {
         var until = debugUntilCache
         if (until == Long.MIN_VALUE) {
-            until = SessionStore(context.applicationContext).autofillDebugUntil
+            until = debugPrefs(context).getLong(K_DEBUG_UNTIL, 0L)
             debugUntilCache = until
         }
         until > System.currentTimeMillis()
@@ -158,35 +224,24 @@ object AutofillDebugLog {
     fun setDebugUntil(context: Context, until: Long) {
         runCatching {
             val app = context.applicationContext
-            SessionStore(app).autofillDebugUntil = until
+            debugPrefs(app).edit().putLong(K_DEBUG_UNTIL, until).apply()
             debugUntilCache = until
             if (until <= System.currentTimeMillis()) writer.execute { runCatching { File(app.filesDir, LOG_FILE).delete() } }
         }
     }
 
-    /**
-     * Account deletion (spec 03 §13: the phone is left as a fresh install): the last fill's summary and the ring go, and
-     * the debug toggle is off. They hold no value, but they say which apps and sites the deleted account filled on.
-     */
-    fun forget(context: Context) {
-        runCatching {
-            val app = context.applicationContext
-            SessionStore(app).autofillDebugUntil = 0L
-            debugUntilCache = 0L
-            writer.execute {
-                runCatching { File(app.filesDir, LAST_FILE).delete() }
-                runCatching { File(app.filesDir, LOG_FILE).delete() }
-            }
-        }
-    }
-
     // ---- status-screen reads ----
 
-    fun lastEvent(context: Context): FillEvent? = runCatching {
-        val f = File(context.filesDir, LAST_FILE)
+    fun lastEvent(context: Context): FillEvent? = lastEventIn(context.filesDir)
+
+    internal fun lastEventIn(filesDir: File): FillEvent? = runCatching {
+        val f = File(filesDir, LAST_FILE)
         if (!f.exists()) return null
         json.decodeFromString(FillEvent.serializer(), f.readText())
     }.getOrNull()
+
+    /** The ring's file in [filesDir] (it may not exist). */
+    internal fun ringFileIn(filesDir: File): File = File(filesDir, LOG_FILE)
 
     /** The raw ring buffer (jsonl) — "" (and the file purged) unless debug is armed NOW. */
     fun ringText(context: Context): String = runCatching {

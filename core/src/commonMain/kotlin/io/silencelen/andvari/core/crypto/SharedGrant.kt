@@ -59,6 +59,10 @@ object SharedGrant {
         if (payload.vaultId != expectedVaultId) throw CryptoException("shared grant vaultId mismatch")
         val vk = Bytes.fromB64(payload.vk)
         if (vk.size != 32) throw CryptoException("shared grant VK is not 32 bytes")
+        // Spec 01, "Keys in memory and the lock", rule 4: no key is all zeros. Anyone holding the member's public key can
+        // make a v1 seal, the server included, so a vault key of 32 zero bytes is refused here as a grant that carries no
+        // key: held, it would make every later open under it a refusal of the key floor, read as a lock.
+        if (KeyFloor.allZero(vk)) throw CryptoException("shared grant VK is all zeros")
         return vk
     }
 

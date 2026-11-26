@@ -12,15 +12,17 @@ import android.service.autofill.SaveCallback
 import android.service.autofill.SaveRequest
 import android.view.autofill.AutofillManager
 import android.view.inputmethod.InlineSuggestionsRequest
-import io.silencelen.andvari.app.SessionStore
-import io.silencelen.andvari.app.VaultSession
+import io.silencelen.andvari.app.trust.Placeholder
+import io.silencelen.andvari.app.trust.TrustSeam
+import io.silencelen.andvari.app.trust.UiText
 import io.silencelen.andvari.core.client.autofill.BrowserCertPins
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Fill-only AutofillService (spec design §4). The whole fill path is synchronous and
- * in-memory: matched credentials come from the already-decrypted [VaultSession] working
- * set (durable offline cache), so there is no network and no suspend work in a callback.
+ * in-memory: matched credentials come from the app's own session on the new code, the vault
+ * content's working set ([ContentFillSession], [ContentFill]), so there is no network and no
+ * suspend work in a callback. A save is sealed and queued for the app ([AutofillSave]), on the new code too.
  *
  * Safety rails (binding):
  * - The entire onFillRequest body is wrapped in runCatching → onSuccess(null): a thrown
@@ -46,7 +48,9 @@ class AndvariAutofillService : AutofillService() {
                 trace.finish(applicationContext, AutofillDebugLog.FillReason.EXCEPTION, AutofillDebugLog.exceptionDetail(t))
             }
             .getOrNull()
-        // onSuccess(null) is the correct "no suggestions" reply; a failure degrades to it too.
+        // onSuccess(null) is the correct "no suggestions" reply; a failure degrades to it too. Its time is the time of
+        // the offer that the platform's record of a pick, read at the next request, is about.
+        FillPicks.replied(System.currentTimeMillis())
         callback.onSuccess(response)
     }
 
@@ -65,18 +69,20 @@ class AndvariAutofillService : AutofillService() {
             return null
         }
 
-        // No auth row for a signed-out device (e.g. after revocation) — the unlock activity
-        // would have no email/tokens to work with (a dead end inside another app's fill flow).
-        val store = SessionStore(applicationContext)
-        val session = store.load()
-        if (session == null || session.accessToken.isEmpty()) {
+        // The new code: the app's own session (ContentFillSession), after its idle lock had its say.
+        // No auth row for a signed-out device (e.g. after revocation): the unlock activity would have
+        // no account to unlock (a dead end inside another app's fill flow).
+        val access = ContentFillSession.access(ctx)
+        if (access is ContentFillSession.Access.SignedOut) {
             trace.finish(ctx, AutofillDebugLog.FillReason.SIGNED_OUT)
             return null
         }
-
-        // Belt-and-suspenders: make sure the process-wide auto-lock gate carries the
-        // last-known policy window even if no other component set it in this process.
-        VaultSession.setAutoLockSeconds(store.autoLockSeconds)
+        // What the person picked from the last response, by the platform's own record: one use for each row picked
+        // (those rows were read without recording). The platform clears its record at every reply, a form with no
+        // field included, so it is read here, before any reply. Locked: the pick is not recorded (nothing is open).
+        if (access is ContentFillSession.Access.Open) {
+            runCatching { ContentFill.recordPicked(access.content, FillPicks.picked(FillPicks.eventsOf(fillEventHistory)), FillPicks.lastReplyAtMs) }
+        }
 
         // The focused view comes from the system's FillContext (security review 2026-10): card values
         // are planned for that field's frame only (ParsedForm.cardFillFrame).
@@ -92,21 +98,21 @@ class AndvariAutofillService : AutofillService() {
             if (Build.VERSION.SDK_INT >= 30) request.inlineSuggestionsRequest else null
         trace.inline = inlineRequest != null
 
-        // Snapshot the session ONCE; a concurrent lock() cannot NPE this reference, at worst
-        // it makes the in-memory read slightly stale. getIfFresh enforces the inactivity
-        // auto-lock (spec 01 §8): an idle-expired vault is locked here and the user gets
-        // the unlock row instead of a silent credential fill.
+        // The access was read ONCE above, after the idle lock (spec 01 §8): an idle-expired vault
+        // was locked there and the user gets the unlock row instead of a silent credential fill.
+        // Only the content's working set is read: never a vault that is not accepted, frozen or failed.
         val trusted = TrustedBrowsers.isTrusted(this, appPackage)
-        val unlocked = VaultSession.getIfFresh()
-        return if (unlocked == null) {
+        return if (access !is ContentFillSession.Access.Open) {
             lockedResponse(form, inlineRequest, trusted).also { trace.finish(ctx, AutofillDebugLog.FillReason.LOCKED_ROW_SHOWN) }
         } else {
-            // F12: in an autofill-only process nothing else observes idle expiry — (re)arm
-            // the delayed hard-lock so the keys this serve just used don't linger in RAM
-            // past the policy window (no-op when auto-lock is disabled).
-            AutofillHardLock.arm()
+            // F12: in the background nothing else observes idle expiry; (re)arm the delayed
+            // hard-lock so the vault this serve read does not stay open past the policy window.
+            ContentFillSession.HardLock.arm(ctx)
+            // Offers, not releases: an item's values are asked for only for a row that must carry them.
+            val content = access.content
             DatasetBuilder.buildUnlockedResponse(
-                this, unlocked.engine.items(), form, trusted, inlineRequest, trace,
+                this, ContentFill.offersFor(content, form, trusted), form, trusted, inlineRequest, trace, throughApp = false,
+                release = { id -> ContentFill.release(content, id) },
             ).also { trace.finishFromBuild(ctx) }
         }
     }
@@ -143,7 +149,8 @@ class AndvariAutofillService : AutofillService() {
         }
         // Same trust rule as the unlocked path: no save prompt in an untrusted known browser (a saved
         // web login couldn't fill there). Native apps + trusted browsers get it.
-        if (form.appPackage !in BrowserCertPins.TABLE || trusted) DatasetBuilder.saveInfoFor(form)?.let { b.setSaveInfo(it) }
+        // Only while saving runs on the new code and the session takes saves (DatasetBuilder.offersSave).
+        if (DatasetBuilder.offersSave(form.appPackage, trusted, AutofillSave.takesSaves(this), DatasetBuilder.isWebPage(form))) DatasetBuilder.saveInfoFor(form)?.let { b.setSaveInfo(it) }
         return b.build()
     }
 
@@ -156,22 +163,32 @@ class AndvariAutofillService : AutofillService() {
      * callback would crash the host app's process (never-crash rail).
      */
     override fun onSaveRequest(request: SaveRequest, callback: SaveCallback) {
-        val launched = runCatching {
-            val structure = request.fillContexts.lastOrNull()?.structure ?: return@runCatching false
-            val intent = Intent(this, SaveConfirmActivity::class.java)
-                .putExtra(AutofillManager.EXTRA_ASSIST_STRUCTURE, structure)
-            // IMMUTABLE (least privilege): unlike the fill-auth PI, the save PI already carries the
-            // structure and the framework injects nothing into the save IntentSender.
-            val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_CANCEL_CURRENT
-            val pi = PendingIntent.getActivity(this, nextRequestCode(), intent, flags)
-            callback.onSuccess(pi.intentSender) // framework launches the confirm activity after the save UI dismisses
-            true
-        }.getOrDefault(false)
-        if (!launched) runCatching { callback.onSuccess() } // couldn't stage the activity → clean no-op, never a crash
+        // The new code (AutofillSave): the submitted login is sealed to the account's published key and queued for the
+        // app, which saves or lists it at the next unlock or return to the foreground. No vault is opened here and
+        // nothing is written to one. runCatching: a throw in this callback would crash the process (never-crash rail).
+        val outcome = runCatching {
+            val structure = request.fillContexts.lastOrNull()?.structure ?: return@runCatching null
+            val raw = SaveExtractor.extract(structure)
+            if (raw.appPackage == packageName) return@runCatching null // never our own screens
+            // An untrusted caller's domain claim never names the capture (the fill's rule): androidapp://<pkg> instead.
+            val verifiedBrowser = TrustedBrowsers.isTrusted(this, raw.appPackage)
+            val creds = launderUntrustedCapture(raw, verifiedBrowser)
+            AutofillSave.capture(TrustSeam.saveQueue(this), TrustSeam.crypto(this), creds, verifiedBrowser, AutofillSave.session(this), System.currentTimeMillis())
+        }.getOrNull()
+        runCatching { callback.onSuccess() }
+        outcome?.let { o -> runCatching { android.widget.Toast.makeText(applicationContext, saveWords(o).shown(), android.widget.Toast.LENGTH_SHORT).show() } }
     }
 
     private companion object {
         private val requestCounter = AtomicInteger(1)
         fun nextRequestCode(): Int = requestCounter.getAndIncrement()
     }
+}
+
+/** What the person is told after "Save to andvari?" (a toast: the save UI has gone, and nothing else is on screen). */
+internal fun saveWords(o: AutofillSave.Outcome): UiText = when (o) {
+    AutofillSave.Outcome.QUEUED -> UiText.ph(Placeholder.SAVE_QUEUED)
+    AutofillSave.Outcome.NOT_SIGNED_IN -> UiText.ph(Placeholder.SAVE_NOT_SIGNED_IN)
+    AutofillSave.Outcome.NOT_NOW -> UiText.ph(Placeholder.SAVE_NOT_NOW)
+    AutofillSave.Outcome.REFUSED -> UiText.ph(Placeholder.SAVE_REFUSED)
 }

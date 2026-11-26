@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { toB64 } from "../crypto/bytes";
 import { randomBytes } from "../crypto/provider";
@@ -57,5 +58,21 @@ describe("self-identity pin bound to the typed email (A11, q08)", () => {
   it("a corrupt binding reads as absent", () => {
     mem.set("andvari.selfIdentityByEmail.ann@example.com", "garbage");
     expect(loadSelfIdentityPub(FORGED, "ann@example.com")).toBeNull();
+  });
+
+  it("the binding is keyed by the shared §2.2 address grammar (emailNorm), not a trim-and-lowercase of its own", () => {
+    recordSelfIdentityPub(U1, acct, "\tAnn@EXAMPLE.com\r\n");
+    expect([...mem.keys()]).toContain("andvari.selfIdentityByEmail.ann@example.com");
+    expect(() => loadSelfIdentityPub(FORGED, "ann@example.com")).toThrow(IdentityMismatchError);
+    // A string the grammar refuses is not an address: nothing is bound under it, so it cannot collide with one that is
+    // (a trim-and-lowercase folded the non-ASCII "K" (Kelvin sign) into "k").
+    const before = mem.size;
+    recordSelfIdentityPub(FORGED, acct, "ann@examplK.com");
+    expect([...mem.keys()].filter((k) => k.startsWith("andvari.selfIdentityByEmail.")).length).toBe(1);
+    expect(mem.size).toBe(before + 1); // only the userId-keyed pin
+    expect(() => loadSelfIdentityPub(FORGED, "ann@examplK.com")).not.toThrow();
+    const src = readFileSync(new URL("./selfidentity.ts", import.meta.url), "utf8");
+    expect(src).toContain('import { emailNorm } from "../crypto/trust/grammar";');
+    expect(src).not.toMatch(/toLowerCase\(/);
   });
 });

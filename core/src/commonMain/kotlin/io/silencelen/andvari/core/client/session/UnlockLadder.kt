@@ -259,6 +259,9 @@ class UnlockLadder(
             // H10: bounded, since it runs under the mutex; a stall reads as offline and opens on the cached keys.
             runBounded(BoundedOps.FLAT_MS) { api.accountKeys() }.also {
                 online = true
+                // Design §2.2, strict decoding: keys served in another form than the canonical one are neither kept nor
+                // opened (a failure, never the offline fallback).
+                io.silencelen.andvari.core.client.onboard.ServedKeyForm.requireCanonical(it)
                 binder.persistAccountKeys(originKey, stored.userId, it)
             }
         } catch (e: IOException) {

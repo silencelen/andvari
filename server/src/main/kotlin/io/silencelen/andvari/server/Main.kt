@@ -3,23 +3,67 @@ package io.silencelen.andvari.server
 import io.ktor.server.engine.connector
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
+import kotlin.system.exitProcess
 
-fun main() {
-    // §2.1 env lint: WARN on unknown/invalid ANDVARI_* (typo'd/renamed vars silently defaulting is
-    // exactly how an operator stance fails to apply); under ANDVARI_STRICT_ENV=1, EXIT — bringup.sh
-    // sets strict so a bad env kills boot and fails the healthz wait (B2-1). Notes (deprecated
-    // ANDVARI_INVITE_BASE_URL alias in use, signupMode `open`→`landing` coercion §7.3) warn only.
-    val lint = Config.envLint(System.getenv())
-    lint.notes.forEach { System.err.println("[andvari] env: $it") }
-    lint.problems.forEach { System.err.println("[andvari] env WARNING: $it") }
-    if (Config.parseBool(System.getenv("ANDVARI_STRICT_ENV")) == true && lint.problems.isNotEmpty()) {
-        System.err.println("[andvari] ANDVARI_STRICT_ENV=1 — refusing to start with ${lint.problems.size} env problem(s)")
-        kotlin.system.exitProcess(1)
+/**
+ * `andvari` (the server image's one program): no arguments or `server` runs the server; `setup` and
+ * `admin` are the host commands of spec 03 §7.4 and design §9.5.
+ */
+fun main(args: Array<String>) {
+    when (args.firstOrNull()) {
+        null, "server" -> serve()
+        "setup", "admin" -> exitProcess(HostCli.run(args.toList()))
+        else -> {
+            System.err.println("usage: andvari [server] | andvari setup [options] | andvari admin <command>")
+            exitProcess(2)
+        }
     }
-    val config = Config.fromEnv()
-    val notifier = Notifier()
-    val services = buildServices(config, notifier)
-    System.err.println("[andvari] server listening on ${config.host}:${config.port} (escrow configured: ${config.escrowConfigured})")
+}
+
+/**
+ * What the server prints when it starts. Test mode gets a loud line of its own: it is
+ * refused off a loopback http origin, but an operator who left it on must still see it in the log.
+ */
+internal fun startupLines(config: Config): List<String> = buildList {
+    if (config.testMode) {
+        add("[andvari] ************************************************************************")
+        add("[andvari] TEST MODE IS ON (ANDVARI_TEST_MODE=1): for automated tests only, never for real accounts.")
+        config.mailSinkDir?.let { add("[andvari] TEST MODE: mail is written to $it, not sent") }
+        config.testClockFile?.let { add("[andvari] TEST MODE: the clock is read from $it") }
+        add("[andvari] ************************************************************************")
+    }
+    add("[andvari] ${config.instanceKind} instance at ${config.canonicalOrigin}, listening on ${config.host}:${config.port}")
+}
+
+private fun serve() {
+    val problems = Config.envLint(System.getenv())
+    problems.forEach { System.err.println("[andvari] env WARNING: $it") }
+    if (Config.parseBool(System.getenv("ANDVARI_STRICT_ENV")) == true && problems.isNotEmpty()) {
+        System.err.println("[andvari] ANDVARI_STRICT_ENV=1: refusing to start with ${problems.size} env problem(s)")
+        exitProcess(1)
+    }
+    val config = try {
+        Config.fromEnv()
+    } catch (e: ConfigError) {
+        System.err.println("[andvari] refusing to start: ${e.message}")
+        exitProcess(1)
+    }
+    // Which file is at the database's path before the database is opened: the line in `server.lock` names a file only
+    // where the file there when the line is written is this one (ServerLock).
+    val before = ServerLock.keyBeforeOpen(config.dbPath)
+    val services = try {
+        buildServices(config)
+    } catch (e: IncompatibleDatabase) {
+        System.err.println("[andvari] refusing to start: ${e.message}")
+        exitProcess(1)
+    }
+    // The database is open, decided, in write-ahead mode and caught up: from here until this process ends, the two parts
+    // of the lock on `server.lock` and the line written between them say that a running server holds that database file
+    // (`andvari admin backup` keeps a snapshot only then). This is the one place in the server's process that opens that
+    // file: the lock belongs to the process, and closing another opening of the same file here would let go of it
+    // (ServerLock).
+    ServerLock.take(config.dbPath, before)?.let { System.err.println(it) }
+    startupLines(config).forEach { System.err.println(it) }
     embeddedServer(
         Netty,
         configure = {
@@ -27,13 +71,7 @@ fun main() {
                 host = config.host
                 port = config.port
             }
-            // 0 = off by standing decision — see Config.requestReadTimeoutSeconds for why it
-            // is not a "pending verification". An operator enables it (300 s) via
-            // ANDVARI_REQUEST_READ_TIMEOUT_S once idle-WS survival is confirmed on their own
-            // deployment.
             requestReadTimeoutSeconds = config.requestReadTimeoutSeconds
-            // 0 = off (override Netty's 10 s default, which truncates slow large-file
-            // downloads mid-body). See Config.responseWriteTimeoutSeconds.
             responseWriteTimeoutSeconds = config.responseWriteTimeoutSeconds
         },
     ) {

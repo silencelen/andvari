@@ -35,7 +35,7 @@ object TrustedBrowsers {
     fun observedCertDigest(context: Context, pkg: String): String? {
         val sig = signingCerts(context, pkg) ?: return null
         val md = MessageDigest.getInstance("SHA-256")
-        return sig.firstOrNull()?.let { Base64.encodeToString(md.digest(it.toByteArray()), Base64.NO_WRAP) }
+        return observedDigestOf(sig.map { Base64.encodeToString(md.digest(it.toByteArray()), Base64.NO_WRAP) })
     }
 
     /**
@@ -49,8 +49,35 @@ object TrustedBrowsers {
         val signatures = signingCerts(context, pkg) ?: return false
         val md = MessageDigest.getInstance("SHA-256")
         val digests = signatures.map { Base64.encodeToString(md.digest(it.toByteArray()), Base64.NO_WRAP) }
-        return BrowserCertPins.isTrusted(pkg, digests, ApprovedBrowsers.approvedDigest(context, pkg))
+        return decide(pkg, digests, ApprovedBrowsers.approvedDigest(context, pkg))
     }
+
+    /**
+     * The trust rule over plain values: an id with a pinned certificate is trusted ONLY by
+     * its pin, never by an approval on this device (a look-alike under `com.android.chrome` on a phone without Chrome
+     * is a mismatch, not a browser to approve); an id with no pin is trusted only by an approval of exactly the signer
+     * it carries now.
+     */
+    internal fun decide(pkg: String, observedDigests: List<String>, approvedDigest: String?): Boolean {
+        val pins = PINS[pkg] ?: return false
+        return BrowserCertPins.isTrusted(pkg, observedDigests, if (pins.isEmpty()) approvedDigest else null)
+    }
+
+    /**
+     * A browser is trusted by its CURRENT signer. The signing
+     * history lists every key the app was ever signed with, oldest first; only its last entry signs the app now (or,
+     * for an app signed by several keys at once, all of its content signers). An approval given to one signer does not
+     * cover another that only appears in the history: after a browser's key rotation the person is asked again (the
+     * trust card's "signer changed"), and an APK signed with the retired key alone is not the browser that was approved.
+     * The pin table is read against the current signer the same way.
+     */
+    internal fun <T> currentSigners(multipleSigners: Boolean, contents: List<T>, history: List<T>): List<T> = when {
+        multipleSigners -> contents
+        else -> listOfNotNull(history.lastOrNull())
+    }
+
+    /** The digest the trust card shows and an approval stores: the current signer's ([currentSigners]). */
+    internal fun observedDigestOf(current: List<String>): String? = current.firstOrNull()
 
     private fun signingCerts(context: Context, pkg: String): Array<android.content.pm.Signature>? {
         return try {
@@ -58,7 +85,7 @@ object TrustedBrowsers {
             if (Build.VERSION.SDK_INT >= 28) {
                 val info = pm.getPackageInfo(pkg, PackageManager.GET_SIGNING_CERTIFICATES)
                 val si = info.signingInfo ?: return null
-                if (si.hasMultipleSigners()) si.apkContentsSigners else si.signingCertificateHistory
+                currentSigners(si.hasMultipleSigners(), si.apkContentsSigners?.toList().orEmpty(), si.signingCertificateHistory?.toList().orEmpty()).toTypedArray()
             } else {
                 @Suppress("DEPRECATION")
                 pm.getPackageInfo(pkg, PackageManager.GET_SIGNATURES).signatures

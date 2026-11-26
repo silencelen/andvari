@@ -65,7 +65,9 @@ jobs:
         run: npx tsc --noEmit
 
       # vitest FAILS when it collects nothing ("No test files found"), so unlike the extension leg
-      # below this needs no count floor of its own.
+      # below this needs no count floor of its own. The web journeys (src/journeys/) skip themselves
+      # here: they run the server and the command-line module from Gradle output, which this runner
+      # does not build (see above), so they run in the local scripts/verify.sh only.
       - name: Tests
         working-directory: web
         run: npx vitest run
@@ -93,7 +95,7 @@ jobs:
         run: npm run typecheck
 
       # `node --test` EXITS 0 WHEN IT COLLECTED NOTHING — it prints `1..0` and reports success for a
-      # glob that matches no file. That is the failure mode verify.sh:190-212 exists to catch, and a
+      # glob that matches no file. That is the failure mode the extension leg of scripts/verify.sh exists to catch, and a
       # CI job that only checks the exit code would report green over an extension suite that had
       # moved directories or been renamed off *.test.ts, including the extension's ONLY cross-engine
       # crypto proof (crypto.vectors.test.ts) and its entire signed-update suite. Mirror the gate's

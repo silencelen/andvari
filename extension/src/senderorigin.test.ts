@@ -59,9 +59,10 @@ test("capturedCredential takes its host and uri from sender.origin, and the page
 
 test("matches and pageInfo match the sender's origin host, not the frame's claim", () => {
   const m = spanOf(bg, 'case "matches": {', 'case "allItems": {');
-  assert.ok(m.includes("requestHost(sender.tab !== undefined, sender.origin, msg.host)"), "matches binds to sender.origin");
+  // F4: by the page (origin, scheme included), from the same browser-set source.
+  assert.ok(m.includes("requestPage(sender.tab !== undefined, sender.origin, msg.host)"), "matches binds to sender.origin");
   const p = spanOf(bg, 'case "pageInfo": {', "const tabId = sender.tab?.id;");
-  assert.ok(p.includes("requestHost(sender.tab !== undefined, sender.origin, msg.host)"), "pageInfo binds to sender.origin");
+  assert.ok(p.includes("requestPage(sender.tab !== undefined, sender.origin, msg.host)"), "pageInfo binds to sender.origin");
   assert.ok(!/matchesFor\(msg\.host\)/.test(bg), "no handler matches on a page-supplied host");
 });
 
@@ -99,7 +100,7 @@ test("a sub-frame, an unknown frame, or a page that is not a web page gets no or
 
 test("the Safari build reads every tab sender through the derivation, at the one message entry point", () => {
   const entry = bg.slice(bg.indexOf('atLoad("runtime.onMessage"'), bg.indexOf('atLoad("alarms.onAlarm"'));
-  assert.match(entry, /handle\(msg, withPageOrigin\(sender\)\)/);
+  assert.match(entry, /handle\(msg, withPageOrigin\(sender\), due\)/); // `due`, the lock's deadline check
   const fn = bg.slice(bg.indexOf("function withPageOrigin("), bg.indexOf("function withPageOrigin(") + 1400);
   assert.match(fn, /if \(BUILD_TARGET !== "safari" \|\| sender\.tab === undefined\) return sender;/, "other builds and the extension's own pages are untouched");
   assert.match(fn, /derivedPageOrigin\(sender\)/);

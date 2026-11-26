@@ -48,7 +48,7 @@ class A14AppFillGateTest {
         val confirm = builder.substring(builder.indexOf("private fun confirmDataset("), builder.indexOf("fun appLoginResultDataset("))
         assertTrue(confirm.contains("b.setValue(id, null)"), "the confirm row carries no credential value")
         assertFalse(confirm.contains("AutofillValue.forText"), "no value is set on a confirm row")
-        assertTrue(confirm.contains("AppFillBinding.bake(FillBinding.bake(Intent(context, AppFillConfirmActivity::class.java), form), appGate, row.itemId)"))
+        assertTrue(confirm.contains("AppFillBinding.bake(FillBinding.bake(Intent(context, AppFillConfirmActivity::class.java), form), appGate, row.itemId, row.pageDomain)"))
         assertTrue(confirm.contains("b.setAuthentication(pi.intentSender)"))
     }
 
@@ -98,7 +98,8 @@ class A14AppFillGateTest {
         assertTrue(lookup.contains("TextUtils.makeSafeForPresentation("), "labels go through the platform's presentation sanitizer")
         assertTrue(lookup.contains("TextUtils.SAFE_STRING_FLAG_SINGLE_LINE"))
         val activity = src("autofill/AppFillConfirmActivity.kt")
-        val card = activity.substring(activity.indexOf("private fun ConfirmCard("))
+        // Internal: andvari's own chooser shows the same card.
+        val card = activity.substring(activity.indexOf("internal fun ConfirmCard("))
         assertTrue(card.contains("AppFillGate.oneLine(id.label)"), "the label is escaped onto one bounded line")
         assertTrue(card.contains("AppFillGate.installerLine(id.installer, id.installerSystem)"), "the installer's package and system flag")
         // A14 review 3 (A1): the package and kind are a line that carries no label and is never ellipsized, so no label

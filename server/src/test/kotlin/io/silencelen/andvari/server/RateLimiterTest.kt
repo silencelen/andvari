@@ -83,4 +83,66 @@ class RateLimiterTest {
         Thread.sleep(25)
         assertTrue(rl.allow("ticks", 1, 1), "the default clock must ADVANCE — a frozen one never reopens the window")
     }
+
+    /**
+     * spec 03 §0.1, §0.2: a `429`'s wait is never shorter than the real one. A device bucket's two windows start at
+     * different times; when the device's budget refuses while the account's ceiling is full too and lasts longer, the
+     * wait named is the ceiling's. Naming the device's alone sent the client back while the ceiling still refused it.
+     */
+    @Test
+    fun aDeviceRefusal_namesTheCeilingsLongerWait_whenTheCeilingIsFullToo() {
+        val clock = FakeClock()
+        val rl = RateLimiter(clock)
+        val b = Bucket.devicePerMinute("t", 5)
+        fun spend(device: String, n: Int, account: String = "u") = repeat(n) { assertEquals(null, rl.drawDevice(b, account, device), "$device ${it + 1}") }
+        spend("b", 1) // the ceiling's window opens now
+        clock.advance(50_000)
+        spend("a", 5) // the device's window opens 50 s later, and is full
+        clock.advance(20_000) // the ceiling's first window lapsed; a new one opens and fills, 70 s in
+        for (d in listOf("b", "c", "d", "e")) spend(d, 5)
+        assertEquals(20, rl.count(Bucket.accountKey(b, "u")))
+        clock.advance(10_000)
+        // The device's window has 30 s left, the ceiling's 50 s: the call cannot succeed before 50 s.
+        assertEquals(50_000L, rl.drawDevice(b, "u", "a"))
+        clock.advance(30_000)
+        // The device's window lapsed, the ceiling still refuses for the 20 s that were left of the 50, and gives back.
+        assertEquals(20_000L, rl.drawDevice(b, "u", "a"))
+        assertEquals(0, rl.count(Bucket.deviceKey(b, "a")))
+        clock.advance(20_000)
+        assertEquals(null, rl.drawDevice(b, "u", "a"))
+        // A ceiling that is not full leaves the device's own wait.
+        spend("f", 5, account = "v")
+        clock.advance(1_000)
+        assertEquals(59_000L, rl.drawDevice(b, "v", "f"))
+    }
+
+    /**
+     * spec 03 §8 (decided on 2026-11-17): a back-off a session's own device keeps names its real remaining wait. The
+     * reservation is refused while the lock holds, with the milliseconds left (at least 1), counts nothing then, and is
+     * admitted again the moment the lock lapses. (The sign-in's back-off reads the same lock and answers 60 seconds:
+     * `BackoffWaitsTest`.)
+     */
+    @Test
+    fun aBackOffRefusal_namesTheLocksRealRemainingWait() {
+        val clock = FakeClock()
+        val b = EmailBackoff()
+        b.clock = clock
+        repeat(4) { assertEquals(null, b.reserveOrWait("k"), "try ${it + 1}") }
+        // The fifth is admitted and arms one second; the sixth at once is told that second.
+        assertEquals(null, b.reserveOrWait("k"))
+        assertEquals(1_000L, b.reserveOrWait("k"))
+        clock.advance(999)
+        assertEquals(1L, b.reserveOrWait("k"))
+        clock.advance(1)
+        // Admitted (the sixth failure), which arms two seconds.
+        assertEquals(null, b.reserveOrWait("k"))
+        clock.advance(500)
+        assertEquals(1_500L, b.reserveOrWait("k"))
+        assertEquals(false, b.reserve("k"))
+        clock.advance(1_500)
+        assertEquals(true, b.reserve("k"))
+        // Up the curve to the cap: 15 minutes, never more.
+        repeat(20) { clock.advance(900_000); b.reserveOrWait("k") }
+        assertEquals(900_000L, b.reserveOrWait("k"))
+    }
 }

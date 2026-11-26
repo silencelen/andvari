@@ -1,4 +1,5 @@
-import { concat } from "./bytes";
+import { concat, fromB64 } from "./bytes";
+import { allZero, requireKey } from "./keyfloor";
 import { secretstreamDecrypt, secretstreamEncrypt } from "./provider";
 import { CryptoError } from "./sodium";
 
@@ -33,6 +34,8 @@ export interface EncryptedAttachment {
 /** Chunk + encrypt. Empty plaintext is rejected (spec: last chunk is 1..65536 bytes). */
 export function encryptAttachment(fileKey: Uint8Array, plaintext: Uint8Array): EncryptedAttachment {
   if (plaintext.length === 0) throw new CryptoError("attachment plaintext must not be empty");
+  // Spec 01 rule 4: no file is sealed under a key of zeros (KeysGoneError).
+  requireKey(fileKey);
   const chunks: Uint8Array[] = [];
   for (let off = 0; off < plaintext.length; off += CHUNK) {
     chunks.push(plaintext.subarray(off, Math.min(off + CHUNK, plaintext.length)));
@@ -55,8 +58,29 @@ export function splitChunks(ciphertext: Uint8Array): Uint8Array[] {
   return out;
 }
 
+/** A file key is 32 random bytes (spec 02 §6). */
+export const FILE_KEY_BYTES = 32;
+
+/**
+ * The file key an item document (or a backup's manifest) names, or null when it is no file key: not unpadded
+ * base64url, not {@link FILE_KEY_BYTES} long, or all zeros. Core `ItemCodec.fileKeyOf` twin. A key taken out of data
+ * that is all zeros is damage, never a lock: the caller refuses it as damaged content before anything is downloaded
+ * or decrypted, and {@link decryptAttachment}'s floor (KeysGoneError) is never what answers for it.
+ */
+export function fileKeyOf(b64: string): Uint8Array | null {
+  let k: Uint8Array;
+  try {
+    k = fromB64(b64);
+  } catch {
+    return null;
+  }
+  return k.length === FILE_KEY_BYTES && !allZero(k) ? k : null;
+}
+
 /** Decrypt; throws [CryptoError] on any corrupt, reordered, or truncated chunk (spec 02 §6). */
 export function decryptAttachment(fileKey: Uint8Array, header: Uint8Array, ciphertext: Uint8Array): Uint8Array {
   if (header.length !== HEADER_BYTES) throw new CryptoError(`attachment header must be ${HEADER_BYTES} bytes`);
+  // Rule 4, as the envelope's open: a key of zeros opens nothing, as KeysGoneError, never as a damaged file.
+  requireKey(fileKey);
   return concat(...secretstreamDecrypt(fileKey, header, splitChunks(ciphertext)));
 }

@@ -1,6 +1,7 @@
 package io.silencelen.andvari.app
 
 import android.content.Context
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Icon
@@ -12,18 +13,23 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.silencelen.andvari.R
 
 // Treasury/gold palette — matches the web client (aged gold on deep charcoal).
 // UI-audit 2026-07 (Cut B): BOTH schemes now declare every Material3 color role the app
@@ -97,7 +103,9 @@ private val AndvariLight = lightColorScheme(
     onSecondary = Color.White,
     secondaryContainer = Color(0xFFECE2C8),
     onSecondaryContainer = Color(0xFF2C2517),
-    tertiary = Color(0xFF4F7A3A),
+    // The success green, also the placeholders' tone: #4F7A3A read 4.38:1 on the light ground #F4EFE4, under the 4.5:1
+    // small text needs; #4C7538 reads 4.69:1 there (5.07:1 on the surface #FBF8F1).
+    tertiary = Color(0xFF4C7538),
     onTertiary = Color.White,
     tertiaryContainer = Color(0xFFD7E6CB),
     onTertiaryContainer = Color(0xFF1C2F12),
@@ -133,24 +141,26 @@ private val AndvariType = Typography(
     titleLarge = TextStyle(fontFamily = serif, fontWeight = FontWeight.SemiBold, fontSize = 22.sp),
 )
 
-// ---- brand sigils (UI-audit #25) ----
+// ---- brand sigils ----
 // The brand (ᛅ) and empty-hoard (ᛝ) marks as GEOMETRY, not runic codepoints: the Runic
 // block is absent from most default system fonts, so Text("ᛅ") renders as a tofu box on
 // exactly the surfaces that lean on the mark as a trust signal (web/src/ui/Sigil.tsx
-// documents the risk and ships SVG; these are byte-for-byte ports of its two paths —
-// viewBox 24, stroke 1.8, round caps). Keep the path data in lockstep with Sigil.tsx.
-// The base stroke color is a placeholder: render through [SigilMark] (or Icon), whose
-// tint drives the actual color.
+// documents the risk and ships SVG). The base color is a placeholder: render through
+// [SigilMark] (or Icon), whose tint drives the actual color.
 
-/** ᛅ (long-branch ár), the wordmark rune: a stave crossed by one falling stroke. */
+/**
+ * ᛅ (long-branch ár), the brand's rune cut as a carver cuts it: two filled bands, the falling stroke first and the
+ * stave over it, in a 24-unit box. The points are assets/brand/andvari-rune.svg's (web/src/ui/brand-assets.test.ts
+ * compares them).
+ */
 val BrandSigil: ImageVector = ImageVector.Builder(
     name = "BrandSigil", defaultWidth = 24.dp, defaultHeight = 24.dp, viewportWidth = 24f, viewportHeight = 24f,
 ).apply {
-    path(stroke = SolidColor(Color.White), strokeLineWidth = 1.8f, strokeLineCap = StrokeCap.Round) {
-        moveTo(12f, 3f); verticalLineToRelative(18f) // M12 3v18
+    path(fill = SolidColor(Color.White)) {
+        moveTo(4.85f, 6.768f); lineTo(19.15f, 13.368f); lineTo(19.15f, 16.232f); lineTo(4.85f, 9.632f); close()
     }
-    path(stroke = SolidColor(Color.White), strokeLineWidth = 1.8f, strokeLineCap = StrokeCap.Round) {
-        moveTo(5.5f, 8.5f); lineToRelative(13f, 6f) // M5.5 8.5l13 6
+    path(fill = SolidColor(Color.White)) {
+        moveTo(10.7f, 2.35f); lineTo(13.3f, 3.55f); lineTo(13.3f, 21.25f); lineTo(10.7f, 20.05f); close()
     }
 }.build()
 
@@ -172,6 +182,26 @@ val EmptySigil: ImageVector = ImageVector.Builder(
 @Composable
 fun SigilMark(vector: ImageVector, size: Dp, tint: Color = MaterialTheme.colorScheme.primary) {
     Icon(vector, contentDescription = null, tint = tint, modifier = Modifier.size(size))
+}
+
+/** The drawn name's box (res/drawable/andvari_wordmark.xml): 3017 by 980 units, 1000 to the em. */
+internal const val WORDMARK_ASPECT = 3017f / 980f
+
+/**
+ * The name "andvari" as one drawing (res/drawable/andvari_wordmark.xml, assets/brand/wordmark.svg's outline), in one
+ * color: the theme's text color unless a caller says otherwise. It takes the size of the text it stands in for: its
+ * box is 0.98 of [fontSize]'s em, so it follows the system's font scale as that text did. A screen reader reads it as
+ * "andvari".
+ */
+@Composable
+fun Wordmark(fontSize: TextUnit, color: Color = MaterialTheme.colorScheme.onSurface) {
+    val height = with(LocalDensity.current) { (fontSize * 0.98f).toDp() }
+    Image(
+        painterResource(R.drawable.andvari_wordmark),
+        contentDescription = "andvari",
+        colorFilter = ColorFilter.tint(color),
+        modifier = Modifier.size(width = height * WORDMARK_ASPECT, height = height),
+    )
 }
 
 // ---- appearance preference (UI-audit #26) ----

@@ -8,14 +8,28 @@
   backup/transfer domain by construction, so it needs no rule. The app-fill
   signer bindings (andvari_app_signer_bindings.xml, A14 review N5) are a
   device-local record of what THIS device confirmed, so they never travel either.
+  Neither do the browsers trusted on this device
+  (andvari_trusted_browsers.xml), the autofill debug toggle, or the fill log
+  (files/autofill-last.json and files/autofill-log.jsonl: package, frame hosts,
+  field names).
 -->
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="sharedpref" path="andvari.xml" />
         <exclude domain="sharedpref" path="andvari_app_signer_bindings.xml" />
+        <exclude domain="sharedpref" path="andvari_trusted_browsers.xml" />
+        <exclude domain="sharedpref" path="andvari_autofill_debug.xml" />
+        <exclude domain="file" path="autofill-last.json" />
+        <exclude domain="file" path="autofill-log.jsonl" />
+        <exclude domain="sharedpref" path="andvari_autofill_owner.xml" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="andvari.xml" />
         <exclude domain="sharedpref" path="andvari_app_signer_bindings.xml" />
+        <exclude domain="sharedpref" path="andvari_trusted_browsers.xml" />
+        <exclude domain="sharedpref" path="andvari_autofill_debug.xml" />
+        <exclude domain="file" path="autofill-last.json" />
+        <exclude domain="file" path="autofill-log.jsonl" />
+        <exclude domain="sharedpref" path="andvari_autofill_owner.xml" />
     </device-transfer>
 </data-extraction-rules>

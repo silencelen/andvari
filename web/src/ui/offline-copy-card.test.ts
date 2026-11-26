@@ -8,6 +8,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const here = (p: string) => fileURLToPath(new URL(p, import.meta.url));
 import { OfflineCopyBody, offlineCopyModel, queueLossQuestion, type OfflineCopyModel } from "./Settings";
 import { OfflineCopyUnlockLine } from "./Welcome";
+import { fill, OFFLINE_COPY_LIMIT, OFFLINE_COPY_OFFER, UNSENT_LOST_MANY, UNSENT_LOST_ONE, UNSENT_SEND_FIRST, UNSENT_UNKNOWN } from "./copy";
+import { VaultStore } from "../vault/store";
 
 /**
  * S5 (design 2026-07-13-web-offline-cache §E.3.4/§B.5/§D.1) as amended by the endpoint-agnostic
@@ -198,28 +200,66 @@ describe("offlineCopyModel — assembly from the frozen store surface + navigato
 
 describe("queueLossQuestion — the breaker-#9 gate re-reads the LIVE count (S5 review F2)", () => {
   it("a queue that GREW after mount is respected — the question carries the live count", async () => {
-    // Mount-time model said 0 (which alone would SKIP the confirm); a concurrent tab queued 3
-    // edits since — the live store reads the shared per-account DB and must see them.
-    expect(await queueLossQuestion({ queuedMutationCount: async () => 3 }, 0)).toContain("3 unsynced changes");
+    // A concurrent tab queued 3 edits since mount — the live store reads the shared per-account DB and must see them.
+    expect(await queueLossQuestion({ unsentChangeCount: async () => 3 })).toEqual({ question: fill(UNSENT_LOST_MANY, "3"), unsent: 3 });
   });
 
   it("live count 0 asks nothing (edits synced since mount — nothing to lose)", async () => {
-    expect(await queueLossQuestion({ queuedMutationCount: async () => 0 }, 2)).toBeNull();
+    expect(await queueLossQuestion({ unsentChangeCount: async () => 0 })).toBeNull();
   });
 
-  it("singular copy for one change", async () => {
-    expect(await queueLossQuestion({ queuedMutationCount: async () => 1 }, 0)).toContain(
-      "1 unsynced change on this device",
-    );
+  it("its own line for one change", async () => {
+    expect(await queueLossQuestion({ unsentChangeCount: async () => 1 })).toEqual({ question: UNSENT_LOST_ONE, unsent: 1 });
   });
 
-  it("a failing re-read falls back to the mount-time count (a stale confirm beats a skipped one)", async () => {
+  it("a failing re-read still asks, and says that this browser cannot tell (never a number it did not read)", async () => {
     const failing = {
-      queuedMutationCount: async (): Promise<number> => {
+      unsentChangeCount: async (): Promise<number> => {
         throw new Error("closed handle");
       },
     };
-    expect(await queueLossQuestion(failing, 2)).toContain("2 unsynced changes");
+    expect(await queueLossQuestion(failing)).toEqual({ question: UNSENT_UNKNOWN, unsent: null });
+  });
+});
+
+/**
+ * Design §4.4 (decided on 2026-11-17): turning the copy off or removing it, with changes not sent, offers to try sending
+ * them first (the vault is open here) and acts only on the second click over the count it said; the count includes the
+ * vaults held back, as the shared code counts them.
+ */
+describe("the offline copy's confirm over unsent changes", () => {
+  it("offers to try sending them first where sending is possible, and not where it is not", () => {
+    const armed = { question: fill(UNSENT_LOST_MANY, "2"), verb: "Remove it and lose them" };
+    const withSend = renderToStaticMarkup(
+      createElement(OfflineCopyBody, { model: model({ enabled: true, durable: true, queued: 2 }), busy: false, notice: "", pendingConfirm: armed, onToggle: () => {}, onWipe: () => {}, onConfirm: () => {}, onCancelConfirm: () => {}, onSendFirst: () => {} }),
+    );
+    expect(withSend).toContain(UNSENT_SEND_FIRST);
+    expect(render(model({ enabled: true, durable: true, queued: 2 }), armed)).not.toContain(UNSENT_SEND_FIRST);
+  });
+
+  it("the card wires it: the button only over a count it read and a vault whose traffic runs; the second click counts again", () => {
+    const settings = readFileSync(here("./Settings.tsx"), "utf8");
+    expect(settings).toContain("onSendFirst={pendingConfirm && pendingConfirm.unsent !== null && !store.isReadOnlyCopy() ? () => void sendFirst() : undefined}");
+    const confirm = settings.slice(settings.indexOf("onConfirm={() => {"), settings.indexOf("onCancelConfirm={() => setPendingConfirm(null)}"));
+    expect(confirm).toContain("void queueLossQuestion(store).then((now) => {");
+    expect(confirm).toContain("unsentArmStep({ text: armed.question, unsent: armed.unsent }");
+  });
+
+  it("the store counts every change parked with a held vault with the queue (not the held vaults), and sending first counts again after one sync", async () => {
+    const calls: string[] = [];
+    const fake = {
+      unsentChangeCount: VaultStore.prototype.unsentChangeCount,
+      // One vault held back with one change parked, one with none: one change, not two vaults.
+      holding: new Map([["v9", { parked: [{ mutationId: "m1" }] }], ["v8", { parked: [] }]]),
+      queuedMutationCount: async () => (calls.includes("sync") ? 0 : 2),
+      sync: async () => {
+        calls.push("sync");
+        throw new Error("offline"); // a failed send is not thrown on: what remains is counted
+      },
+    };
+    expect(await VaultStore.prototype.unsentChangeCount.call(fake as never)).toBe(3);
+    expect(await VaultStore.prototype.sendBeforeDelete.call(fake as never)).toBe(1);
+    expect(calls).toEqual(["sync"]);
   });
 });
 
@@ -261,19 +301,34 @@ describe("H48 — the offline-copy promise is qualified to what the web client c
 
   it("the unlock-time nudge carries the same qualification (one claim, two surfaces)", () => {
     const app = readFileSync(here("./App.tsx"), "utf8");
-    const offer = app.slice(app.indexOf("const CACHE_NUDGE_OFFER"), app.indexOf("const CACHE_NUDGE_ACCEPTED"));
-    expect(offer).toContain("A tab you already have open");
-    expect(offer).not.toContain("You could open your vault even when");
+    expect(app).toContain("const CACHE_NUDGE_OFFER = OFFLINE_COPY_OFFER;");
+    expect(OFFLINE_COPY_OFFER).toContain("a tab you already have open can unlock it");
+    expect(OFFLINE_COPY_OFFER).not.toContain("You could open your vault even when");
+  });
+
+  it("the one-time question says when the copy is made: at the next unlock or sign-in, as the note after “Keep a copy” does", () => {
+    expect(OFFLINE_COPY_OFFER).toContain("It is made the next time you unlock or sign in here");
+    expect(readFileSync(here("./App.tsx"), "utf8")).toContain("it will be created at your next unlock or sign-in");
+  });
+
+  it("every sentence about the copy says a reload without the server cannot load the page", () => {
+    const html = render(model({ enabled: true, durable: true }));
+    expect(html).toContain("so does a reload: without the server the page itself can"); // "can't", escaped in the markup
+    expect(OFFLINE_COPY_OFFER).toContain("A reload or a fresh tab still needs the server: without it, the page itself can't load.");
+    expect(OFFLINE_COPY_LIMIT).toContain("keeps only a tab that is already open working");
+    // No sentence of the web app promises that a reload or a fresh tab opens the copy without the server.
+    const sources = ["./App.tsx", "./Settings.tsx", "./Welcome.tsx", "./copy.ts"].map((f) => readFileSync(here(f), "utf8")).join("\n");
+    expect(sources).not.toMatch(/(reload|fresh tab)[^."]*\b(opens?|unlocks?)\b[^."]*(without the server|offline)/i);
   });
 });
 
 describe("H135 — the offline-copy confirm is inline, not a native dialog", () => {
-  const armed = { question: "3 unsynced changes on this device will be permanently lost.", verb: "Remove it and lose them" };
+  const armed = { question: fill(UNSENT_LOST_MANY, "3"), verb: "Remove it and lose them" };
 
   it("renders the armed confirm row under the toggle, with the destructive verb and a way out", () => {
     const html = render(model({ enabled: true, durable: true, queued: 3 }), armed);
     expect(html).toContain("confirm-row");
-    expect(html).toContain("3 unsynced changes on this device will be permanently lost.");
+    expect(html).toContain(fill(UNSENT_LOST_MANY, "3").replace(/'/g, "&#x27;"));
     expect(html).toContain("Remove it and lose them");
     expect(html).toContain("Keep it");
   });
@@ -304,5 +359,16 @@ describe("OfflineCopyUnlockLine — §E.3.4 transparency (shows ONLY with a cach
   it("a cache that never synced reads 'not yet'", () => {
     const html = renderToStaticMarkup(createElement(OfflineCopyUnlockLine, { stamp: { lastSyncAt: null } }));
     expect(html).toContain("last synced not yet");
+  });
+
+  it("the unlock card shows it (the 2026-11-16 walk found it rendered nowhere): probed per account, on both copy cards", () => {
+    const welcome = readFileSync(here("./Welcome.tsx"), "utf8");
+    const unlock = welcome.slice(welcome.indexOf("function Unlock("), welcome.indexOf("// ---- Sign up"));
+    // The probe is offlineCopyStamp's, read through unlockCopyStamp (which says a copy it cannot read as that).
+    expect(unlock).toContain("void unlockCopyStamp(session.userId).then(");
+    expect(welcome).toContain("stampOf: (userId: string) => Promise<{ lastSyncAt: number | null } | null> = offlineCopyStamp,");
+    expect(unlock.match(/<OfflineCopyUnlockLine stamp=\{copyStamp\} \/>/g)).toHaveLength(2);
+    // The hooks run before the card's early returns.
+    expect(unlock.indexOf("useState<CopyStamp | null>(null)")).toBeLessThan(unlock.indexOf("if (endedByServer(session)) {"));
   });
 });

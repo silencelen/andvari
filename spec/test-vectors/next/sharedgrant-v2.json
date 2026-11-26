@@ -1,0 +1,1252 @@
+{
+  "_about": [
+    "Signed vault grants of design 2026-11-15-onboarding-trust \u00a73.5 (purpose 0x01; the statement template is unchanged, its binding is the vault log). This file REPLACES spec/test-vectors/sharedgrant-v2.json at integration; until then it lives in spec/test-vectors/next/ and the old file stays where the old tests read it.",
+    "Hand-authored from the independent oracle in tools/vector-gen/oracle (Node WebCrypto and @noble; no andvari code). Regenerate with `npm run generate` there; `npm run check` fails on any difference. Every seal uses a fixed ephemeral key, so the sealed bytes reproduce.",
+    "Each case: account `me` opens `sealedB64` (crypto_box_seal to its identity key) from its grant row for vault `rowVaultId`, with the vault's log `logs[log].frames` as served. The log is replayed BEFORE the grant is opened: if it does not verify, the grant is not evaluated at all and the result is the log's own verdict, even when the grant has a fault of its own. Then the checks run in \u00a73.5's order and the FIRST failure is the verdict: 1 unopenable, 2 bad_frame / unknown_format, 3 non_canonical / bad_statement, 4 misaddressed, 5 vault_mismatch, 6 no_add_entry, 7 not_authorized, 8 bad_signature, 9 vk_commit_mismatch, 10 removed. On ok the row gives the key and the fields a caller acts on.",
+    "In step 6 only this account's LATEST add can match: it must carry the statement's grantId and name this account's key. A grant bound to an earlier add of the account, or to none, is no_add_entry. O is the actor of that add and K is the owner key AT THAT ENTRY (the state before it), not the current owner key.",
+    "Verifying a grant is not adopting the vault: adoption is \u00a73.6 (a current contact, the accept prompt, the account's vault record).",
+    "Step 2 uses the frame checks of \u00a72.4, which hold for every purpose: a plaintext with another magic is unknown_format, and bad_frame is a short or over-long plaintext or a frame of another purpose.",
+    "logs: each named log gives its frames and its own verdict: ok with the final state (null for a log with no entries), or the verdict and index at which it stops.",
+    "The extension opens no grant and has no consumer for this file."
+  ],
+  "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "otherVaultId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "vkB64": "k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8",
+  "vkCommitHex": "f8ae9b98f03e797f7a001742a35c84a1ae3baa91baef1ac0f4eb4458cc992f90",
+  "accounts": {
+    "alice": {
+      "userId": "11111111-1111-4111-8111-111111111111",
+      "seedB64": "DRQbIikwNz5FTFNaYWhvdn2Ei5KZoKeutbzDytHY3-Y",
+      "identityPubB64": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+      "signPubB64": "nHq6JH1Lmot5tW6rGCV05fjNlUAomh-JWgaeAFtYs8o"
+    },
+    "bob": {
+      "userId": "22222222-2222-4222-8222-222222222222",
+      "seedB64": "oKOmqayvsrW4u77BxMfKzdDT1tnc3-Ll6Ovu8fT3-v0",
+      "identityPubB64": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM",
+      "signPubB64": "s6JVnClZbikPKKTc0Db3imvaLINlV0pXZiJiA_TrMQI"
+    },
+    "carol": {
+      "userId": "33333333-3333-4333-8333-333333333333",
+      "seedB64": "8-Y_Ot4gdxwTpqxkvkFy1zpMKs1R5t4Il73QMCTuB1I",
+      "identityPubB64": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk",
+      "signPubB64": "yOc1tSI8aPFJ1ft9jxNRkWYr7t5uspJpB2Y02m5vNyI"
+    },
+    "dave": {
+      "userId": "44444444-4444-4444-8444-444444444444",
+      "seedB64": "V4YYhvHxR4arkSEENssMWtbGkONPUOqZcvRkrZMY1SI",
+      "identityPubB64": "Wd8NgIFBR0r_DaXgoiTIpzh-IrIoM2zfTGlAZUGc2FU",
+      "signPubB64": "aQmXs0tW79l9HDabZWf3hpVtAL9AFiPzPVi1dR2GOhs"
+    }
+  },
+  "logs": {
+    "base": {
+      "why": "alice creates the vault, adds bob (the grant under test answers this add) and carol.",
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyjIIE58VtU3rLQ3kNTsxU5Av2RycjGC-J4YOC0DFNfF0MiBGtUmD44qg5nj8SR9gQvIQtMri6FruKCJvF6v9qgJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiJmOGFlOWI5OGYwM2U3OTdmN2EwMDE3NDJhMzVjODRhMWFlM2JhYTkxYmFlZjFhYzBmNGViNDQ1OGNjOTkyZjkwIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izysuPjDNjPN_d4dLh3kv_DCvL2b1eFsY-JYhwkOOG6nKdyonmmCow25KcOHN8FIu8sEA88oPds6DWLkib7mTepw97InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiMTE4YWI4YjE0NjFkMjQ0NDgwM2NmNmNmMmM1MTUyNDNiODA0ODIzZTFmNDIzOGYyZTQwZGViYjFkZWJkNzIxNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJCOW1rcjRUQlZJOUtENXVONjh6X2J3In0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyi0xz7ejaVQxkKtVvjfa-MqWqhlT5KFMaOh26l0_Iof5dl__-BsiUxq-FdGtLmIgowyX7qVNVaObZfy-gomJpw17InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiM2YxNTZhYzc2MjdhYjE5ZjgzNzc3ZDY4ZjkyOWRkNjcxMTNmMDEyY2ViZmU5Yjc2ZDA1NzZhYWNmYjZiYTJhZiIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTIwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJ6RkxiZVRCX3ptY0lvY1hrd2pFTkVnIn0"
+      ],
+      "verdict": "ok",
+      "state": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "head": {
+          "seq": 2,
+          "hash": "18abf44b00d3058aa58d97e2e437a67c5f7d5438710792dc3ba648eeb6b7d352",
+          "at": 1763164920000
+        },
+        "owner": "11111111-1111-4111-8111-111111111111",
+        "ownerKey": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "vkCommit": "f8ae9b98f03e797f7a001742a35c84a1ae3baa91baef1ac0f4eb4458cc992f90",
+        "members": {
+          "11111111-1111-4111-8111-111111111111": {
+            "key": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+            "role": "owner"
+          },
+          "22222222-2222-4222-8222-222222222222": {
+            "key": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM",
+            "role": "writer"
+          },
+          "33333333-3333-4333-8333-333333333333": {
+            "key": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk",
+            "role": "writer"
+          }
+        },
+        "pending": null,
+        "deleted": null
+      }
+    },
+    "bob-removed": {
+      "why": "base, then the owner removes bob.",
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyjIIE58VtU3rLQ3kNTsxU5Av2RycjGC-J4YOC0DFNfF0MiBGtUmD44qg5nj8SR9gQvIQtMri6FruKCJvF6v9qgJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiJmOGFlOWI5OGYwM2U3OTdmN2EwMDE3NDJhMzVjODRhMWFlM2JhYTkxYmFlZjFhYzBmNGViNDQ1OGNjOTkyZjkwIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izysuPjDNjPN_d4dLh3kv_DCvL2b1eFsY-JYhwkOOG6nKdyonmmCow25KcOHN8FIu8sEA88oPds6DWLkib7mTepw97InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiMTE4YWI4YjE0NjFkMjQ0NDgwM2NmNmNmMmM1MTUyNDNiODA0ODIzZTFmNDIzOGYyZTQwZGViYjFkZWJkNzIxNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJCOW1rcjRUQlZJOUtENXVONjh6X2J3In0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyi0xz7ejaVQxkKtVvjfa-MqWqhlT5KFMaOh26l0_Iof5dl__-BsiUxq-FdGtLmIgowyX7qVNVaObZfy-gomJpw17InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiM2YxNTZhYzc2MjdhYjE5ZjgzNzc3ZDY4ZjkyOWRkNjcxMTNmMDEyY2ViZmU5Yjc2ZDA1NzZhYWNmYjZiYTJhZiIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTIwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJ6RkxiZVRCX3ptY0lvY1hrd2pFTkVnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyiOk_Nv_kx0Uu9zKDE71q584fnh4tx0fwQnCevS3KfQpubep1KeP5mrGdA7g6xz-OK_Ve9qJnheENTMAbyRtQwJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiMThhYmY0NGIwMGQzMDU4YWE1OGQ5N2UyZTQzN2E2N2M1ZjdkNTQzODcxMDc5MmRjM2JhNjQ4ZWViNmI3ZDM1MiIsImtpbmQiOiJyZW1vdmUiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTgwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIifQ"
+      ],
+      "verdict": "ok",
+      "state": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "head": {
+          "seq": 3,
+          "hash": "dfc2b6b84735d47d6aaf0efe53309f485e0a1c22208575ce64641dbf71ee626c",
+          "at": 1763164980000
+        },
+        "owner": "11111111-1111-4111-8111-111111111111",
+        "ownerKey": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "vkCommit": "f8ae9b98f03e797f7a001742a35c84a1ae3baa91baef1ac0f4eb4458cc992f90",
+        "members": {
+          "11111111-1111-4111-8111-111111111111": {
+            "key": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+            "role": "owner"
+          },
+          "33333333-3333-4333-8333-333333333333": {
+            "key": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk",
+            "role": "writer"
+          }
+        },
+        "pending": null,
+        "deleted": null
+      }
+    },
+    "bob-left": {
+      "why": "base, then bob leaves.",
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyjIIE58VtU3rLQ3kNTsxU5Av2RycjGC-J4YOC0DFNfF0MiBGtUmD44qg5nj8SR9gQvIQtMri6FruKCJvF6v9qgJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiJmOGFlOWI5OGYwM2U3OTdmN2EwMDE3NDJhMzVjODRhMWFlM2JhYTkxYmFlZjFhYzBmNGViNDQ1OGNjOTkyZjkwIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izysuPjDNjPN_d4dLh3kv_DCvL2b1eFsY-JYhwkOOG6nKdyonmmCow25KcOHN8FIu8sEA88oPds6DWLkib7mTepw97InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiMTE4YWI4YjE0NjFkMjQ0NDgwM2NmNmNmMmM1MTUyNDNiODA0ODIzZTFmNDIzOGYyZTQwZGViYjFkZWJkNzIxNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJCOW1rcjRUQlZJOUtENXVONjh6X2J3In0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyi0xz7ejaVQxkKtVvjfa-MqWqhlT5KFMaOh26l0_Iof5dl__-BsiUxq-FdGtLmIgowyX7qVNVaObZfy-gomJpw17InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiM2YxNTZhYzc2MjdhYjE5ZjgzNzc3ZDY4ZjkyOWRkNjcxMTNmMDEyY2ViZmU5Yjc2ZDA1NzZhYWNmYjZiYTJhZiIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTIwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJ6RkxiZVRCX3ptY0lvY1hrd2pFTkVnIn0",
+        "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAhmTHZufcnmXQtzfi_ogttq5LXrhV31JL__Co9Stegop-uwuaVeJc2Tn_eTKFCSaHtjTXCtnLX56QdTV15NPMAt7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiMThhYmY0NGIwMGQzMDU4YWE1OGQ5N2UyZTQzN2E2N2M1ZjdkNTQzODcxMDc5MmRjM2JhNjQ4ZWViNmI3ZDM1MiIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwiYXQiOjE3NjMxNjQ5ODAwMDB9"
+      ],
+      "verdict": "ok",
+      "state": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "head": {
+          "seq": 3,
+          "hash": "ec2aa9f991dc9bdef0640090e7e51f4991e2fe5012904067f179fb47987c1767",
+          "at": 1763164980000
+        },
+        "owner": "11111111-1111-4111-8111-111111111111",
+        "ownerKey": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "vkCommit": "f8ae9b98f03e797f7a001742a35c84a1ae3baa91baef1ac0f4eb4458cc992f90",
+        "members": {
+          "11111111-1111-4111-8111-111111111111": {
+            "key": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+            "role": "owner"
+          },
+          "33333333-3333-4333-8333-333333333333": {
+            "key": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk",
+            "role": "writer"
+          }
+        },
+        "pending": null,
+        "deleted": null
+      }
+    },
+    "bob-readded": {
+      "why": "base, the owner removes bob, then adds him again with a new grantId.",
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyjIIE58VtU3rLQ3kNTsxU5Av2RycjGC-J4YOC0DFNfF0MiBGtUmD44qg5nj8SR9gQvIQtMri6FruKCJvF6v9qgJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiJmOGFlOWI5OGYwM2U3OTdmN2EwMDE3NDJhMzVjODRhMWFlM2JhYTkxYmFlZjFhYzBmNGViNDQ1OGNjOTkyZjkwIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izysuPjDNjPN_d4dLh3kv_DCvL2b1eFsY-JYhwkOOG6nKdyonmmCow25KcOHN8FIu8sEA88oPds6DWLkib7mTepw97InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiMTE4YWI4YjE0NjFkMjQ0NDgwM2NmNmNmMmM1MTUyNDNiODA0ODIzZTFmNDIzOGYyZTQwZGViYjFkZWJkNzIxNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJCOW1rcjRUQlZJOUtENXVONjh6X2J3In0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyi0xz7ejaVQxkKtVvjfa-MqWqhlT5KFMaOh26l0_Iof5dl__-BsiUxq-FdGtLmIgowyX7qVNVaObZfy-gomJpw17InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiM2YxNTZhYzc2MjdhYjE5ZjgzNzc3ZDY4ZjkyOWRkNjcxMTNmMDEyY2ViZmU5Yjc2ZDA1NzZhYWNmYjZiYTJhZiIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTIwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJ6RkxiZVRCX3ptY0lvY1hrd2pFTkVnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyiOk_Nv_kx0Uu9zKDE71q584fnh4tx0fwQnCevS3KfQpubep1KeP5mrGdA7g6xz-OK_Ve9qJnheENTMAbyRtQwJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiMThhYmY0NGIwMGQzMDU4YWE1OGQ5N2UyZTQzN2E2N2M1ZjdkNTQzODcxMDc5MmRjM2JhNjQ4ZWViNmI3ZDM1MiIsImtpbmQiOiJyZW1vdmUiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTgwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIifQ",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyjyqENcPdKGrrki75TjF4sRYLqJ7vCQABq9dgiux8CzKw61HlXdlbTKLLHkqnQuMahPmEUkEr7WHQM5P0kr0zgd7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiZGZjMmI2Yjg0NzM1ZDQ3ZDZhYWYwZWZlNTMzMDlmNDg1ZTBhMWMyMjIwODU3NWNlNjQ2NDFkYmY3MWVlNjI2YyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY1MDQwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJJWlIyU2w1dTJ5cUU1SVBnS3RMTjRRIn0"
+      ],
+      "verdict": "ok",
+      "state": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "head": {
+          "seq": 4,
+          "hash": "d4c6fedc74d3c43dd08ae1cdddd56883872aaee0c8d0510d1c4e724e81b5ef48",
+          "at": 1763165040000
+        },
+        "owner": "11111111-1111-4111-8111-111111111111",
+        "ownerKey": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "vkCommit": "f8ae9b98f03e797f7a001742a35c84a1ae3baa91baef1ac0f4eb4458cc992f90",
+        "members": {
+          "11111111-1111-4111-8111-111111111111": {
+            "key": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+            "role": "owner"
+          },
+          "33333333-3333-4333-8333-333333333333": {
+            "key": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk",
+            "role": "writer"
+          },
+          "22222222-2222-4222-8222-222222222222": {
+            "key": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM",
+            "role": "writer"
+          }
+        },
+        "pending": null,
+        "deleted": null
+      }
+    },
+    "owner-changed-after-the-add": {
+      "why": "base, then alice hands the vault to carol: the add of bob was signed while alice was the owner.",
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyjIIE58VtU3rLQ3kNTsxU5Av2RycjGC-J4YOC0DFNfF0MiBGtUmD44qg5nj8SR9gQvIQtMri6FruKCJvF6v9qgJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiJmOGFlOWI5OGYwM2U3OTdmN2EwMDE3NDJhMzVjODRhMWFlM2JhYTkxYmFlZjFhYzBmNGViNDQ1OGNjOTkyZjkwIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izysuPjDNjPN_d4dLh3kv_DCvL2b1eFsY-JYhwkOOG6nKdyonmmCow25KcOHN8FIu8sEA88oPds6DWLkib7mTepw97InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiMTE4YWI4YjE0NjFkMjQ0NDgwM2NmNmNmMmM1MTUyNDNiODA0ODIzZTFmNDIzOGYyZTQwZGViYjFkZWJkNzIxNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJCOW1rcjRUQlZJOUtENXVONjh6X2J3In0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyi0xz7ejaVQxkKtVvjfa-MqWqhlT5KFMaOh26l0_Iof5dl__-BsiUxq-FdGtLmIgowyX7qVNVaObZfy-gomJpw17InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiM2YxNTZhYzc2MjdhYjE5ZjgzNzc3ZDY4ZjkyOWRkNjcxMTNmMDEyY2ViZmU5Yjc2ZDA1NzZhYWNmYjZiYTJhZiIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTIwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJ6RkxiZVRCX3ptY0lvY1hrd2pFTkVnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyu2mttt5SjfKuftW1nrP4OmX-lURz6B6ABSBih3du89jTjnu4siKkTzCAO6o2xQlt5ZoJtU2ritD3St7mBi48Ax7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiMThhYmY0NGIwMGQzMDU4YWE1OGQ5N2UyZTQzN2E2N2M1ZjdkNTQzODcxMDc5MmRjM2JhNjQ4ZWViNmI3ZDM1MiIsImtpbmQiOiJvZmZlciIsImFjdG9yIjoiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIiwiYXQiOjE3NjMxNjQ5ODAwMDAsInRvIjoiMzMzMzMzMzMtMzMzMy00MzMzLTgzMzMtMzMzMzMzMzMzMzMzIiwidG9LZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwib2ZmZXJJZCI6IjhMeVBUNlJIdkdJTGtzaUdwTTFPc1EiLCJleHBpcmVzQXQiOjE3NjMyNTEzODAwMDB9",
+        "YXZzAgPI5zW1Ijxo8UnV-32PE1GRZivu3m6ykmkHZjTabm83IjQ7gaMESZBXsG2W22cm89sEpmwhMeVZmfeZ7usqFfSnIjr--pMtDDo5ei3qizhZgFgf1stIjD5-Od9BTUBiPwl7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiMzBkM2YyMmY3YmRkZDRjNTgyOGY5YTAwMmUxZTAxMTMwNDg3ZjA4NTIyODA4N2M1MmMxMjEwZTgzNmUyZjRmNiIsImtpbmQiOiJhY2NlcHQiLCJhY3RvciI6IjMzMzMzMzMzLTMzMzMtNDMzMy04MzMzLTMzMzMzMzMzMzMzMyIsImF0IjoxNzYzMTY1MDQwMDAwLCJvZmZlcklkIjoiOEx5UFQ2Ukh2R0lMa3NpR3BNMU9zUSJ9"
+      ],
+      "verdict": "ok",
+      "state": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "head": {
+          "seq": 4,
+          "hash": "433658d7cf61c5ec6745463e6223fe2d942e4e1f826176bf335ee65c3c0f8abd",
+          "at": 1763165040000
+        },
+        "owner": "33333333-3333-4333-8333-333333333333",
+        "ownerKey": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk",
+        "vkCommit": "f8ae9b98f03e797f7a001742a35c84a1ae3baa91baef1ac0f4eb4458cc992f90",
+        "members": {
+          "11111111-1111-4111-8111-111111111111": {
+            "key": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+            "role": "writer"
+          },
+          "22222222-2222-4222-8222-222222222222": {
+            "key": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM",
+            "role": "writer"
+          },
+          "33333333-3333-4333-8333-333333333333": {
+            "key": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk",
+            "role": "owner"
+          }
+        },
+        "pending": null,
+        "deleted": null
+      }
+    },
+    "added-by-the-new-owner": {
+      "why": "alice adds carol and hands her the vault; carol, now the owner, adds bob.",
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyjIIE58VtU3rLQ3kNTsxU5Av2RycjGC-J4YOC0DFNfF0MiBGtUmD44qg5nj8SR9gQvIQtMri6FruKCJvF6v9qgJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiJmOGFlOWI5OGYwM2U3OTdmN2EwMDE3NDJhMzVjODRhMWFlM2JhYTkxYmFlZjFhYzBmNGViNDQ1OGNjOTkyZjkwIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izysC9xeDaTlipZcKAkrYDnqt4Jhx40AM4J78Mb96XYKuVRAq3W9m9rU2PxM-8s9iH2lsrIIKMA4WvpmJWmQ1bcQp7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiMTE4YWI4YjE0NjFkMjQ0NDgwM2NmNmNmMmM1MTUyNDNiODA0ODIzZTFmNDIzOGYyZTQwZGViYjFkZWJkNzIxNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJ6RkxiZVRCX3ptY0lvY1hrd2pFTkVnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izytVBLRWTJqWg8KnZV3zznbKw7ONWZOzjp4Yi9Bi5ILc8ZG5ktCRVvq7Q7QzPPetHAPAqB5edvTaY_Nl8OEQitAB7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiOThkOWE2MGVlZjJhYTA2NWE4NmFjODE3ZTk3MjU2ZDNmZjMwY2M5Y2RhNWI1MTI0MWVlMjI2OTY3NzhkNGQyNCIsImtpbmQiOiJvZmZlciIsImFjdG9yIjoiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIiwiYXQiOjE3NjMxNjQ5MjAwMDAsInRvIjoiMzMzMzMzMzMtMzMzMy00MzMzLTgzMzMtMzMzMzMzMzMzMzMzIiwidG9LZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwib2ZmZXJJZCI6IjhMeVBUNlJIdkdJTGtzaUdwTTFPc1EiLCJleHBpcmVzQXQiOjE3NjMyNTEzMjAwMDB9",
+        "YXZzAgPI5zW1Ijxo8UnV-32PE1GRZivu3m6ykmkHZjTabm83Ij9yzAm8nQ86bCItsFr57Pla9p0oB1AOyf_0WjFxzVFjuTUJxqAAXdffC5UdHqn5y_dl_eQHITURZFxA0A7VVgB7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiM2E2OTViNmY0ZGNkZWFiMDMxZTMxMjBhODYyYTY3M2M1MGMxMTIwZWQwNmMwNzVjNmRiY2U5YzhiYWVlMDRlNSIsImtpbmQiOiJhY2NlcHQiLCJhY3RvciI6IjMzMzMzMzMzLTMzMzMtNDMzMy04MzMzLTMzMzMzMzMzMzMzMyIsImF0IjoxNzYzMTY0OTgwMDAwLCJvZmZlcklkIjoiOEx5UFQ2Ukh2R0lMa3NpR3BNMU9zUSJ9",
+        "YXZzAgPI5zW1Ijxo8UnV-32PE1GRZivu3m6ykmkHZjTabm83IlL6eOFggfJmL7mMh-nghLKPmCyGiNP1J0f-ISl1KsoVjtW0qQaGdODdYUv4xTx0wL7GyHUMIVmv1NdCLr383Qd7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiYTkyNzMzNTQ2N2M0ZjIzY2JmMDRlMzNiMDhkNTYzMTMxNGE5MTg2MmMwMjE4NjMxMDQ1NDIzZDNjNjFiY2JkOSIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjMzMzMzMzMzLTMzMzMtNDMzMy04MzMzLTMzMzMzMzMzMzMzMyIsImF0IjoxNzYzMTY1MDQwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJvYUVTMXlLaXJxalRjR0dmMWtsRFF3In0"
+      ],
+      "verdict": "ok",
+      "state": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "head": {
+          "seq": 4,
+          "hash": "a19951ee12b4959fc9827800be401aa7a93546b824f6ed79b9d894724a45590e",
+          "at": 1763165040000
+        },
+        "owner": "33333333-3333-4333-8333-333333333333",
+        "ownerKey": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk",
+        "vkCommit": "f8ae9b98f03e797f7a001742a35c84a1ae3baa91baef1ac0f4eb4458cc992f90",
+        "members": {
+          "11111111-1111-4111-8111-111111111111": {
+            "key": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+            "role": "writer"
+          },
+          "33333333-3333-4333-8333-333333333333": {
+            "key": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk",
+            "role": "owner"
+          },
+          "22222222-2222-4222-8222-222222222222": {
+            "key": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM",
+            "role": "writer"
+          }
+        },
+        "pending": null,
+        "deleted": null
+      }
+    },
+    "bob-left-and-readded": {
+      "why": "base, bob leaves, then the owner adds him again with a new grantId.",
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyjIIE58VtU3rLQ3kNTsxU5Av2RycjGC-J4YOC0DFNfF0MiBGtUmD44qg5nj8SR9gQvIQtMri6FruKCJvF6v9qgJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiJmOGFlOWI5OGYwM2U3OTdmN2EwMDE3NDJhMzVjODRhMWFlM2JhYTkxYmFlZjFhYzBmNGViNDQ1OGNjOTkyZjkwIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izysuPjDNjPN_d4dLh3kv_DCvL2b1eFsY-JYhwkOOG6nKdyonmmCow25KcOHN8FIu8sEA88oPds6DWLkib7mTepw97InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiMTE4YWI4YjE0NjFkMjQ0NDgwM2NmNmNmMmM1MTUyNDNiODA0ODIzZTFmNDIzOGYyZTQwZGViYjFkZWJkNzIxNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJCOW1rcjRUQlZJOUtENXVONjh6X2J3In0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyi0xz7ejaVQxkKtVvjfa-MqWqhlT5KFMaOh26l0_Iof5dl__-BsiUxq-FdGtLmIgowyX7qVNVaObZfy-gomJpw17InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiM2YxNTZhYzc2MjdhYjE5ZjgzNzc3ZDY4ZjkyOWRkNjcxMTNmMDEyY2ViZmU5Yjc2ZDA1NzZhYWNmYjZiYTJhZiIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTIwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJ6RkxiZVRCX3ptY0lvY1hrd2pFTkVnIn0",
+        "YXZzAgOzolWcKVluKQ8opNzQNveKa9osg2VXSldmImID9OsxAhmTHZufcnmXQtzfi_ogttq5LXrhV31JL__Co9Stegop-uwuaVeJc2Tn_eTKFCSaHtjTXCtnLX56QdTV15NPMAt7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiMThhYmY0NGIwMGQzMDU4YWE1OGQ5N2UyZTQzN2E2N2M1ZjdkNTQzODcxMDc5MmRjM2JhNjQ4ZWViNmI3ZDM1MiIsImtpbmQiOiJsZWF2ZSIsImFjdG9yIjoiMjIyMjIyMjItMjIyMi00MjIyLTgyMjItMjIyMjIyMjIyMjIyIiwiYXQiOjE3NjMxNjQ5ODAwMDB9",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izylFXP1RDnpcq4fqH_AXVp1DHjioq_O1-OGLEPUyyC4hQFKKcdJB9pn-BVNsIe34lul_2Ni-DBrf269ahYrrFawl7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiZWMyYWE5Zjk5MWRjOWJkZWYwNjQwMDkwZTdlNTFmNDk5MWUyZmU1MDEyOTA0MDY3ZjE3OWZiNDc5ODdjMTc2NyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY1MDQwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJJWlIyU2w1dTJ5cUU1SVBnS3RMTjRRIn0"
+      ],
+      "verdict": "ok",
+      "state": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "head": {
+          "seq": 4,
+          "hash": "ea048b7ffa018e7d0b401e161572638f8783ed56e9c6e789266dd1473a8987c3",
+          "at": 1763165040000
+        },
+        "owner": "11111111-1111-4111-8111-111111111111",
+        "ownerKey": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "vkCommit": "f8ae9b98f03e797f7a001742a35c84a1ae3baa91baef1ac0f4eb4458cc992f90",
+        "members": {
+          "11111111-1111-4111-8111-111111111111": {
+            "key": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+            "role": "owner"
+          },
+          "33333333-3333-4333-8333-333333333333": {
+            "key": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk",
+            "role": "writer"
+          },
+          "22222222-2222-4222-8222-222222222222": {
+            "key": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM",
+            "role": "writer"
+          }
+        },
+        "pending": null,
+        "deleted": null
+      }
+    },
+    "bob-readded-and-removed": {
+      "why": "base, the owner removes bob, adds him again with a new grantId, and removes him again.",
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyjIIE58VtU3rLQ3kNTsxU5Av2RycjGC-J4YOC0DFNfF0MiBGtUmD44qg5nj8SR9gQvIQtMri6FruKCJvF6v9qgJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiJmOGFlOWI5OGYwM2U3OTdmN2EwMDE3NDJhMzVjODRhMWFlM2JhYTkxYmFlZjFhYzBmNGViNDQ1OGNjOTkyZjkwIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izysuPjDNjPN_d4dLh3kv_DCvL2b1eFsY-JYhwkOOG6nKdyonmmCow25KcOHN8FIu8sEA88oPds6DWLkib7mTepw97InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiMTE4YWI4YjE0NjFkMjQ0NDgwM2NmNmNmMmM1MTUyNDNiODA0ODIzZTFmNDIzOGYyZTQwZGViYjFkZWJkNzIxNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJCOW1rcjRUQlZJOUtENXVONjh6X2J3In0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyi0xz7ejaVQxkKtVvjfa-MqWqhlT5KFMaOh26l0_Iof5dl__-BsiUxq-FdGtLmIgowyX7qVNVaObZfy-gomJpw17InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiM2YxNTZhYzc2MjdhYjE5ZjgzNzc3ZDY4ZjkyOWRkNjcxMTNmMDEyY2ViZmU5Yjc2ZDA1NzZhYWNmYjZiYTJhZiIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTIwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJ6RkxiZVRCX3ptY0lvY1hrd2pFTkVnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyiOk_Nv_kx0Uu9zKDE71q584fnh4tx0fwQnCevS3KfQpubep1KeP5mrGdA7g6xz-OK_Ve9qJnheENTMAbyRtQwJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiMThhYmY0NGIwMGQzMDU4YWE1OGQ5N2UyZTQzN2E2N2M1ZjdkNTQzODcxMDc5MmRjM2JhNjQ4ZWViNmI3ZDM1MiIsImtpbmQiOiJyZW1vdmUiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTgwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIifQ",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyjyqENcPdKGrrki75TjF4sRYLqJ7vCQABq9dgiux8CzKw61HlXdlbTKLLHkqnQuMahPmEUkEr7WHQM5P0kr0zgd7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiZGZjMmI2Yjg0NzM1ZDQ3ZDZhYWYwZWZlNTMzMDlmNDg1ZTBhMWMyMjIwODU3NWNlNjQ2NDFkYmY3MWVlNjI2YyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY1MDQwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJJWlIyU2w1dTJ5cUU1SVBnS3RMTjRRIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyoj-J4kI6EIduHi4NEBFRbQezWkkkpa_huGpYMQEhyw-M9POEPOrtjKmg1BFLYMnsOF1B_DPtDaQ6tM1uVlKnw57InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo1LCJwcmV2IjoiZDRjNmZlZGM3NGQzYzQzZGQwOGFlMWNkZGRkNTY4ODM4NzJhYWVlMGM4ZDA1MTBkMWM0ZTcyNGU4MWI1ZWY0OCIsImtpbmQiOiJyZW1vdmUiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY1MTAwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIifQ"
+      ],
+      "verdict": "ok",
+      "state": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "head": {
+          "seq": 5,
+          "hash": "e01b6b8e1ee9818ed9ffab8b3abd642d5b681d0ef90e28f859f49cc17cc6fafb",
+          "at": 1763165100000
+        },
+        "owner": "11111111-1111-4111-8111-111111111111",
+        "ownerKey": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "vkCommit": "f8ae9b98f03e797f7a001742a35c84a1ae3baa91baef1ac0f4eb4458cc992f90",
+        "members": {
+          "11111111-1111-4111-8111-111111111111": {
+            "key": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+            "role": "owner"
+          },
+          "33333333-3333-4333-8333-333333333333": {
+            "key": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk",
+            "role": "writer"
+          }
+        },
+        "pending": null,
+        "deleted": null
+      }
+    },
+    "grant-id-used-twice": {
+      "why": "alice adds bob and hands the vault to carol; carol removes bob and adds him again with the SAME grantId (an honest owner never reuses one, but a verifier must still decide).",
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyjIIE58VtU3rLQ3kNTsxU5Av2RycjGC-J4YOC0DFNfF0MiBGtUmD44qg5nj8SR9gQvIQtMri6FruKCJvF6v9qgJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiJmOGFlOWI5OGYwM2U3OTdmN2EwMDE3NDJhMzVjODRhMWFlM2JhYTkxYmFlZjFhYzBmNGViNDQ1OGNjOTkyZjkwIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izysuPjDNjPN_d4dLh3kv_DCvL2b1eFsY-JYhwkOOG6nKdyonmmCow25KcOHN8FIu8sEA88oPds6DWLkib7mTepw97InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiMTE4YWI4YjE0NjFkMjQ0NDgwM2NmNmNmMmM1MTUyNDNiODA0ODIzZTFmNDIzOGYyZTQwZGViYjFkZWJkNzIxNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJCOW1rcjRUQlZJOUtENXVONjh6X2J3In0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyi0xz7ejaVQxkKtVvjfa-MqWqhlT5KFMaOh26l0_Iof5dl__-BsiUxq-FdGtLmIgowyX7qVNVaObZfy-gomJpw17InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiM2YxNTZhYzc2MjdhYjE5ZjgzNzc3ZDY4ZjkyOWRkNjcxMTNmMDEyY2ViZmU5Yjc2ZDA1NzZhYWNmYjZiYTJhZiIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTIwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJ6RkxiZVRCX3ptY0lvY1hrd2pFTkVnIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyu2mttt5SjfKuftW1nrP4OmX-lURz6B6ABSBih3du89jTjnu4siKkTzCAO6o2xQlt5ZoJtU2ritD3St7mBi48Ax7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjozLCJwcmV2IjoiMThhYmY0NGIwMGQzMDU4YWE1OGQ5N2UyZTQzN2E2N2M1ZjdkNTQzODcxMDc5MmRjM2JhNjQ4ZWViNmI3ZDM1MiIsImtpbmQiOiJvZmZlciIsImFjdG9yIjoiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIiwiYXQiOjE3NjMxNjQ5ODAwMDAsInRvIjoiMzMzMzMzMzMtMzMzMy00MzMzLTgzMzMtMzMzMzMzMzMzMzMzIiwidG9LZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwib2ZmZXJJZCI6IjhMeVBUNlJIdkdJTGtzaUdwTTFPc1EiLCJleHBpcmVzQXQiOjE3NjMyNTEzODAwMDB9",
+        "YXZzAgPI5zW1Ijxo8UnV-32PE1GRZivu3m6ykmkHZjTabm83IjQ7gaMESZBXsG2W22cm89sEpmwhMeVZmfeZ7usqFfSnIjr--pMtDDo5ei3qizhZgFgf1stIjD5-Od9BTUBiPwl7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo0LCJwcmV2IjoiMzBkM2YyMmY3YmRkZDRjNTgyOGY5YTAwMmUxZTAxMTMwNDg3ZjA4NTIyODA4N2M1MmMxMjEwZTgzNmUyZjRmNiIsImtpbmQiOiJhY2NlcHQiLCJhY3RvciI6IjMzMzMzMzMzLTMzMzMtNDMzMy04MzMzLTMzMzMzMzMzMzMzMyIsImF0IjoxNzYzMTY1MDQwMDAwLCJvZmZlcklkIjoiOEx5UFQ2Ukh2R0lMa3NpR3BNMU9zUSJ9",
+        "YXZzAgPI5zW1Ijxo8UnV-32PE1GRZivu3m6ykmkHZjTabm83IgPKN4Au6CpJ5XLQtKyMzFxIolcFWP8ECNv8gR1T-OwlkVQgN5nl4NLHkcSouEcA06CHuiPAgDuzAcxN0SsDNQF7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo1LCJwcmV2IjoiNDMzNjU4ZDdjZjYxYzVlYzY3NDU0NjNlNjIyM2ZlMmQ5NDJlNGUxZjgyNjE3NmJmMzM1ZWU2NWMzYzBmOGFiZCIsImtpbmQiOiJyZW1vdmUiLCJhY3RvciI6IjMzMzMzMzMzLTMzMzMtNDMzMy04MzMzLTMzMzMzMzMzMzMzMyIsImF0IjoxNzYzMTY1MTAwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIifQ",
+        "YXZzAgPI5zW1Ijxo8UnV-32PE1GRZivu3m6ykmkHZjTabm83Is3GGsQdvAVAlKqVIsZNPv0CT-3ydpH5PuDb9JyQ6-vwvP0hO8Fzct5nFtieauJlKVspclAFUZXprsyJ0LOW0QB7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjo2LCJwcmV2IjoiNWI1NDg5ZmVmNWIyZjJiMmZjMjFlOTY0NzIzZDVkZTY3NzI5NWE5MDU5ODYyMjRmOGUyMmE5OWM2ZmRkZDM0OSIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjMzMzMzMzMzLTMzMzMtNDMzMy04MzMzLTMzMzMzMzMzMzMzMyIsImF0IjoxNzYzMTY1MTYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJCOW1rcjRUQlZJOUtENXVONjh6X2J3In0"
+      ],
+      "verdict": "ok",
+      "state": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "head": {
+          "seq": 6,
+          "hash": "890734ea3c294a42d2d2053623b691f10a1b990b19f41d790d9fa42eddea8a59",
+          "at": 1763165160000
+        },
+        "owner": "33333333-3333-4333-8333-333333333333",
+        "ownerKey": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk",
+        "vkCommit": "f8ae9b98f03e797f7a001742a35c84a1ae3baa91baef1ac0f4eb4458cc992f90",
+        "members": {
+          "11111111-1111-4111-8111-111111111111": {
+            "key": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+            "role": "writer"
+          },
+          "33333333-3333-4333-8333-333333333333": {
+            "key": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk",
+            "role": "owner"
+          },
+          "22222222-2222-4222-8222-222222222222": {
+            "key": "RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM",
+            "role": "writer"
+          }
+        },
+        "pending": null,
+        "deleted": null
+      }
+    },
+    "add-names-another-key": {
+      "why": "alice adds bob, but the add names dave's key as memberKey.",
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyjIIE58VtU3rLQ3kNTsxU5Av2RycjGC-J4YOC0DFNfF0MiBGtUmD44qg5nj8SR9gQvIQtMri6FruKCJvF6v9qgJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiJmOGFlOWI5OGYwM2U3OTdmN2EwMDE3NDJhMzVjODRhMWFlM2JhYTkxYmFlZjFhYzBmNGViNDQ1OGNjOTkyZjkwIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyh6K6J2Nb8NS74YJ6y7qpYuCCwdPtUEQD7Fgn3PmLVTDIxjId5izq45-_2Nag9z9N9VB2y3ApN2ZV0rNuFyv9wZ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiMTE4YWI4YjE0NjFkMjQ0NDgwM2NmNmNmMmM1MTUyNDNiODA0ODIzZTFmNDIzOGYyZTQwZGViYjFkZWJkNzIxNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJXZDhOZ0lGQlIwcl9EYVhnb2lUSXB6aC1JcklvTTJ6ZlRHbEFaVUdjMkZVIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJGV0Y1VENwdTdsclltZmNXNUVhWUtRIn0"
+      ],
+      "verdict": "ok",
+      "state": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "head": {
+          "seq": 1,
+          "hash": "24cefe2a54d85511b4de3c2b6e8aee92339ab1cb1f7c7aa4a1ea187d2d82e84d",
+          "at": 1763164860000
+        },
+        "owner": "11111111-1111-4111-8111-111111111111",
+        "ownerKey": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "vkCommit": "f8ae9b98f03e797f7a001742a35c84a1ae3baa91baef1ac0f4eb4458cc992f90",
+        "members": {
+          "11111111-1111-4111-8111-111111111111": {
+            "key": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+            "role": "owner"
+          },
+          "22222222-2222-4222-8222-222222222222": {
+            "key": "Wd8NgIFBR0r_DaXgoiTIpzh-IrIoM2zfTGlAZUGc2FU",
+            "role": "writer"
+          }
+        },
+        "pending": null,
+        "deleted": null
+      }
+    },
+    "no-add-of-bob": {
+      "why": "alice adds only carol.",
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyjIIE58VtU3rLQ3kNTsxU5Av2RycjGC-J4YOC0DFNfF0MiBGtUmD44qg5nj8SR9gQvIQtMri6FruKCJvF6v9qgJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiJmOGFlOWI5OGYwM2U3OTdmN2EwMDE3NDJhMzVjODRhMWFlM2JhYTkxYmFlZjFhYzBmNGViNDQ1OGNjOTkyZjkwIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izysC9xeDaTlipZcKAkrYDnqt4Jhx40AM4J78Mb96XYKuVRAq3W9m9rU2PxM-8s9iH2lsrIIKMA4WvpmJWmQ1bcQp7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiMTE4YWI4YjE0NjFkMjQ0NDgwM2NmNmNmMmM1MTUyNDNiODA0ODIzZTFmNDIzOGYyZTQwZGViYjFkZWJkNzIxNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJ6RkxiZVRCX3ptY0lvY1hrd2pFTkVnIn0"
+      ],
+      "verdict": "ok",
+      "state": {
+        "vaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "head": {
+          "seq": 1,
+          "hash": "98d9a60eef2aa065a86ac817e97256d3ff30cc9cda5b51241ee22696778d4d24",
+          "at": 1763164860000
+        },
+        "owner": "11111111-1111-4111-8111-111111111111",
+        "ownerKey": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+        "vkCommit": "f8ae9b98f03e797f7a001742a35c84a1ae3baa91baef1ac0f4eb4458cc992f90",
+        "members": {
+          "11111111-1111-4111-8111-111111111111": {
+            "key": "dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio",
+            "role": "owner"
+          },
+          "33333333-3333-4333-8333-333333333333": {
+            "key": "4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk",
+            "role": "writer"
+          }
+        },
+        "pending": null,
+        "deleted": null
+      }
+    },
+    "no-entries": {
+      "why": "No entry at all.",
+      "frames": [],
+      "verdict": "ok",
+      "state": null
+    },
+    "broken-signature-after-the-add": {
+      "why": "base with one signature bit flipped in its third entry, AFTER the add of bob.",
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyjIIE58VtU3rLQ3kNTsxU5Av2RycjGC-J4YOC0DFNfF0MiBGtUmD44qg5nj8SR9gQvIQtMri6FruKCJvF6v9qgJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiJmOGFlOWI5OGYwM2U3OTdmN2EwMDE3NDJhMzVjODRhMWFlM2JhYTkxYmFlZjFhYzBmNGViNDQ1OGNjOTkyZjkwIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izysuPjDNjPN_d4dLh3kv_DCvL2b1eFsY-JYhwkOOG6nKdyonmmCow25KcOHN8FIu8sEA88oPds6DWLkib7mTepw97InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiMTE4YWI4YjE0NjFkMjQ0NDgwM2NmNmNmMmM1MTUyNDNiODA0ODIzZTFmNDIzOGYyZTQwZGViYjFkZWJkNzIxNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJCOW1rcjRUQlZJOUtENXVONjh6X2J3In0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyi0xz7ejaVQxkKtUvjfa-MqWqhlT5KFMaOh26l0_Iof5dl__-BsiUxq-FdGtLmIgowyX7qVNVaObZfy-gomJpw17InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiM2YxNTZhYzc2MjdhYjE5ZjgzNzc3ZDY4ZjkyOWRkNjcxMTNmMDEyY2ViZmU5Yjc2ZDA1NzZhYWNmYjZiYTJhZiIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTIwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJ6RkxiZVRCX3ptY0lvY1hrd2pFTkVnIn0"
+      ],
+      "verdict": "bad_signature",
+      "failedAt": 2
+    },
+    "entry-missing": {
+      "why": "base without its second entry: the add of carol follows the genesis directly.",
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyjIIE58VtU3rLQ3kNTsxU5Av2RycjGC-J4YOC0DFNfF0MiBGtUmD44qg5nj8SR9gQvIQtMri6FruKCJvF6v9qgJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiJmOGFlOWI5OGYwM2U3OTdmN2EwMDE3NDJhMzVjODRhMWFlM2JhYTkxYmFlZjFhYzBmNGViNDQ1OGNjOTkyZjkwIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyi0xz7ejaVQxkKtVvjfa-MqWqhlT5KFMaOh26l0_Iof5dl__-BsiUxq-FdGtLmIgowyX7qVNVaObZfy-gomJpw17InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiM2YxNTZhYzc2MjdhYjE5ZjgzNzc3ZDY4ZjkyOWRkNjcxMTNmMDEyY2ViZmU5Yjc2ZDA1NzZhYWNmYjZiYTJhZiIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0OTIwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJ6RkxiZVRCX3ptY0lvY1hrd2pFTkVnIn0"
+      ],
+      "verdict": "bad_seq",
+      "failedAt": 1
+    },
+    "add-signed-by-a-member": {
+      "why": "alice adds carol; then an add of bob that carol, a writer, signed as herself.",
+      "frames": [
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izyjIIE58VtU3rLQ3kNTsxU5Av2RycjGC-J4YOC0DFNfF0MiBGtUmD44qg5nj8SR9gQvIQtMri6FruKCJvF6v9qgJ7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjowLCJwcmV2IjoiMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImtpbmQiOiJnZW5lc2lzIiwiYWN0b3IiOiIxMTExMTExMS0xMTExLTQxMTEtODExMS0xMTExMTExMTExMTEiLCJhdCI6MTc2MzE2NDgwMDAwMCwib3duZXJLZXkiOiJkbW41VEkxLWp0RVJkUlZNWm9XRzVRRnIzTFhQR3JlVkpjSERheU1uR2lvIiwidmtDb21taXQiOiJmOGFlOWI5OGYwM2U3OTdmN2EwMDE3NDJhMzVjODRhMWFlM2JhYTkxYmFlZjFhYzBmNGViNDQ1OGNjOTkyZjkwIn0",
+        "YXZzAgOcerokfUuai3m1bqsYJXTl-M2VQCiaH4laBp4AW1izysC9xeDaTlipZcKAkrYDnqt4Jhx40AM4J78Mb96XYKuVRAq3W9m9rU2PxM-8s9iH2lsrIIKMA4WvpmJWmQ1bcQp7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoxLCJwcmV2IjoiMTE4YWI4YjE0NjFkMjQ0NDgwM2NmNmNmMmM1MTUyNDNiODA0ODIzZTFmNDIzOGYyZTQwZGViYjFkZWJkNzIxNyIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMSIsImF0IjoxNzYzMTY0ODYwMDAwLCJtZW1iZXIiOiIzMzMzMzMzMy0zMzMzLTQzMzMtODMzMy0zMzMzMzMzMzMzMzMiLCJtZW1iZXJLZXkiOiI0UEJPWVpJS0ZCNTF2UEhUeTRKQktSVDE1cVBWeUt1cl9malZqUEk3N1hrIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJ6RkxiZVRCX3ptY0lvY1hrd2pFTkVnIn0",
+        "YXZzAgPI5zW1Ijxo8UnV-32PE1GRZivu3m6ykmkHZjTabm83IrGNSHAt1yae62beQtq02GSX1RvHlECetHaa6El4LjwR5Np6i2UauaFvo3tfrWEsYk5iv9DqYnYOKKCcQJl-aAN7InYiOjIsInB1cnBvc2UiOiJ2YXVsdC1sb2ciLCJ2YXVsdElkIjoiYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhIiwic2VxIjoyLCJwcmV2IjoiOThkOWE2MGVlZjJhYTA2NWE4NmFjODE3ZTk3MjU2ZDNmZjMwY2M5Y2RhNWI1MTI0MWVlMjI2OTY3NzhkNGQyNCIsImtpbmQiOiJhZGQiLCJhY3RvciI6IjMzMzMzMzMzLTMzMzMtNDMzMy04MzMzLTMzMzMzMzMzMzMzMyIsImF0IjoxNzYzMTY0OTIwMDAwLCJtZW1iZXIiOiIyMjIyMjIyMi0yMjIyLTQyMjItODIyMi0yMjIyMjIyMjIyMjIiLCJtZW1iZXJLZXkiOiJSc1I2a2I2VUMyQUo3Q2hPeGRnR0R6UDZYMTlJcG5RX25YUmt6V01YYVJNIiwicm9sZSI6IndyaXRlciIsImdyYW50SWQiOiJCOW1rcjRUQlZJOUtENXVONjh6X2J3In0"
+      ],
+      "verdict": "not_authorized",
+      "failedAt": 2
+    }
+  },
+  "cases": [
+    {
+      "name": "valid",
+      "why": "The owner alice added bob and sealed him the vault key.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "nsmy1OTDlWEtY3sauig2msdYh1YGLIalNlc5-IFDBEkHwitR6NNpDQdn1LI9oUPvlQWN7UNl_xr1zb1jnV-LlFvqkLbZnn8JqqaYVL391rRygljO1CV3WylNJzYzZxL-wfqKTJLkxHLNplirBL8icREBqfV0AUo4BvkMEKNFFZ3WIMoJW7vlzQS6hwZ-iM2baeJSdvq5NDC9RrGViJAc7mU14SJnTRM58KP6w-gI88uKHeyfv5EfKnyBCKkgiNMfMusu41gX8YZxG-La244FkBb5rK1xgqPl7CBnTsGXM1v9N1XmkUO7ZOOECGfODKnhpSoHYeXftLvPPBwonanxisvqklhw2MIaccsvShFAA436bnRlRbc4WgMce4GRVDjMrCbVpYxSdwzxS3kWleIBsu9cCRvlut4XjorVY1FTKCX6qeb5wmrByDu2h7zpLhu8RAgwRtLVB1zVMO2tHdZAar4D7SdIILsfGnKq4SrsupSjeQQG8BC-Wyajsm7VfzzlXDQHP9Kv_30hUBWynVER7ixPZ6yBmU4Tkygz5llPiZLaW6WfhmPs3tncJGt9NH_PrOUpD3ZxYteEpiPkxEeiT_rJ4mYy8OKJ65_51KyH32Kz6YsErOvqE22avtQ9HaFQ7zbUOg",
+      "expect": {
+        "verdict": "ok",
+        "vkB64": "k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8",
+        "from": "11111111-1111-4111-8111-111111111111",
+        "grantId": "B9mkr4TBVI9KD5uN68z_bw",
+        "issuedAt": 1763164860000
+      }
+    },
+    {
+      "name": "valid-after-the-owner-changed",
+      "why": "carol owns the vault now, but bob's latest add was signed by alice while she was the owner: O is that add's actor and K the owner key AT THAT ENTRY, so alice's grant still verifies.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "owner-changed-after-the-add",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "gtMoPcmtkuRwd23jUPcKiNRUaJSnHJFvgJTJoe1p6Qt-P7M1bbGLkSLI-HmE8zMhA6fY8J9xcbhdcNXG9KugLi5ALsQhrnWEj1jfkhyHJo15hg-Lbj_PW1VlOsbBy246mAVUHASeHb8iC5s8NWtg-vNowVHKNF3MbFl-1pg_1pjSV-KzkZrtmtOX8Sq0aJJ9oRrok8QzFJ5-1Gz6RpKK0CbPbGQ3w4EuLvt4uk21iB40QjhleOX4uzUrO43L97RO1NJV9kfm4o1_AWuPAoJaxhYXhv5a5KX6mjQSwShKonKH5q35oJ34yqnhBWe5gXCIxOQYJ7ng0MthlXEFeIIh4yRp6swzqTNmf4sM3xidm9zxU_crRezujN7H_usjPyRRPdwWTSAVF14JzZLVQT96THzhafNcWVH0h7nJ9K_yNjaFLI98-8OtB5QVLjnlRd0a2bk_Ss9rSKYQsw3TaEs1GiGwGL0q-nZ5_qGcqY9PNIieHZUw-FWWFlt0QpMVVgGGhuMIj8xLjXnvQokgKUSIBlp8YbsT31gFwc2hNMt8Ewfulwpr1Fcza7KIh6dFYq7sPbqetTWQv_GD4WtLa4Hrs1QnnzjFzVyNHnlBOuyC7DkyylmZ5UFD8r8RqNExcKf1XzTZOg",
+      "expect": {
+        "verdict": "ok",
+        "vkB64": "k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8",
+        "from": "11111111-1111-4111-8111-111111111111",
+        "grantId": "B9mkr4TBVI9KD5uN68z_bw",
+        "issuedAt": 1763164860000
+      }
+    },
+    {
+      "name": "valid-from-the-new-owner",
+      "why": "carol became the owner and then added bob: her grant verifies.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "added-by-the-new-owner",
+      "signer": "carol",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"33333333-3333-4333-8333-333333333333\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"oaES1yKirqjTcGGf1klDQw\",\"issuedAt\":1763165040000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "Pc9dX4oh7eq9oxdu8I922GpOCTUI_5Jd7GtewrOsZwPHx8Mzc4P9WmHWEjpuGe_mwA5y5e1yaaFtyMsXSKrQ0p0XugHsW9qGAyI5VJzb-kHu-q6GHiYaVDF7KU6OsVMhF_433mn_6Q2QijAehcZ7eT0zAwzfq-Xha-UZa9T9Uza-VFVZiRI5mlnjL7c4qvdAxRUqO1Zgr9mhMtt3K7Sk7G1z4yD_bnWjnUzngK9mLRYlQY9sv3yiOfNDZMXdHzvmZeZa9S8vKxHcOSqzo_B-TFPhEYRVmf_zL1jypFFETIZ_-4kd6Mk30m1trZrkM3ezcEWhqrPA9khj_iFArujznXiq8-OcqPbfAZv8qHva6GNiV8akwOXh7CZUGP9prNfG-nIxiwFbUD1uUgIBnLYEaLHfHcrIGCZlaJjGG3RZ8JspX1NdiBURPrKNyI6DDh45PZ52wMC4KwZCckzWNN1FrIbRXSYCIt3YGW1AS5Oz3W-APoIvbDcCTUA-ZzgZHZp3SKTEzPwLlyW_xPOn4y7p2KYh60PVgnLx06RewCLXmUeZdrzKI7P3VIuSb--oCc2F62OeZ5OdomXoo8i9IMF2x4nW9_0g2u5YcxYqQOA1AkUwZnBBoAmI98ItQtx5f-gTqnpMsg",
+      "expect": {
+        "verdict": "ok",
+        "vkB64": "k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8",
+        "from": "33333333-3333-4333-8333-333333333333",
+        "grantId": "oaES1yKirqjTcGGf1klDQw",
+        "issuedAt": 1763165040000
+      }
+    },
+    {
+      "name": "valid-after-a-re-add",
+      "why": "bob was removed and added again; the grant for the second add verifies.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "bob-readded",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"IZR2Sl5u2yqE5IPgKtLN4Q\",\"issuedAt\":1763165040000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "iveI1Ry3swY03A3fxeh06JmRuj5hwLqP-dZZFGVaF0f58XwfvgNI0ew7rkiSBvVnGr6UJ5W0rW7jgIhGppe0FuRuK_iaoT2KZTa5Ji55RsM-C6g_scEFR4WQoGXpq2hEVPDofI2_MO1EcAFL-d8diffkaxH5HzV2R1qLVyMX5i8d_oGN6l2yXpdhPCZ3_IR3DQOvxX_TfszhUm0VzwoAqSFOULddp-qONjDn5YFMNXg9Fa00G847YHc8htbwbWQqvpNuXU2cdHnrimGhAubM1llnjhFwmLtUbKZUvkXzhftE4H2aFB9kRw7ytCoRt5Jj76ujqs1pA9Lqv-Wh9Rp5ItTvzwlIqrr9YIPIu5QdyV4dgX90KtqIeEKrfg_VPuHE6bAsImv1WoBvZLk8R-GX-SGtB6TenXS43IxNnoxA9mv8I4lQRZYvrNZaIxNERoE2pV1h35o30zUYpwrMAP8e_NUoj70-GYj_x-0xt2TLZfSUk5VkW2T4NMz5vd_Fc94LzM-2sKXCCflliaeekZUC6I7-VYVmF6biITkZglTUszEKSUSqs47di_ydPSZKc02Uo5A8gEw_J1BXOJ_wYz064q7afRPkWqprrdSq6hqNor-b3bYecS0_t0utWRsJp6hggyGzwQ",
+      "expect": {
+        "verdict": "ok",
+        "vkB64": "k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8",
+        "from": "11111111-1111-4111-8111-111111111111",
+        "grantId": "IZR2Sl5u2yqE5IPgKtLN4Q",
+        "issuedAt": 1763165040000
+      }
+    },
+    {
+      "name": "valid-after-leaving-and-a-re-add",
+      "why": "bob left and was added again; the grant for the second add verifies.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "bob-left-and-readded",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"IZR2Sl5u2yqE5IPgKtLN4Q\",\"issuedAt\":1763165040000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "xyDCb5czpFMiMRVdpFD4mRbIfFgUEtu7Ly61tM0jvX1aTOV3zCbLdX04-RErl6SOiKwI79yA0y8dSFOK4_3Bdfr6KYCygJnSZJ0qptsOJoyh7jR0AUIftb-LpWb_R2mI8sP5XDeKbTufAL8MyLfcM7S4UP2I1DY6lSokGnCtcdiaJXVGk5HOSEam9V9DAFVM7bC5lioZ8EmZUlIl0uxNuCZp-cSm-czsnDq31xc6bfEZ9Rm3q99UqvRIisXG3VTynMv1hnQO2uYP4mzASxMokMOk-6SKUb7d0804_St-u0BLFDSL3HD0nbF4pZsaOw3aLp9emgZOvDmaDPX3g23yFmyNXOBT4WKzWlKg0RyL5QjUQPfmQSp1h-OVGhUrx7ozHN2Ej94_10REpIUCZgpNZGSrZGS4SVO339Cmzbz8uyJxTZNWis6v8fwaf6lypMz8W_hy9FBblM1vAG_Jzp6Hh4zW14t5yyZFdrBb8eb2dPRynIERp0po9-2hYwcIqUv4XImqFx0lTepEMAd6GAZBC3B8wR1eDNrFRDwNN4hMMyPizCvnMneMVnWq7xc_kLIhl79NecA0XcjEzF-TbrZqDJB4IbOnhqhUyNRgOezzXs-Gt5c02DFbhQg2carlat6ffy69Mw",
+      "expect": {
+        "verdict": "ok",
+        "vkB64": "k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8",
+        "from": "11111111-1111-4111-8111-111111111111",
+        "grantId": "IZR2Sl5u2yqE5IPgKtLN4Q",
+        "issuedAt": 1763165040000
+      }
+    },
+    {
+      "name": "re-add-with-the-same-grant-id",
+      "why": "Two adds of bob carry the same grantId (an honest owner never reuses one). Only bob's LATEST add counts: its actor is carol, so carol's grant verifies.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "grant-id-used-twice",
+      "signer": "carol",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"33333333-3333-4333-8333-333333333333\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763165160000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "3x2fD4k8pq1olw1CYjJyXQ2I9MrscX_34Ho4JwZxwgS-_YamYF5cf50tU3zICQ1VMyfXyDmiM4x8LRnkzCFZi9lJlqL-FiwlTC-lr12VIrK3oPsCiDT_V8YRwP_sngFAbRlJe-VtPcKxxcsGXau_Y1fCoy3B36TtDrISDCK71OPzZcvin_V-KEEMRmdNTxgeFPfIhbWqyddPX9u3sKPxo06l5GQaggWp561BLUb6vxNnif8tV-SSRvFBTBhGgNoeexDBnSd1sReOvt9CQKpMDUQ_GLoW2g5ApdDLbxYOP-0pVGuXo6YC5wyXuklBpbJlw9PXWcAM_SE_Ks3OSpF2EmYFS3gmjNNw0ZWdnYVYHea0miuaSc60BL3KxcU0lvbUrILhIloi3PE4yzwFXWdHnItuQJ9MCOMiRTLpN3Y-R2naDhUb3W6DY25kZWlrvT6SeMQTIx1EVFKPdJ2vFurGzZu3CO-JMJzgZ2OuQuHVbfcIOxXRCJFcXvMdSntQbCWkSIxPnaRomxOFJPs-AEEgDm5xBLmNUKvCfL9_U5jZd6D60boQyaj4YnvYh2G8hCtMKlv5sPrT2GHkl5LOC8LiXq8dObfCSjOXr6umfmTDGIArReWXqjogjcTZ-bcpskiZHc4auw",
+      "expect": {
+        "verdict": "ok",
+        "vkB64": "k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8",
+        "from": "33333333-3333-4333-8333-333333333333",
+        "grantId": "B9mkr4TBVI9KD5uN68z_bw",
+        "issuedAt": 1763165160000
+      }
+    },
+    {
+      "name": "sealed-to-another-key",
+      "why": "The seal was made to carol's key.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "jAF_wqEpHFNHuo-krYMeEfqJFn8qWzcuGbtedUAYmmsZ4gC_-G9vvNlDXhp3IUNmuKI9b-h5eVfqWeMh88bsp6C0oqYa2sv3AYDFusl9cQgx9JouH5S064Fn2xFaP8ytg2mIHGedzgDSfMikVFXRRSV5uK1YFd5z6nv7vlCZnqazrJLZV7hOHB07_RO9CkR87wxLJZEDvSmINmKiURn6QB49wH9hT8ySz2TT4-zndJ7f08jSGl6X8zj4ND9q3gtYihMrBunh0CvbBkIU5AiX7FIO9GAyi4cbOaes9H4cN_Qy7VCy5uNAu7NegOOoD6kveqjfnt9_7Q9rmU4EiuUgIpJMl73lrL1ddn-Ircdg0atM0l2Z0DIFCKeJfGYo24aG_vxj7Dnkxjm5N2fBjzcDE_leC4FB49cGsT6Wxnx1qFAXRir9GJ1r--sDm1Gn23aMbb8wH_4SmIDgzVgPGE4yw6gZzovOakq2PDqMl_t-Zgre7E9BkrKt6clds5zw3fLmCvmZU-4-MkADtsV7ULKKeE6N-3omHoTFAk4bInL6f9LcFbodIUke3SrmwuZgABHOAL5P4cixLh9TACbKtxNKkceGOlrRCXyd6YchyZa1sDLdIwflBl4uwCUKsr_zZzhIub7LAA",
+      "expect": {
+        "verdict": "unopenable"
+      }
+    },
+    {
+      "name": "seal-truncated",
+      "why": "The first 40 bytes of a seal.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "uibR9cZRs5l6VcDEtE7pdPMWQ-3PsPAtJl0x4h7QkGCux8sucVUfgQ",
+      "expect": {
+        "verdict": "unopenable"
+      }
+    },
+    {
+      "name": "seal-damaged",
+      "why": "A seal with its last byte changed.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "YmjTUwHSKymq8GVLo1QLb3OAR5iJJHV_KYPnJG8x_DrFliGDbKodwquv-8V8wtl6ZJ5yIFCEXkywDciuyORJy45zpLhmoIGXya6L76R42m0thbQpCS_2ikTjqNcOwvOgIccGgzGzMiyflQbFLQGoYzAz23nUIsKTP8XbRj-SvW5uujkBvww-Sa3qScIMiwNFg3x3g6sEAePO1N8kFt68nE_L54dZZq-l2bZLRIyrURGG41b1EqHc5uBtvjPPF8Cw-HuB6T_hlBVQ7enSyyugDngVLgMqm-bu6zVH-UNcoqmr2stefLcJv1kqyK6IpP1fNyDyywd4N29IE4J2_EarhdN1OUU5GaDqlOa_zbhcZIj43c9cqf3nPeo7GsjfPuiQzNCWr4fCf9Mz11jcOVfDjJN-KRG4l2xGBjq2sIpSCkCDNEU6FWZv9zuZWX2CRzBaUng4wEx14QvZOGUOErV5cdnE4_5Y7iI6k0oxQllwuuvU6Xe5-gh4hJmonPej1MXIbLDE4VMGoALhaI3F7Kx53hEPSUZdAfd6MsD9kmKfCqVPDG-BaX2RWp8Ol_p7RxExsbCXbYzUqHi4o1li47hfnDckf5xQUzy6ut4IsAZzuS_aCzfNNw5ovXWFiz6E2dDnkcqluw",
+      "expect": {
+        "verdict": "unopenable"
+      }
+    },
+    {
+      "name": "vault-log-frame-inside",
+      "why": "The seal opens to a valid vault-log frame (purpose 0x03), not a grant.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-log\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"seq\":1,\"prev\":\"118ab8b1461d2444803cf6cf2c515243b804823e1f4238f2e40debb1debd7217\",\"kind\":\"add\",\"actor\":\"11111111-1111-4111-8111-111111111111\",\"at\":1763164860000,\"member\":\"22222222-2222-4222-8222-222222222222\",\"memberKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"role\":\"writer\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\"}",
+      "sealedB64": "_2wZmbjDdE3PgrnCuRKETHH8f9LINqDc8l4L3K_kfDs5yAWxBBz0KaVWq2rbE271s0lnSUnvf0k9B3YPFIHPpb3Zm1Ap-P6yY77WBL3JFgeMS9AeblJAFbq57UeXqScKs4EZ73zW-4EXQBZ3x7XY9ls8CRPwoDhuX0FFJJuSbUbgVwjvKnzAWfB-QkOEHhahgS5HJ7pbTrS4Uj8Ixd3MME6UsoLr56egLYoTjXo0HHkOsGUYUmBhc5-yoDll4gLkcM0dEtMd--VcA7OkfmEEzBckNi_TqmGMsytSa_bZvK6WEOeiUnmlBMAdTFfTKTvljR9LXUpZtWaSzua1sddk5XMenSPOQunjVVlWEGjn0KnBHfxU-4DJpZT9yW4aD0_OA2YWv5mUk8GuUeGWN-Foaa2U4HeAScQlJw8YTpG3EZ-bIXA-uHYiXDPqEIIxLt5LoU9QQWPfhDFXc_r0XtANLNzypXknvf31xgK93kPCzq7MPqfPYvA3aXIbMtGw-AIlyY5OeHZP72z1px6bY3JsN63rbHwrOqPzVHvyzQsMB7-cuzj3hIwYoiV_2Je2HHLs23fyIv6679J5liMQGIftCV5CC3TRGkwVNC9CGxLFHShLVjhkn7k9lNBRifKjYBYBqFGWItndFTHE1yBFN1IIH7B1sy2k5QrKa9syAban5MLFGLk_pGLN6j6IwKPnMkmcbrdoVqoBPQ5UpqT8b4vlohM",
+      "expect": {
+        "verdict": "bad_frame"
+      }
+    },
+    {
+      "name": "escrow-frame-inside",
+      "why": "The seal opens to a signed escrow-uvk frame (purpose 0x02).",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"escrow-uvk\",\"userId\":\"11111111-1111-4111-8111-111111111111\",\"identityKey\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\",\"recoveryFp\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"issuedAt\":1763164860000,\"key\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "LxU-XQ6SlFRLHRLguJMDzEZqbi-zeT7dbDQE5UB7tHBtMyWeRiNSOemAajc9Zd2wdCS12iLKIqoMcwlg5fYBja--7eFJd3fAck2JnAz6mwcsINCfozlSjbC_vhRssmDyk1koNRBM2dXMPiP7QCgTlHS-zFvxYlMz1yAnqj7iN20THfidWThrE0LCfovgQ7hBFJTHSL7aQfUNQJIWbM7r_vUmfpNfF71X2CvwHlBKHhTHGYRmUGeYOW6QXI8uCWWTpKoCUeCWKaYlVY-KzFpwXrjUNHnADa9xXr0mi5Hgzg5SoNuYpFxhNHE6jfPqb0ewTjKlADi0287RqdvC_H8-OHeI5DbnzsfR8wWG4M-saVKcSYu75JDoqDweRaI6ynF_z7R9R6gCOWARYwhkU78C0KWZI7cuM8g0GWP7q3hx2Ta1GfRII-Q2nO68sJn5V1wy4imb90Ps5ybaEwgkctP7kWX1W5qYclVH5uiKNS41NBM2eX_U5-f25DaiX5hev47f-P8JioLiwkcq2-cADcQRUSjDP8izqoUm25sV8wXPbVh9mj0DhGR44p6leisXbSjU6WoYS35PHjAvLgmm",
+      "expect": {
+        "verdict": "bad_frame"
+      }
+    },
+    {
+      "name": "short-plaintext",
+      "why": "The seal opens to the first 60 bytes of a grant frame.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "sealedB64": "GDSTpjTP3sW05RBFHsTDmDL6xIy5bJIatIlfeCi17kkXWaGKPVfbsTXmNNHZq_msmMxn1geIhY9wlw5Yb86zVio_TMGwHezugTZTuolws4_qDCHPfDaTfCt7UEsoTZ4juh6VaAOh-xOroQhr",
+      "expect": {
+        "verdict": "bad_frame"
+      }
+    },
+    {
+      "name": "three-byte-plaintext",
+      "why": "The seal opens to three bytes: shorter than the magic.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "sealedB64": "NZh9bWylN3T-gD3e-Jcdc1kw90-yxx5a0D54a_TFoFRfX4dBOXIfmhrFhifnY83elj26",
+      "expect": {
+        "verdict": "bad_frame"
+      }
+    },
+    {
+      "name": "bare-json-inside",
+      "why": "The seal opens to a bare JSON statement (first byte {), as a pre-cut-over grant would: the magic is wrong, which \u00a72.4 calls unknown_format for every purpose.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "ynwnr45nZ-gI3IsRHkT1GVVHpU5t6l84BnZqtE1kHXbgH3FTmkE_7mmi60qVUZM8XOv8J3kY8VgT8--fPQP2Fp2uylSyn4qIQhtGGkA_VRJVUkp-7sh29VKgHOYFQVd1-rw4P41efF5Ttr8GEwv-8DGfZzjb1t01uuWF5VsKpaIS7Eswyn0aN_75an0lWshW5eo8rsFaYHtxfsDwgp4lHpG1ceKPgKla4V52banjD3q2K3V4cACQBHIijaWs1Q-c5rvZkh0ygjx3oH9cpniKzEBKoGcnnOuYRm2TEDL1gt8B-PORP8brtBz58EcGDhurkaEu88gCnzAX1Lowq2eFre5Z-iWihDaBslmlfUrpF4SKzaFluBFiOVbK8LkiFWqPqwVZP0DWWJWFYsCXRMm_Qr3idM27aEQ7yzr3_wVfCnnChJ9AH6NKVgZxWPa1JQRtaGccXl13-Ehzpt9RjWlReCzfPlgGOdnHohEGpNUlybsvSLqjNCGddNs7HnI3aQQ",
+      "expect": {
+        "verdict": "unknown_format"
+      }
+    },
+    {
+      "name": "another-format-version",
+      "why": "The grant frame with format byte 0x03 in its magic.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "sealedB64": "COSVC1EsT8SGxAsOK0ZLMhtI0ZUif18dxvJMyqdfiWKm93ZI6Hs-BSw1nuDWhYv4hOI65awb-OzSni-WJcDWAMguCQSRYrMA68uLZD4s7ZxNVj1hg2LLcBSgGUjxAXYmDRqenmEz0wg2Dg65jgri7snaRkhR9jKvl5dtGl3xq9mQbIGBJ3akhD8WFtXtthjCIHkgODWdx-ljKDHSgJkU2-REs5oiX58jrccTTGehUwecMSoVCmVNst9H4al2NhbMmkOAHRI18v-A_Npw-3Peoh7YhkhfuaBe5Ru1v7pkks-Ftvu3hnqZwROYvZWToeioUVmv22kuWimwLN-8csFg89ea_m4s4ri2xotDTmIFvA_PXWrFH3tV6bWJRi070Y4CMSYdkZoTI125mjvZdXY1sFkmEVRRWqCTqaG7vZpvUpN39oyMQ3ib11WXrwfzf-UkW2ZdiBj9WafeZM6RtoMlo3fRx1Op8ak7LCXS-TfJjzYkEoBGyfJHU6jP_dMaz-iXTEr-PahkahY2ZcSWP39POZu0j0KZ-j3jBFIiGhWsqAF8kMaPGw9MI2Ia0wVYdJ-XkrRnS4WBGxWnsq2NO9H5hC7N5k3ZhhCvnB9cB1XbGqkOsm9c6n-sePteI9mE42fEZZXwew",
+      "expect": {
+        "verdict": "unknown_format"
+      }
+    },
+    {
+      "name": "white-space",
+      "why": "A grant the owner signed with a space after a colon.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\": \"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "SWyHgl1x7W_Qr4eW9psLrBXPk5OoPTee35sh66or-wumQLd0ssAUMKX4enifjyOTxEDtgz173y_ykEl_7upOAVIo3fy7SMyF1dd7bDm6CA6RPFfRSrD-DUMTXC6j9kBj-8v8eaIJjsQmdwh9uNNtFTAazAsloIPHPrF_eQuqLTpPmJ09cYDHhpND8KXowFCpgjsyAGztBcO6KfRNF627-I2JFAty7-o1rAPgmJUItyKu-UoxnjCo2J9851jsWR_n517rPUmrjBp4zjIUPJ_K-flnDkZWm3ztwrv2yIyxCv3XB9-YiAEVsYLCt90vX5qCLFp0iwWLDmDFtpMqGdHKoFc4iSKAvg3gSOqQuxE2wpdghdRzzsO2WwjhzNuxWGYn8bWSlaMMkW3IVZl330beXpgchoL1vgIDlu3IZVjHX-_ezcbFKsCjPX2cENLkT3lgiXSKQZrssOE9zJqqCA_i-OSc5PG6lAHxZlnt2pfgquHmtfV8D_6bPJsi9m0Kwdxiy4YXYELHWha2VP36ZochIS8Styy75w8B5FTsojlMolVFdPUMtpI9hn68975J1wwWwo7Oc9O2xqZORAQWv5mjDx4-BtN04fszWB2nnxBNu_OqwJZirTHkQbL-MNceGikp0FE2GLE",
+      "expect": {
+        "verdict": "non_canonical"
+      }
+    },
+    {
+      "name": "no-vk",
+      "why": "A signed grant with no vk key.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000}",
+      "sealedB64": "nq8X25f3gCMnYS25kK04rMROnQdxQV7bXeJbca0XwlQRWHfeWPdNW4jzgQszOapNNb9uqpD9ryCRqdH8W595QdLa6WbIuokikSH5CpcUBM60qhRFCGit82Qseier-DfUKNhkEtDTbQcHb1sT33xzG_JEw5axB0ApaXazxaA0UXaPev1pjdn-Gf2K8iI5sIcQHa38kVug_2X5zx5j2eJKvEB2_sMDtAdHOOZa-KnwZad-KyM0X6EIndHRCx4m_QT3XKwtf2ESw5B8sxlVFxRXxevSrD4w_S5qS7KYqM1qnmgkwS6jkE9OwXeSe8XOaE6gFbp6nrZXMz29U-gUxfq08Hyevo4yhwjfr0MzFLwyzjmcOySHd_A6hQwTeIa-AgnrQkZ6yFdMqptI075uTsECTcYZhfNTcVvazx389ie9Zirx5NUzonyVZzzrWI95YftWFeKiAUjmuKAVlNbUeDePHzZaBT1Bfx7SREuvP6WyIO6kUINwymYQgMCJeBTnRuoqNhVKVtOLW-_jHmm5fU4mlRmjMzGz5tTO9UiuXgPS4Lt_LWauvm5ossIYpVl0fBQoPQ",
+      "expect": {
+        "verdict": "non_canonical"
+      }
+    },
+    {
+      "name": "vk-of-31-bytes",
+      "why": "vk is base64url of 31 bytes: it fails its type, so step 9's \"vk is 32 bytes\" is never reached with a short key.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gog\"}",
+      "sealedB64": "Y2PJOtgC79wkxTeo-OyecuCvgC7MYOfM3dkqSGN1j0uKcR0-s6VRXEDALL2N96uw0TzNaRUrxl2NW1rpQdZzhzbdMdXBIo0okyfAAR1XNSKkezT9t_grUW_BA_EY54aFygctCHJmAqJk1CJu91WnZSRpi00qSVOqU1nwbvO_r4_gqxVw3-DX_3eN7goyFudXQLABYktZfyAYNqQljMSR6bMnzOhNl7O7kyARnTPbWVy3ktkZni0rEJmrEd0sK5un5g6MAJAznJw8Vld_s2iK5y9Uj8C_t9loV0yR73SUKXNJp3CQ7UeKfpQ9EBA_zIzajIqiA9Y8Zs9arUagume0akefCvPAQRBmM4YHFrkrSQKUoL-t3HnHwpIlNdw8_OvACJDB4E6ON3l8KRdbWoQoDWgtkN39LR_Dqnk9Gcdc9LQyPIkqqLUJiCpBogof49EDsJD8HS-Kwy8t_lwKEfAnUXYJ35XqjvHQ3QC_cWl8O6kfS3uH18HXbiqOqkowu3atrddljLXpG1l0RYGp97hX-kS9y4kfq8CINeCH60rP5ZqT0SObpktb3aQlurjCcq0u9VPoovMX04kzKnQNbqXdGGnFJ2-4ZjfbVfEbOnsfDDOfTa-rx2hVwmht8VE2hsJcR_VJ",
+      "expect": {
+        "verdict": "non_canonical"
+      }
+    },
+    {
+      "name": "from-equals-to",
+      "why": "A canonical grant from bob to bob, signed by bob: from != to is a template rule.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "bob",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"22222222-2222-4222-8222-222222222222\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "jKqL0WRMR1ofO8ptqEXYiykzDYJgXqX-CAs-KVb2NG4SF73QusQ-IhinnWfanF-Tnu4X-nLx3V6Mb-SjyBC2JSn_LKrK1fx-R_zH-9SGcjPos7uQOq99PhqksP5kr1RIQFyeQMXx7o8Lz1f6KRBrwDu2dfnJLR2LNHm8I0mGoK6mVMSWuG--qMhhxW7l1ZqSdEI6gcs2gSW7JjgbkYBVlHLoWzI_qo9wholQKVHNefFXzV22x5Et51zg-IVuoIRbaBQIXtIcu9JHOST7qWownuhm8fD8dFwEDi6lGRbt5Tt86uGNrHLcDM-rTtkbacItez7pLDdKED3Z-u4NQosqy7O1qJaQj_DUHQt_HFUxKSnF4E2hJajhjhJM1_wAE7rPPSn7wCpZvP2qM7VUFtO3BXeLS_uLK8KdkQ3OVvWkns9CEuTuxURaQGRMSUJQq1I2iVRgk7QRRTIloixyjPbHZr4UTN9XeTdFjA8J_ojYx6--hahpW1AH9hV8z2HxEwcXQirsVwPtRSSqpOageDpGy18EK7UhzuHWQsv4wLE0IuzkTXTL4uDz7STP58TJfGN1GM45SGFIcbT1DgnX5clKdf2SuuE4WKhvoReTg6-lDLDyaOOEMvkKlkBQec-y5bfFDL0WiA",
+      "expect": {
+        "verdict": "bad_statement"
+      }
+    },
+    {
+      "name": "version-3",
+      "why": "A canonical grant with \"v\":3.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":3,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "y-E-J9TGH5zuaIruc9lsMrPJH0xT0cyiMPjQMlghBjwcW5OIdeM2UO4B6KQ59bCHkdQRIbGJFib5HKr62sijeat3Gm07i0f5rhhsdVzTyM6s1FpPqSffFYepIj0k_1AcLP1TTcAeCaXfZtd4dYVzT0YT6P_mIxMgvz1SGbm79qHEoe6dSKZgsJPY5lagtDYXDSdfsuMroKNMQjr8HIb8adpDenJ1DA-Hx-KK_BX0p1AZnhdas8uL7JyIoCeDJu5LhW-MixChTFIfyLFlWsXSla8t-vIosd8-Y9Ez7g78h-u7JYgJLG86rhW_S9BBgtagw3W2y-NylrkTZguNZcxfWRshCudJVwH6fCRrFK92pxCUpnaQJ63Y9RNsUWNf3XyubUvezLUxzFJmeNGhjbl6hTm6vlpSKUSN0uz8muLPFCGKSS5DXayIhfo5y0RnMz5tiHTMJB3e8zh2b1WgTSTTCBs88PVnLKE0PlD8x_10oRtkM54D-wEvh8XQP3bwBk3a0bKOwOWUC2SsjN8FNe3J2NHyCbTTnty0JMvpSzHW2k6g40cI1mn5gaD-sRMEqUVcf6cE14f8NUIBUUU3di-zGK_toV_EDc_mMmdGGiosoQq0IO_yZxxduDbKlACIYo8nY48yBw",
+      "expect": {
+        "verdict": "bad_statement"
+      }
+    },
+    {
+      "name": "to-another-account",
+      "why": "The grant names carol and her key, but sits on bob's row and is sealed to bob.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"33333333-3333-4333-8333-333333333333\",\"toKey\":\"4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"zFLbeTB_zmcIocXkwjENEg\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "V2WNHHMZdeuWBlP06A0a3QiZuy7SQVYFFf1KTvIioHoiHd6EjhLl3zQNfmywOaOk0uW4e-3Z5ZCPcdKC6hO-8TTrG8jqcpQUYpON8mLavHhsAo5w4dQuOVdifLk9ZvFliUyI52fitmb500vh-p3B0e71CiiyEGP6cT6E_VHtOPy6afK-kYWMkKykotT3ABckJGD-DOFj2ieN3ovK0SJqD0LEr0paI2IF7QAbvVz2qC4BcHeWbulfE0Jb5XTJLez08Mepp8rqQOxH0kX7-GL4unjNDingIYZRTij4iGTA7v68Kt-WudoAEZTXoI5HLqDba4yZCoN_p12Z-cU76V66Uu8LU1LIbp-xgt0f4RyYaPrt4g3MirOkCs2UNQZfRJ3vaql9aLr7WuRdGyovZBCMgbLlXVi8TmEjhhQqNTCUio8lzFtANOw8TfUuRvf24YAnmvzXq8TAJW-y2fS1-hO6dIYm_3fl5ATASw_NwyGdzgTfmcNc08u6dAU0XfJBJOUn8tG9asMbO4L3tRNELpoBzxA66VlmarVGqxWa4gZkhYHuU_XGDLSulY3qBg3mxtAAr5PGPKeJZ39QpxfluuP9pUdeRx5r5ZVdb-OpxjSPD-fWvMlpaMWB3vZchpPYmHpwhJQHIg",
+      "expect": {
+        "verdict": "misaddressed"
+      }
+    },
+    {
+      "name": "to-me-with-another-key",
+      "why": "to is bob, toKey is carol's key.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "zO-t1G2B0qAcHv2eDENtkjVCZTSdixpdoNs1Tha1p0DHKeC9wSzWnrKnxqpwJu0_LMrhzP2-8Cxw1wqVpIshIhv0_-qgtwaC0p0jZi9yTDijRchFW-mFZGlnrLvJ3dWZ_KuyJKoRij5o4mFhssIVIp1s_6rTvO0efmuDf2FxAkK0uhj4tpaX9RmgRglXyG5a1_mN03BxGlRrFHge5sCD3CYX7jTOHGoo9F3sMt1RuzlKL_G9wjoPSWAskzH75R4leAw9bydtTayHJbt-IjfhSO_FVbu3813Va9H_nIxbshEZppzgMpQLeftsPWSiJ7ifIkEkEHEu5bNtQA4Hg8tPH32ihT9WFxuagPT2QTOqHDSfXlqB3E9lxh44GbeuxLMCgxgB4SDheEmYKfJejPdDSlmdlp2LFuVVmR87jt--PEBG_KUp5ne5PZitOoSInIpJbvXcv7IqEYfh3KkUSgYetU8FqtXb0USY6vIckUit5-3H7EbjiMFnYNMeUNQlsKUozsE0D4ntYYnzaeeb9IcISy1Eaz_QacyyqeZ2ORjJnTnbDjmNphXPl7gRu4KtMnVB68oxMoOaepLgBBBqKKgTk5ZFwIIaw-ZAMTEvHsw6K-TuN0VBgzEUofiRGA6l4FAPzaGXVQ",
+      "expect": {
+        "verdict": "misaddressed"
+      }
+    },
+    {
+      "name": "another-vault-in-the-statement",
+      "why": "The statement names another vault than the row it arrived on.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "1ts0DUZHN6S7zRAz-LjRl_QwtCeWUCTW4P-sOvn4ahnkmkyJEKtcwwFTNz5wFuTEx0Yd71qGd5N_tTdxFpSZ3SxxB9rcZOzU0LHhciqc3zQUh5OR4QBGhLum26S1GpfK-RBFai22Z_xwCJLQmm1NL0MHUUOVvQoR1MldYg79D80KzGdgnMfRQaHLQGH5kcHVdU6iVSRPhmmu4CVwtjotGSudTtXXSEHvV8LflIH8QOcncaN89-cI4OR4X5VgiOA8Rxt2osbUqypCLFC2WOhM2dn4rpZ4ev7WgJ8zN9Z1KFhBJSA-sLqWQK8hEe5mQBxi7zJWPoFTNAumsXoE7ZfiLvwPBgJtNBfqJuRxH-s0zupkje9hj7TJwYq4sKEYmSLEsVxJQkHe0umZxk8QgiSJydp1eUsVD9tvkH0LoADXMiF6mq7_xsXR152Rl2QkKUaswRO76_sOMG9f26K9efRtXZDFWoCBTAMQCI-JacYyrROTrqPIhMacIFCbGbCh4NEIQQdXEFdJbvDb7n1d2yJWFjxCFH_ioo5sXt-1QTCtQZOOMng-ERYW0A0ydRv7Q1QyddzpFWva2uFStZu1Fcl4kc2dpT9-Ayqq5Uo9DCvJhfxvwNWWHBLT_VRnBj0Rp46R-OflXQ",
+      "expect": {
+        "verdict": "vault_mismatch"
+      }
+    },
+    {
+      "name": "grant-id-not-in-the-log",
+      "why": "A grant whose grantId has no add.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"ocLerJTHZgMbJcVEOutF-w\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "TLO_BXCmNyL82rsGx0a-KWJDYpeNRq7sT4j6bzLlDyBDGZniPiFFHm3YKRCjTqwc3LmPMu54cu7gprKAQuqLdDNVtmshd1ve2_Jx1ccJmP49IHGlg_Mo3aWdqPT_Sft3cML-JjmcyXmCrPJXHRSSMAfyQyt3p8vYnJ6F2rn5jvaht7wEHjtBXbwIV8exTw_UiMePJpTp7N8Y3tROy92FYi9C2pGSNU3iV-1SPK4DZWTogK9hjiUNbN_X4lj_CIGJZpcGhQK5NtC-6kJuVoCdtyLG4c2lJsWV4Aq1s5pIebKnQzHzs7Hi5DtsYIaZEXPmy00F5bfnPxW5GP6h7xWxdtw5AAoq6G5uRCIQM-CzNY_I3iulpaIwjH0BiJQmQriIIHwuY2xN_HeOVoevSd7pc6PFD5K0iUMAOvNRaNlp_8VVoGtp_dqtDCTp3GtkMebExs85JYX89uqOetUtuBM_Bz4kiFaBzi-wSsoALNeYgyaAUNL6UuAGUEiGMQIoJh2BJpx4kFOTZ7DxF8kIdg5R-FRiQxdSeQX6HOZODzFDmRjmrb6Z3Qh37kBAnJCOARPFNcWrHefmSpYbP45O_LjICFIMcOrAYYNfMjASOewBQsKcXDXP5nbhUkhXGTlO_A9s82sOUg",
+      "expect": {
+        "verdict": "no_add_entry"
+      }
+    },
+    {
+      "name": "add-is-for-another-member",
+      "why": "The log has an add with this grantId, but for carol.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"zFLbeTB_zmcIocXkwjENEg\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "CaOLESCuyyEeXlotIMI1y6eu7tmDw6wnjPkfx76KtmKgbt9-cDElWeY1tqAhNQdMwl1kCtiYTbZvECDMXk6iHAUEi_D-_X3JD1s_QMSaohef4koauyggbMp3DrmVmnqBQlW7Lv-xVrMIkArywEDdQ22jTvtRjwuFP_1qzgoWVXeSDTozLBCLKjhrwWk4VfmnDcKG7LZcPxl5TdwDuRBm-Es9zAToFDIOBqVIyS-yC7Z1sIvpQ0ZJszNeRzlSxCWy_OxJQ0preFm-xAqEhanzOG-deN4u6_Q7VcUlHTKpj-gNdiFc-m9Y_QKI6cVBVsY30PZJiQ73usl2_eQkW2VrWtBr00bqJY6DIzx9dBaIChl7F-DSjzVGJP268KMXv90V5uw8UFlPWrl2jDkaQtptlwS41esO00tzpEys4qQDP2fz4YByKsEJkVFCIMTTAiAoTkkugBRHsjfayC-HEu-dk2cF4kWe96cvnh26L7V6ZSGlJhX1nSapbjvvMZilyCqDDy6z6RB5augpM2BewUSWbf5gij3UV9Nk77JNh2jjQ54EzlUcHfUDiRcCrQTr2hxagZVD-Au6e6QH1QlG-Izl9oX5W5PXcYQWKUbm22CjhdfZBBDT-CgzKG5UqtbUKoNzCPAQYw",
+      "expect": {
+        "verdict": "no_add_entry"
+      }
+    },
+    {
+      "name": "add-names-another-key",
+      "why": "The log's add for bob names another memberKey than bob's seed-derived key.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "add-names-another-key",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"FWF5TCpu7lrYmfcW5EaYKQ\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "pUU4n0bWiQ70qmOa_3P3Arsuh1s6aQ8yINFHSyoD0Va6Ls8WRGUCLi6KIiCp5ZoRD-72ms9nrJV9bUP2FtPjUbtqTVL_PmneEjbtu2FD8j0kTgYHPFImiUAzFDr35oQPEforKSqt009Tsp1jFiTEXBe0Lx_Hnm0De3y3mz3lICtvRdZsZWJMFMDsYe4X6CAmfHNMqnUJ86Ijr5e3sLoDIZF8Av0ien5MwqcaPT-3IMcQ6VpfCQIwRlb04Xirs4OdR2yjGuonlF5Uau6Bw8SBwpSSK7QFuuPzPLsOfKC9t9ogNjGT7F0-yzeu7pkQkf4uupOP1lUwWY8CaWPzrzX2T2K-upfcXnYG4Q7NmhFsSGRe4TmApw-6yj6Kd-SiBeCAC2lv4Lr4thCm__8f1VrzNBg1-cQN0b1i0FnfnYbTwrLZm5QLz8SAoox447GIn5kFKz-GHkFUPX4ZE2aL8kH_d5bhUzbPgOsa1Ekq6NZ7ZZXzTcxTfPWK2aQnF62dnn4JTuOHsRObUfcp2ECWR8uatL9MwRh2RjfVC2LZRVj3wNx8O3SCbWIIwkUSGfqo4tEgc3zEUme0ZOIrYFP69eSmWe1uAMpBSeb2WPg5vMGUjtRFAiYH8QfVDpyHsKLKyUgJ5LTV3Q",
+      "expect": {
+        "verdict": "no_add_entry"
+      }
+    },
+    {
+      "name": "no-add-of-me",
+      "why": "The log has no add of bob at all.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "no-add-of-bob",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "xgZDD-5b2QR8bMnryEFg8vIJvmxo9-Hv8jcKLeNowwfULenryqUnRhHUsDQA5hgs17YghN95GTJJZM2BEtqlSrBql4Z6eKpQMHzWzhD2IJmuaiy-pDagAAAWNSG1wAg0YvcR02tfOtb27JurAtKoIPLuqBrKWcjk2QkXXBjIa89vU94fdI5TE71SfhJ77T2T_VLcBTi66atmp9IQ0wfDs5cxfdIMYtCv61F6aqvPY_oOlDT2Qp3QWADsXsUYmGrDmN6YgZiZxz8ZuY2qf0-gEVbcwctbQ0IlqPOp2u2DMD7Okl8aiAIB6w9-dlEnrmo4r44u47Sse7YxqZ222dC__fWN-7Cp4eSLdN8AOGdy169EKMs_J42lVhZoldSuCatYWHydjMs-DrVQBYMnaWIcabPvEITNZ8GVLoyqm0vPiV2meI9rx0C0nw8ZhxR7Lb21qP1wd-uGMAMKak4zOU6rirNwbLjV9naX3ep9JD_RmS5GCGIi8vVz6AUdzI-srNnh40vD1rL2Ohdt2nNY-DNuWyZU3fQVwy2txnkAbOSojbIB7ncmh6P7HUQALU4Zj6ej5FRRv_E1dx0O8r9Cn0oQ50ZGAN68wp30-RRqAqF0fFwZiGVqN_INRJNOG6WGPoytkxbZ_w",
+      "expect": {
+        "verdict": "no_add_entry"
+      }
+    },
+    {
+      "name": "first-grant-after-a-re-add",
+      "why": "The grant for the FIRST add, after bob was removed and added again. Only the account's latest add can match: a grant bound to an earlier add is no_add_entry. Otherwise a server could put the old grant back on the row, and the accept prompt would name whoever owned the vault at the earlier add.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "bob-readded",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "x9V83HnHteU3Q0rDuEDIj4K3Gzau3tQSq17wPcJyGSv6pnY8lzyrgCipiN-8ZssrxMZe9NGOOxQ4XA1wHpPJAnus-8AlwmlGmK0S00Ozeaj961m08EBG6-rVG2HfXOKDnui8lmwrOxrKQFpwXSEifp2kdXCvu_ISsI9bCXbQL8B6Qz9Ih_q_ThnYTQpqSA9bO3_xbfWe5Mf3iWWEScH4314n6tfYDKpKwAUYKAtfIdpfMLGQ2sfppHsFOsuN07FfJLW1DkL-yHWLrL7djEKBnBT6PtYsoLMlNiX1_XoEs83UNL8cxWXpbyVqpwcY5rt59yDO7oVLpj6yAbiArsLN4VaYTg8RBbA6stDjapFz8ORDrr9YjJc2DFnGcmOuD-SrzuIsFLSBV7IOac7Woi_as1cvk1MlSze-WDZ1Yx8But1AD8ie_7Cb7msnTW1qstiprABZ7IoUixMdu48REwXaCb_l8BTGOSkq1vTBQRQIKNvEeAw-WZvYADpWbrc7ef-N-KYtfh_QhLn3g8JuuARRLOH1T7g9TBVTDM5Hxkdx5CpFQdP542bxJrhNEgmnfEsqDEM_-SVKTSKGZ_Jtyls93IwtItDDmj1j2ZHgdgss7fuQh9iIlu5THthGlBTkQqV3M2QUyw",
+      "expect": {
+        "verdict": "no_add_entry"
+      }
+    },
+    {
+      "name": "first-grant-after-leaving-and-a-re-add",
+      "why": "The grant for the FIRST add, after bob left and was added again.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "bob-left-and-readded",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "crcA0tF3SagjqALXB8WG4yVCL_ODpX1_z-ABboTtawKE3-ArrTIpu9P-g7qDTkuzCsUxzB57MI2_Zq_H9gQ2Xbs_WCrkTu6HqARH-ap8EjjXxR6k0YdFpN7IWyOo_VeaEyEVQJCe5hqI0Yi3R9uiycVylbEjpcpMHnakPBF_4OUCkbxXMrdpa5b8XDP3TMUBjwnLuu92or4v-z5lXN4gcYrBGxWuP4e_px2YhrvEe4sn8E-xO14_Mp_OYzxZ64r0EVB8y1r5Wj3hISMgzVRlEDFYJRxYO80dwyx4dW2Rkia8Jw2x9kI7ETl3vASBZNlrUJ_0Vn4flRfo3LdIfgiwXYvWI1U_fYugUTTwRMiiJTidx-2OJYhjPpM6ATq0Z9G_0X2PYP8GGmYneFQ_KMC8MnzMkkn7mFlsb-Qc6btd3lz1tkESJu_9yA0ktuLmahiXjxpgnfbfM1V7nh5vFMgu7UpnKaX4g6U43nCUP3Oe3sbsIY61FDfc4CqXBfn9xH6554_LiUik7MaCFJjPKs1t7KiGbGD-YrIVtiuN9o9_lcvzH1OI4b_wW8LOM5xNx6hfGGZubyL2l-KQFOPuydtlyLZTiwmSmzQcxamrmQqiUCTqVIaR2EvRmtdWmDRN2WNrZa3ONQ",
+      "expect": {
+        "verdict": "no_add_entry"
+      }
+    },
+    {
+      "name": "first-grant-after-a-re-add-and-a-removal",
+      "why": "bob was added, removed, added again and removed again. The grant for the FIRST add is no_add_entry (step 6), not removed (step 10): only the latest add can match.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "bob-readded-and-removed",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "wo2WDbFWZp0sVD3K3USUKeitXSNhNU8ep7JhOgsTNU2Zvv_39RKZ4Xx0eNFp1KyHZ5fgjUq4eSy4N30Ej5lYPJ8KpC35t--ojipGGPXb5EYvdw_bp6qE5l1YlGqY2U9ZyET5l4tdAwEqT97_l4h9gxSPuSY2P8Kl48A0EWAlt9zQF6jh2qdFjSJbLvyhFTzVp-d7N2SO-OsfTlm0C6UWcJ2Dicio1b2pAZRcggdFz22cUGvnpk_iJIf1gcVGqaaQxc-jheB7PJKQ4AC4ZlyCa1KWBbN5ajlCphWjEHPqgmS-MHCQFL2CxmtCSCb7px9RXnWhqpXRj5dGDBChhiOUbxhNSF2FTFz5nnsIYwG0PPRmKtNdaqIPR7rmx3NbStZzB7R7g2EdgVI-vLXsx29M7NrjwoxfP8XuCwfRNeSblqrhpVRJ1eL0vc0tsAAYqa8DTjUx7zKATBXzpcBf4gTvff-sGcyRtR6Hz_dGjE_rzrXTlYZDGja27Mt9Z1oo9IBeU-5xYtgaPsjHPmd9CgjIXs8XG47L233b0AqUZgGZizZa7MWactih6B33dLg5LpdxfaS2SR8rEFGZLsT80a6fHXDFxLfaXncFZpk2sdfQW66j2hjGPJ4_1qP7cVyak1v6qPsvrw",
+      "expect": {
+        "verdict": "no_add_entry"
+      }
+    },
+    {
+      "name": "log-is-empty",
+      "why": "The server serves no log entry at all: nothing fails to verify, and there is no add.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "no-entries",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "k0WfrXCY9rBbIHhQJdfIP9j8Ldax-Sy2_hHEOZO6ak0Azx_r7ReacNZ7JNbhkYEMMIle6WAxc6jKrsKo9mQkuV8oI__7k3CyaJeSuabucCT8tBOj_9P_idei4TAuzaAKmR9vlkPqn6MsrVNY9PZ5e1TliiGeDEFk6SH5FlO8B5nsWzk1upF900dVm9J_RFBGWftuUpOGjl-a8k6p5ecWUCMMavBIAvnMWx7OMJVO6Zmyzpg5z6Q0KTgBB6BM52OBAyuA0JMCCyCcPeir7NC6-oHEj468jl_8sOKS9crvK-MdXwA202bXvJl1uCD34EejTn9lvI6YfKVg0p_BX7HtIGYhZEk4yVw01Bv6ppyYNMniEXJvOG_-CC6MrVdU1dvuaG5_AUBfUj7z-DIFMfxgqgcuefGR9TSYW6xuzCFAjfXYZl2TtIjebV027bKxTyjACT4uAOliYIAIpkD_W2G4yAVgggxhxGa7wI9zw-t-HlSNsBUQEgAT6nTSyNADSSA2qxaI2kRrnASxEL4OIV7Hri9qtB1EYexua-o0xFy4f28lb0Va_1WU4qMpBCxjJJLL3ZzXsg5IYe6a1EaHtFPBlXKhkp8r9L5QwsdUqA7L_MhZF_lf_KcW3HQFrl95d44LmOzamw",
+      "expect": {
+        "verdict": "no_add_entry"
+      }
+    },
+    {
+      "name": "log-broken-after-the-add",
+      "why": "A grant whose log does not verify is not evaluated at all: the result is the LOG's own verdict, here bad_signature, even though the add of bob lies before the broken entry.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "broken-signature-after-the-add",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "Xqfy-VZo0Gx-Cfv-cruQebgZIQXpqpYE6lFOU16okivCBBZunxXp9eYlVMCJmIwj29P-DHzb_AP7RONwqn9GZ9eDxIf9S-TU8s_K5c6T3jNXS1Vs7JzBfZem6GSQsMxqd1kdaBuCgySH_xPtpu9YmzMnzBvWpK9mRtrI5ooSpP6ESnjBRNOw-RchX_YLNvMfBIiQjPeyHH76fssUhjhiawYw3a--_YuZQ2OWgvNNx9igQDzGOYu61v-1_HkapJdp57aZ8TSMwxMrNt5-X5lWrRFXDeFU6RbvPt6Hj26E2qnwMdCZdSFurFlULMA6RWGPdr5fZDl474i-S00gyVmwSnGaN7-7H9btzu4ASpUiqAY-0VBFPanC7_nbACv3wgueb9HIhv1jQpXps3f5zuwwM0pE4Yhso9hC1A2Sq44HAlD_i-sq3t__Ipa4ItmV6fNSYh-a5at1eBYBax_Z6f_Z_0g4CgDeoETihAClSlkA6KDwlwKqGAHS4t7iTTk_-tlKeqAx92-R0ka82IfjKQ9rBwYChjM_tQ5M2YS5zfL4iLzr0YaW3dBYmXoL9AH-YW6WcSG9CO8EpKVbASRipWu5qqVDwioc7MRWggFCm8r6_bnMSKfBx3PE8WIVaYClTszXjcGl_w",
+      "expect": {
+        "verdict": "bad_signature"
+      }
+    },
+    {
+      "name": "log-misses-an-entry",
+      "why": "The served log skips an entry: the log's verdict, bad_seq.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "entry-missing",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "BR_Jtyb71_eAIga9AirxPFNcGRoKV9w5GgB5tdEYxEuZif_7MNl-LnmuO_n9_WCPJnj_UK10s_KzLZRr_AtIA92SzvhRaEJMxiMZRzE-sJovHcj-uWxjATHtT572yzEQGM2cO36J5KnM8YnDGNZqAp2OfpZRXIMvh16Byu0S--qIX9ef06pb0MmeyJ6pBMYM_SxC0OJ293d6kiyAGUNyu0imfisQEMHjFW_9wC0_GlMzBjq-0MrVB1p0dPNQVzbsWROjuPLpetIXc4IStWd7Pbt2r2x7K19rgOesyx1JhSAL6-2dm34ysIsDCwuR_Yv1-e4SRsAZt53pTmPf4xQlejQHixRgb_muc7BANlobGJPU5FTxszhzKeQTF8kLLg7fGrLTXonR2oBhLRtm6uikiYgxpqraaRF445t5s-23krThhchlN85ih60vPjKzkIOZNPUw5iVh-zgv5Jym2cHYu629wY2uLI6KVzrtjH-ZEKN4DQJyp-BCZpm9rzm3HFbOBvDsFnlsksVQ3tJJaQoQ9Dm69d5sIU7xHo3Cors4OUOnFxFnNnv2Q2Mh5UytQrcLtWc1wEUlc4oZB5pgBBdoUUNUdjf4nMxvWavNoTvDAYMti4FqG_d3_nbX-hzlI_-CRSQUnQ",
+      "expect": {
+        "verdict": "bad_seq"
+      }
+    },
+    {
+      "name": "log-add-signed-by-a-member",
+      "why": "The add of bob was signed by carol, a writer. The log itself is not_authorized at that entry, so the grant (which carol also signed) is never evaluated.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "add-signed-by-a-member",
+      "signer": "carol",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"33333333-3333-4333-8333-333333333333\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164920000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "FUzW3D_-ADmuwIiEkDF_9kbL8uywFeSJ9XPbLT1zbFaUubDSV6lLxijrLruVfCEe0aXUcdntzPXe0h5N-QIi0SymTHMOUjCl75pGxWXn7SOkw1p1gCN4eHg5fzhdusJi-SMv9-_By6DCvMAvMBxvPRY48AyxMZI-scjB-dsOc-xakJIcQxoJxibct6HlXyKXEDkTf8xD56QpxkFiKUgdrf-YWEcnMVBwuSRc23SOKNZgiPY-SLwHRY-njC_etdJ4S51D-Snm4H5AIJtAHMYuukik5hUTJyK3cT_OlLxghdO3mXk7LauHOc4Ivw2M2hsDor4_HBPNhuVoAeeP1Fo_-Giw6hJczgEfF-nD3kOL7Y09EC4oPWG0tN3mmWTZgjyuUIxUOpVQm7xPNv_IjN_3uaebI5YYQAn96qQlYOD2y0ad7Oqv_-rAOafwcliMEa-I9rOAYnuFMzNEgkASCBnVtvgJLjOkxPHQxDVBOy_429W_AORb3xNqNrho2v80HcPrWzBAl2TrEzB0cUfOFhFs1KWCx-UGix2GxDu2uZzuC998ZM55es38dxY17RC3G0PdCNB0dGxYiKsxMcvJpzGKhP289ZysUdTxIJR6jA8581BqHsFRgxL3NKKFA7O01Eh6g1yVdQ",
+      "expect": {
+        "verdict": "not_authorized"
+      }
+    },
+    {
+      "name": "non-owner-signer",
+      "why": "A non-owner signer: carol, a writer, grants the key and signs as herself. from is not the actor of the add.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "carol",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"33333333-3333-4333-8333-333333333333\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "5sma9aTBmZdIuEEanQjTL0lNIMANS58ARCcC2BIGzHVnxGa6RFI7-euoHp41SYxs5d5gyBDf47jUFYhuUqTH44eHe1-rLeETf9r6q7FHiz95hcgYxe52QJZMRL97T1ZV96aFy87Yb6GKxuN2ICFfj5c5veiGyKRfwokAS5kRbO1VJmGr8zSe31Eqd6WWxHTlf7k9UAmJYerPTcGsH9j7r28PJlFC7EKX6X-WppiA0kIwGsULR3rAdpjDW0xPDKLPwuOtsenpGKNDEAe85pEqoIsm2_xJaajV7aeUkt0K1A3pkqlu1mHcJBlZ4IpG5TOub-NXgmgHDc3VudLtlBnUZZLoXgtoRt1jLPEYdup7-3EIvmSg2J5_yZFix70YUD7Z28diuomUWI-7puhaY600GVOUfapHEOJp5P1WO-lXAm5HApqRWe9Yo82w9y3wrybY3A5Xjef_X958aOhNF0xz5zF3ZdwQQ7y0uEotBjeNnSWJam0Be8uvdYCrGJxUqRMTHLyfsHdkxACy7woN-oBluWtUukVjb_UwPdFDw8S_CP8t-k8Nn1haaDcmTsixPOepO0u5lbJuYocFUKWiZOzHlFGv2PIMQZs1guObzL8i1X68lDKW4XiVkGcTnqIF-ovjJxPDuA",
+      "expect": {
+        "verdict": "not_authorized"
+      }
+    },
+    {
+      "name": "owner-named-member-signed",
+      "why": "from names the owner, but carol's key signed: the signer must map to the owner key at the add.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "carol",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "qDSxnDMoYpFRsnIjTK9FxSc4He2u_QhG5hiyb1kF3g1VDD3YJLgCHx-u8gFw0tW1fRg4wxHSJt3qeujmDztftLUYgY7krP7Yu-n4BZXUJ4dEVloa0QV2EhXoUYROORXqm51oCzT-OlevDrn9TVtK_iImxbQ6mQs4lovYNIDYSJ4nu_xOU6fYn6TBuXZ9gs61XMRZtj2eA3HcHF2grxVkFUUCt7aZ3PcwYdcESuOJkU2evCljZ6WX0ULfO4ITSL3aaR2z8KUGUkScMIGxbjRNM9wQX8Ba_X78A78uPatXTjClRvVWgwX-0ZwqUjpAQNheL9z_Jo1tSHqewBTkUnYqWzQBh2krbNhDAoP37L5UOyYAoPmA_nHRWFtbUCVrLC9Z--N_K9f80sLv6f9hy-MgOa_5OCLyWCqh448LHyJmJ-w1RJLm2mLPRFLIgR62tURGnaITBuWTcZMsK8Qn1mtvbFVUYAkRdKMYXE38aKaGY8s11AXV_H2P4NwAY3NQf0m5T6_LL5b3y5QqZhA9kOdhfT3jqd7UmitQfuxGu32v66AqKzUxMwOhvyMAqWHMQ8xzJhyWESOLGtrYVo5U_qww71zpFmJ2mvO3X8dG218CLCaL8CYGiK7Kv7Vp5kHspzIEuUisQA",
+      "expect": {
+        "verdict": "not_authorized"
+      }
+    },
+    {
+      "name": "new-owner-for-an-older-add",
+      "why": "carol owns the vault now and signs a grant for the add alice made: from must be the actor of THAT add.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "owner-changed-after-the-add",
+      "signer": "carol",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"33333333-3333-4333-8333-333333333333\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "x92xU0M29Yx81ColqeovnmHFFDX5ThlDgGTIiTUme1Z00VtzPD9C2MCn__lkPAYttCHz6eUdWzZb3CaAN-Vv7R4_vShxLKQa5IJLtsp3Upa41yH0PMxrvB3K_G8iacs5Xocj6iO6M2yCkrEKMVGEUOEP-PTNrz75JWhoGn8Px6WfUO028X9BRJa_IhFUu_EY9iQo0egrdYCQr0xwu0IRHI17SvmMO5hhFpXBn13sLfWzUX7v5HB-GIjU0Cdyb1vvq2rvKRPvu02d7NbXD_5zcowCzdOUD6qAMJO4prohJsdZD5gk_8HrVeL-y4gjunyFNPn4RuBlOM0uvl4940iu3w3g0Lsj1gkEgQIWgfMM1RZ8fqfxddXh1gNl2AsTHxVK7gTTLULoQtNvAFPYOkJj93IEDSnFSts7ydfNjjzhW0uPeI71i2vULNLech3MysIriJjOc0R7ZHmf_O2DnueIOA5GCIxYtnXI7hc08csiQ9263E7mbd0RlQldd3v3bPq1skmWWNiVyAaLXa2b6ce0luxDVXnJFNE6p7q5DivcMJIjAyP-uiX-XdTYmtM-ocA5p0B-JAm0d4IZyoNf28yiiN6jbh3hGL-IQWAppX8H6kYw1EpXnB0NXqpKJ6q32Q09cRN_3A",
+      "expect": {
+        "verdict": "not_authorized"
+      }
+    },
+    {
+      "name": "old-owner-for-a-newer-add",
+      "why": "alice, no longer the owner, signs a grant for the add carol made.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "added-by-the-new-owner",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"oaES1yKirqjTcGGf1klDQw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "JLKJuMaP1dYQbS4F0b4kK7JhN1HSYMGhjlP9eLAoShSnmVQoH8Ui3XwvQHMZcP3CFYVMD8DaNW0SaGiEkxSgX5scursZB5G0Q3dX45P19AhFgNi-mlX7F8zzbokbGyojOoOoy2edBTUKlUHRITLeYmfY5UZ591CuJ7IP2opLiIz7WPqhBl7f1WacGEGt6vySHwF1je1ATUFG-Va8He_caq5m6WdJvge2XAr0Kq4GekXBIp9uwaQbdoiKiSGdkI1ylk9jzJHoMUABGU0Rmjo-7ag8eZMY39MowrtCJIx2gxCJvJhNALsDxxdHX59DHnHhLt81f2ubRfpLdqMoosy6_7ZmRa-W5c3z7A6-kX9iZGbvhQX4hHCoLpmzbmx4vuc_PGlWE9GeVgyRIpPSs3zDKuU30pCDRRKE-1p84bBul6dRJQxe---0AIBK0XNIKgcQesl4WK73jkvXvNsBeEF8G_eO3zrNhK9yhcE4HSm3KNWDjHR-DgrC_G1vU8UqT7pcl0dxhSuTOZWl_LsX7UIaC3d-YC7tr_MHfE0QpjYErcHGGu79V61KteNq6AVlsTiLhYKgudh8SQVYlNWl9BtOgtE3y-VZvEj1ieq03bFR9y6QZnoNU_w2ARmjUEU8iFo9OwIv_Q",
+      "expect": {
+        "verdict": "not_authorized"
+      }
+    },
+    {
+      "name": "old-owner-grant-after-a-re-add-with-the-same-grant-id",
+      "why": "alice's grant for the FIRST of two adds of bob with the same grantId. It passes step 6 only because the latest add carries that grantId too; O is the actor of the LATEST add, carol, so alice's grant is not_authorized.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "grant-id-used-twice",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "QJuDqcgtLphk9i0CgxiDz9IZ9yE2_ec3CDNAUFRR-n-bqNDLchJvo0NoXCmJOPwEVH7NDeZG8EQF4WKs55DrA9IgZ0LkC38phO7u80ft8DuQ2wfqbmTwAw3fmSnWwBd17vQrAa9_sS7e-bcZ4s5HovQs78V4E2YPct8QXteN8eENoafQsY5Rf2WgUN6xZkOBK2MmRKiPBxZaDM09lHNcdgeAn92ENx7y6vL-wWkceRFlcW7LWHyEmANMKUcybP73nhNTwpGQKnaQeyfG7rwBepbDUmB1j0dFcIEJFI-Y03CtYPOCiqkPAMuxZbWIyBDspv1Z1GnMwOY2-RI4Uf7geenaMrOYliGEtz1fkYO3ZYOZT5GMLo64iepNb58Jm9QAcQ6mcwDxqKcp3Q5GbTWkFJE2Ad-Ux6nZZ1OVHMgXgSnZdZnJzga6Oo4TT4XYSg0WZitaqeTcJ6zDWFBqn5bzI9dhlGY8WYqQsUrMCXcJHHdCAlajTgiQI3gZi6ZQqTqY-Ju3rR1NeYljultbUbyv448beL14lbThnkOTKN5AdkuoCwJa9Wlm2HW5jSEkH3pFnFFISLj9cCU9n2FfnMNhaS-UB2cNuy7wajhHBp3hRxOmPMJOty9wK_L6AOyBq7RZ_nsqlA",
+      "expect": {
+        "verdict": "not_authorized"
+      }
+    },
+    {
+      "name": "signature-flipped",
+      "why": "The owner's grant with one signature bit flipped.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice, then one signature bit flipped",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "iWtiajs0B5rHnj9b2x58xIvVMSiRm907XKTVwxIgfVd75Ppei6VGN_olm7e_HqfiAdCtXSp63qaTa72Dqm1WMRXDvM2lCYH0MoeF_ILc1qK07qMcWTT_vbWSjotlPAqyr6QZP87ViU2h4DUHV2x2w_eNDwdK1RpAxRrGYYkBYYUwdw3g-XBBPJzPAKWPKu639fl8K8bscjC7pZXLjEy4BKp8Z6fIabeMvqmRJjTPqwwf6pXZfUTZ6R79wOwTScyCkw0F6pHyQyOzudCtPgw0YBZ16teDN4qekjPWquyXmJQhAYwG3a1wGdBPmhYbomVVT5lQOmlVV33kFTM-n6_8jyr-Dg8xNjZV26XeRB8QRUeGXsYYGRBU8_3D6tUvQB7v7YwZ0OjpT_LyZdvCNLHcsrVDqhoUEBBSqP8f-2Q8LsmkEaU25mzfzJSumFA49piQSN7X2p6AfKOuERcxL7dwZGw78-dHypvHM0yuq2Q7r9tQxvmZyDIPlwzLoCV2KOxK9H9mX45GuapwjGfr6O_DLsJ4vLk1r6lmyVmNTgriwA1oViNy5Ry1bKGXD_Z4XXsN6qwOUVEes4FK32cYRObgMpQsmn8TE7SWybWw8rubkEuGTwCNGjE04CByPFVJ2X2uQwzn1Q",
+      "expect": {
+        "verdict": "bad_signature"
+      }
+    },
+    {
+      "name": "vk-changed-after-signing",
+      "why": "The owner signed one key; the statement in the frame carries another (still canonical).",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice signed another statement",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"SJm2LknzcMmxao9is5K9zP98N05jTL07dCt-4QEOfz4\"}",
+      "sealedB64": "TPn6_UT08Ab1wu-vUR1C34YVlpVt6I5L_v11I91zizlyQ6dcIKGPDSU8SHpaGTvPNIDd-cY8yh_C1WqEfdiQSPfOxdjHKxlAbRFV06UIlczSymTfiq5XKfde1Aj4QvUw9ifn-GsJUKCHlvc6mPIQrcrkaHF7dEj1g1GhTY2BcjoEjCeRccuCYQWkhsYt0-tj-R6MXuLdBS3BH2rVdksULOIhomx_zVF5O1YI4rD47wbob1J3ltbMhCUmeXaZp-gHcYAgozarQRkOOKuAjMZukF2GYF1v8S4GaFoEfpevxKR4lc0A4wP-2_xumh5ZRpZjjRN-93l9ywT4mDgW3W8Fhv-GC3c53I096FusKlqEFqorWOAW1LQ3q6k55U3avYIxqLhJSFfsZIPV854u4Fa_Wp7WQ6z2lVobS4Hxa_OSnJfIPi_0OTSszc2Ayw7TXChml9i5yrRUtYfeEtv-9JLDE0-Lv_-63d24Bmhr9RtMFcW8nyKy1pKbpAlndZK2lBIU_QyhHQ_kY8gsDN54eJm9IFeKrTiEQwWcUvRhbFsN0mYIlkN-XQ_HWeJ0mk4GATsvRLGLe5QiOKxQYL74zi4Vlwua8irLDUbShaJbAzmmkJWYUV1_P353HyJqhHWylxDSycMsPw",
+      "expect": {
+        "verdict": "bad_signature"
+      }
+    },
+    {
+      "name": "key-fails-the-commitment",
+      "why": "A key that fails the commitment: the owner really signed this grant, but its vk is not the key the genesis committed to.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"SJm2LknzcMmxao9is5K9zP98N05jTL07dCt-4QEOfz4\"}",
+      "sealedB64": "jXkbA6nLXNxseD5nldGAyHkdJhsbKpT2RTIsHksw3VYIqnVkxyn6AoyWp9BpX2FC0m3mifSLJEyIqqc6_MN_8i9IXrqVHCKIAa8ZQ4K81j5__x1G3VgY3HzJLdQ6be5DrkScl_cXV0rsSD8x-wRdtWCb1DqpaZiKAn2iZ7vY7pYJEi1VxBrN8XbsRKSL1Dd03XoMB-1cS1m3UdUTRMo7uhMeXxCfkVQzRI54hSPVUHEpMtvigTFOH_JB7xLTh_bpNkVZnl1aV-C0ije1fCuMKmS8svalV6dIkhZR8GnvxM-8OtWoaJE0x7qM41O_MEsIV6u7zj7npUqLFTb4wQDmXRbPC8m8s6NDYu_FnFMDbgvpJJuR1fiime3ZYwfhc9EUm9G53qi47vfcCLi0kxHT0BtTmBCpfGDqvtpNmp1ubC6OjnnEe-4UGX2gBt5cquW0zY-NX8RjgTHjz1IVWGMT6_rcPEfznbnOm3vzMb_5SFLIkQbDSWpD0UexsW0_weqgz2RTHwSjg-2ULT3EvsZMMxJMDwMhvw7VyNap8tv22eJiGTqNvGCPLEv-p6gOtOoalDvYpog9IJqMmQK9SM0WUVUxWqFhHeqhUsiSFebTKsKkCwanT1sB76OBt9nlAWPijmpUYQ",
+      "expect": {
+        "verdict": "vk_commit_mismatch"
+      }
+    },
+    {
+      "name": "after-removal",
+      "why": "A grant after removal: the log removes bob after the add.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "bob-removed",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "03l2mQl1AN7VQ8wKSLhx54bJSTj6opAW8vAtlNS3GyS-6ZpIGUmSGplBcJT_mhjxOAFdj-WAbw_gyXM3W9XU-VO0vQWDQXLFD59XcamPPY9n5gvdEFXInLPthQAo9T_vb4wCn9fuFA0GsAvYXokN7e8ly491OLxnWAQoIbzdYuRe3c4AJFWQBNU4b5kl5tzbUTYgS0QrTaqiRsiTfy5ubWnrKrnSsVIBvO17RFZWsusIfMHvbjISsS1glr4fZ557D6e-stClrmZEh8Hi7puE518OIajhBbnLUcblIxGncHiAVoViIsZ13tzBy8xlyzfmPf8qe5TCwj1_X-4xOHQNfbcyWIf5N09LJCMpr5oakuy40z5LfM7cTVnRo13TDUtzzbyL88I7_snlqYw9-MleAyxDNllF0sCkUrOZOQq_AcNtROENNdjU32fjtvJkcojBFXzB6Dv9RL3IlEwUrVbKgXQC9WKB9Ji74X5_ywqSl1K48LqKmP5ckbWL2jmuzw36-PLua0ikRbYnfLyooyakDgXa9VG9_0k3r1LkpZiKypjUpONOxz00Cpl40VhYydQ3c8KDRoNJEV1at6RJSwF6wUF0ik0z8xa6kOLg-z2GHvGKQ_gtnhNSW0LIsZzJdZrtxFhR6Q",
+      "expect": {
+        "verdict": "removed"
+      }
+    },
+    {
+      "name": "after-leaving",
+      "why": "bob left after the add.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "bob-left",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "uOjnzyVrjrDtABw39VYuDU66CZ12q0A9Ge7v3vkAXz-kpqpYXpmBUUeGHt9aCEqlr9k8ac4I0f6vTzJNXUK169PwTpgwQYR1V3mdX0K_lbZ4kXXA3uAPImiHFceduCXbcqPTXhir2p7s5RHrsl8nwiPW_YPFB2foPh4Djnm7tIyTVY5Y5ayWwrJ4U1gMizlWd_bDtQ-BFvMUED7HRE_jlBLDC5tDAWLt_lcY88TEKDu9H43Mu3lcsZcsIY_H22_Qo5KUr4RfImd5BHv1w-0raU6hgdq7kFHZ-0sefTVDj0yvFQSNB_1PvMRAiuUx4CvtxStTAPH0aqHC0QJpC7M5Xa5-nOpGnadRg-7Opk1tBG6DTKPZ4MCAU6eAYo05GwZZF-wIzwfFeo7j0t242axJSCI8sG-VPywamP2x5DwS3W8JrS7SuR5ff6H7wXqiKMgfLC0F-DU4jbdgUBkm3TFAfJ3XQeIj5UvvpKFMIZ3ugdZowTZJMuQ2GypEF_w5fTbhtmYy6RIVcIaUoOui0RhuYb0QNTrIo6ChCCjhjGzFQ-4fO3QyumULtAnMJGnuK3Iypx_tKbGkfjRGoy2ScwQBwHAnll-M4meg1OMPlMlbz9Qzlw8UE4krWL2LaqxH6qJ1quOEyQ",
+      "expect": {
+        "verdict": "removed"
+      }
+    },
+    {
+      "name": "second-grant-after-a-re-add-and-a-removal",
+      "why": "bob was added, removed, added again and removed again. The grant for the SECOND add matches the latest add and is then removed.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "bob-readded-and-removed",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"IZR2Sl5u2yqE5IPgKtLN4Q\",\"issuedAt\":1763165040000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "GNbRPBhBWfylw_kC8vOI2YALcGbGG94ANqSFSNLHm1iyZeaLbx8IKSyH9IP8US90PY2a3BD8OA-JJNmJPBYtC-WzmH6JfGcz8EMaIa0Fy3vNABRZc2X5PRPCXpOMi1UtP4_SUgQVpiC7pDl3rp9wSnmWdsvn2VmWWLI_yNMsafgYDPtBPrLNe1Hv90D6HgJ9tRjMnrW72347xCMWIhkWSnfpZILkcahfEUSX5XKVE57cMgYfkmXc9hCvxdqbsgcOzlRxpT9S2HKdJqd_JJmvUVMN-Me3R3BgeUFX33AI7nKTPrZZUtvl1s-GvmyfEL_trdG1sWOQGr1mUOOh6Eu-RZUmpuwta2Nw1w7m5S854nAhKQlN444HkR3Lf8KMJe9hPofPzx85pofuDQG_VZTNE2xwpV-63nLv_JY1xtKqF_EvYQjWKcesiBWcpb32MPHXzldsI9JztnbqTMaGQhglwBjN5IHAo-kxj9UNRyIzFFaCQPDtFiGa8rcem8JTgjyhmGXwxXM09VS8cYnr5b61mhCkcPPa7l03-nfFKzEIPpWR4VdyOw8N2qwqfBD1ax-GszFjUy6PCz-BLWMul9lHo6LPkUVWNM27owN0qfCdc5ukcmqDAo9J72y8FVny2OkSeZSxYA",
+      "expect": {
+        "verdict": "removed"
+      }
+    },
+    {
+      "name": "order-frame-before-parse",
+      "why": "An escrow-purpose frame whose statement is also not canonical.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\": \"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "NXNqxQdQOtOofm3_Sr0wXPqf3uWL4xofp7iVm7NFm3YvInDcjTbist9UPX63LWjWABv3PEEyx7fBZwc4-zrj7rWZ3URSnsM5ULfAFaZqX7j92NbY1PK3kSzwsFPzcr6doOypRi_MUVFJqR5DV2mwM-e_ZaLQfm2ZL9-LfrZ0q5hvMoQ3JQHCIUMLTUr1P87MiMruONTJujU3yoASYMkSeVtyMwW1dziAHpSYFSP7rcAunRpLmXEJJRjtytKbos-6dRzCq3vj6uoV26WeEZj-MMaeDCQtTJBrsHDGS3WG5aviDknRs51LErbjEkcnhIkdiE8lXDHcTwZRXiPjlxt8DZ0mR8mV2ofFId4BmMxk3l38qtqCfVWKNFopQ_0wEC-ja7QwG_BTaQ91LL60L8MBAmsVuX4rJSkVHNVMYJVkueHy-HJVJD7Gq7_QS9KvVpbdBHxxnQiSx4Qm8KTA3jWQHj_ioyfuznvzMgyZDVW00dnV0NV5XF7SO5qNe22lf3XFGbP2i-rIkHJVT6-PCyFYOjdQ_IEIZyAFSHDHkro7w9-cD1hDmyUUxo1SOfsl0xt1RtWQEAOumHnfbk34__cuD7clT0slJExYpZ5PTy2BZsvxrmGqctE-BTIL9xu7GtYPTPPxZOM",
+      "expect": {
+        "verdict": "bad_frame"
+      }
+    },
+    {
+      "name": "order-parse-before-addressing",
+      "why": "Not canonical, and addressed to carol.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\": \"11111111-1111-4111-8111-111111111111\",\"to\":\"33333333-3333-4333-8333-333333333333\",\"toKey\":\"4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "kVtWKSmSKJzh2HcXxyB6ncTD4H6BaaME-aKj1JyGKAAU-MwYmKtRIE8R7ztBZHm_q8lDAo-m7-DPRwVw-PzKlWh-VseeZ9lhreXUvNZ3dDgvklM2J1A-GKAganr6O3R6baVwCKz70tmkP4G7EmNWrN283L5ByJjWyTGmgorn7LXoskxzq0EEDSEk03L0kDqL4kTiUZ82238MXSMIocitjLyQjfImPrliHTqeG7hB_GarmsgTcMtZlXzYJWjEpwMeqv9Td0lCaPkQ4rNSBN4YR10RcOZtolLpiR-HntPmiwhiUldKDe3bfwnGAFXjqIkdjCJVtVdrL0gKp90e_J5ixWw4L2vD76ZTnfR3DL5aozKKVUmELgbatn-IE8loVO4Mk0wJ0E7x_4dQP2EyZDN5pPUyi3Sn4qZEJwbDNk8exzE0YPC-byKaVXo7YMwAOVx5EwZG2-Y2Jd6wkEvT0jx6VZ41Qt0LLZSm29nJYban-acNBp5hXMKHJaIsC6apGv6_yUiPiCOng0-F2UhrvfKOeou0SYM70-WBltsFD46UjcTlhUM_MM_JuTkIBeM6MKFKekdJq7BDDs2I9xT1WEw-09r_1TFiViTHeMfFxdMKsAWyPfZe41GZniMN_WhnSPyJB0aG01o",
+      "expect": {
+        "verdict": "non_canonical"
+      }
+    },
+    {
+      "name": "order-addressing-before-vault",
+      "why": "Addressed to carol and naming another vault.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"33333333-3333-4333-8333-333333333333\",\"toKey\":\"4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk\",\"vaultId\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "IzkuZWLYIc2P6ignzi4m4Lqd4GcSWeTmShvZomqpnlj_6MiIEKCoFf_da_PdINKA5KwThfUfvpWq0KFillumEBlyI6JR_a_1VCJ8kejhGSJyeBzMPAwSalF-52p_MvQ_gTCQJXEF4ivocsQrgfkv4OOi9JI2rTwjdr35KbzSWgVYOoITDJHkV3s48SU7caiWFZb1KAo4UIxW8SyAh_deW0EVtzomEAIKQsiQDFrkEdSg0KgPOIZv1LSXqMSeBdRhmzulP1AsKiR9dedKt3Occw30OEun585PkXUEnGUqu6y43C2P6GplFeQaNAjTW0sPHYkT13K6da19EINctzOZTyx6dYc9zO-fuhAcXPvkrD2KAavcZjnwXct4VstXeeDCqVeIDT0TDfnb3jg3BYgZqIm7lq0LqjAe4mVZun53BCALUZZXIgbn5J2G9SVkrOP4BtlcnHGT5maBaQ2jjsy1Z7r4wPwWagakaKXZ-wLqi7dfzqb3i8pzeSLVPmov77J34CY3iW6rd-B_lBD1rSO5efdrpfaffaSRq3H3dcp2WtpbkBDh5FhtacvKDOBHfECLGWdBSYRZtenvFNDt5JQ8dDQS7TjcuE8a1Zly-KNTsfbMRhVZ8OCmsBI3gPpKxj-wmiZQFg",
+      "expect": {
+        "verdict": "misaddressed"
+      }
+    },
+    {
+      "name": "order-vault-before-add",
+      "why": "Another vault and an unknown grantId.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"grantId\":\"ocLerJTHZgMbJcVEOutF-w\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "Qa3xyMK2bntwMfcOg5a1uyCLhbbqXN2a3kifT6m54Q0cJkehWketsMPnWIa5-I6N6vKMC-5pOFu6i3uQFyJW-lRkVVtbymgRkqldVwKR40rWn2FB7ecNpf4U0NDV_nFA3Lm3dfWIhIC5jIYm4nKaKh-uDvFWDrB8cjQ7h_W7jkgZJGmuGlOVQivKGjCjAYzj5kjhVFllR-Po6TkldvmUstixNATBU3BjvLH0G_ocspATNtxQwdVOUfaalTs8jUXNhwlfIADncHkOpdDNIh9jRvLi5HkipgjxZERoUcl5fUz83m-ir9LoH8M2JteAIjIHezGV8dooH-4JtWBqDNOLv3hnYSnsAthSa_otC7W0g0bEplH9MqEceP87pOfrvk1Rkt-yEDSzrI1KA7SzjAibkpB7wMT8yPyUTg2q3MEXiHQ1VU1wpkAnK0I1KDx3YbAHDkwZ5M5eDHiK9RLpv0yJBAiED4OeqX6dbnRvSKCzt9pkmZWEsKZvVLjNIsb9hpFSmnMQYxb1M40O06UGc20JrO0jOfms0qh5wKoSBMZLQRYtIcRT-x_gWniB9qaGQtZkU-cuV1BcxsuPJ9GbndiRnpi9JwRHpJC3JDrl0nAHFBKqXwyeWL3xmIKAi_MnrA58A7kIQw",
+      "expect": {
+        "verdict": "vault_mismatch"
+      }
+    },
+    {
+      "name": "order-add-before-signer",
+      "why": "An unknown grantId, signed by a non-owner, with a broken signature.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "carol, then one signature bit flipped",
+      "sealedB64": "iWdcsenvoqxqKXt-EESFDzusesl4dJDeFuWnbCgGSl4AXAAOHZPyBsRnis36HOTVIyV8KU0L5AAUbmCQGmiOkHBhJn2BRerw0XLKGuDUflgGjF0ITxdwOuOBOliB-ycm528Ilii9c1vmVTPH1jFlEZ4G-F8DusLxCcJzgFTFBPxOav-1pl0qcCQ8yRQPyiOYjNG73SmZNtBumhmSf43ZgTqSszaJ1lMcEa9xL4kUvMEgnwmsgwlxbZivhZ3KD3pXKcoA1YgKKKxO0uCsLRxPKC1nMjDBxo4NPIxMKEd34siFIG-_Xb2JSGnyc7cQ_HoWB5yGYdX1cUccc27ToGNP9cJi_jxHvTF6526QHwndgYJPQkht8uw61jhrbS8cBgzA0ylTDf-Ap4sO4UIdTPetn4A_lDJxcA3qL6dgmoFN5d6fzqRZ-YHEJv5L_0-B2OQH3AvchvPoITn56eEd_EKjK-0IOGLxFoDdGVQYqsevVxgu8aC-ne2LwyKKnTtGowWZEQHvrcxwdL_DlDrv6--DLGy5WsrqtZAA7triHVQwfv4Zy__tfxvyegvcGvJ7Mz5-QKB5dbzUI4wUsKf6TRSsHQzuNg7YhPO14GiG23A3Ka5tCIyYs3pYKf9T9o-YGjIecvsB3Q",
+      "expect": {
+        "verdict": "no_add_entry"
+      }
+    },
+    {
+      "name": "order-signer-before-signature",
+      "why": "A non-owner signer whose signature is also broken.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "carol, then one signature bit flipped",
+      "sealedB64": "XkVACwPO0hlPEA5G2dsJobk5m3cQY561I-E3TgS_Jl9bOn18gvjXi4eutLL_9t-J19o7RX8P4QxF0IyZYE81RrRV0BOkrXFX0Y4CZWmHoOQI-yi2Fce1Rv8uMBbOnYFXnTaNDD1gspHAmdOc3Xu-bK27d82xi1r5YDWpJ8sJPD8hYOW8rfhpcEujgbYvBUEdHWu-_vCr_05y4GjCfSyAL_Ed4sh8fhRc8IJgEDYV-YvyMQtK2q7QGLjFVviBtu7EyxCwECR6VmOgSBP4QhyNAtD__4AkH4o8qwInkIYeR0FIf4vvSx1weRTlxHF_k9vPkxsseWuShMa1Uw5JtKa8R47Z--vi65ydc0o-z86QGM3p_e2eQ2R7OLeZ8MT-nT2WcNoeHS7rNWwQAIdJDU1BOEjrfbgwT6xYQdTRnNGlgb_8lDqld7FBeFBK5gnaujMmV_TuBc0zHw4jYApqV6wWTocIkTtHUD-wg-AXPkzCXTzAqTjjP2JXWIoEm-6tPNYkNR7ZLFwtjElUl_6EyEd74V2Xj0Lg0Ppg_atrycR51i59WAcRbpQPUGRQNDSojrjewYPdlbsKPqekhpU9KlkP71qQTzyIHZhEdZ8TSgOVlgE5uUNjzIaAB4fezTBshSD-kK8wdA",
+      "expect": {
+        "verdict": "not_authorized"
+      }
+    },
+    {
+      "name": "order-signature-before-commitment",
+      "why": "A key that fails the commitment under a broken signature.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "base",
+      "signer": "alice, then one signature bit flipped",
+      "sealedB64": "t6AmVCie0UX5jByJQtcyZKYMOFIR1wWGd_emkyk0TCKVZIcADVOzk3fAnA1YOwtCz2yEqxxTGOZKKqlqGi8KMKox42Rfq-8jysJxUT7N1e8SZXd2cJn1r-HN1yc0oFsqD6eLy6pK8B8RXlAHUudOtt4a0HOTWnqF09LCR3tyZ2pyULA4I_b0_qOM-jUucOVZH2FaJtnXBr_1rEPsycMc3hN6fR_jwdq3KAT8ZQtIj-77ZzzG6oMJbW8-Z2FwTBceAHoGoHWQl6_-SiBQREQp4fayj8iLkrDbICb2_Oip6CsF98TfyOf7ascZKw85Dw8rnDFhJ0jTBiguXL7n1TVaxMnRYLrzSB9oXIuQ1lwDZrzIuIQLzlG1Jwpph8Mhy9RBiHls-jeJ_NhZOlD1IGHiGiVrHWX7w2ECKrTArpt3rU60mTDXzC6Um6-Ikk0Zh6iLPi09GbbRM1DqzqxjBFze_KHE3ubsH3YmjPd2i-4xrDwvcAk3ZtbBBDfLKHfRAY9Akhb4Gr-WYMzwMTzQ05rfqmwUKYE7wY7xWl87tgeGQRwK3imcaMwKt6xtCFOHMkIFLMU--kzuXO3bLA3zpW4gZZumnVyfhVPmRqmuqIP_k3bZEHNv96wsdf2xrUzLNGQPCwLHSQ",
+      "expect": {
+        "verdict": "bad_signature"
+      }
+    },
+    {
+      "name": "order-log-before-the-seal",
+      "why": "The log does not verify AND the seal was made to carol's key. The log is replayed before any grant is opened, so the result is the log's own verdict, not unopenable.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "broken-signature-after-the-add",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "Bt3q69YNqwPXQk0Nc9f2MgJhYZfqDZdoC-UvxOTF7HdjpmPD08Mu7XF_r57KuNbEx6ED-FiZND1fc9auUrY4Vp-AFxrAVNf1bjHbwnudqHfJHOpIEFg-RPWm5eBnMuR8f9oLXUixYXd9m-RNB7MBpUPXFLZzwur-ut03dwAxNjOlfDRYNzYmUoeMFpZa2hoyaUXRxqPzKFZ9ktskZammzkcciKZh-CzlToFUj05xnBN3N5R9O5gB1crh4Gmq027sCAB5xg6cU7olAjKQjJfnqEZV3t_5TD3cubZtJU6yzbeEWCJziO60BJxkjazhKhrqoTA52feLwTAeXjjbqOdEu5L15uDm9EVibCSCeqRW6Mu4w2roi0JwlyCAQ-9oyFAw6W0mKXCZB7M2PyQ6wn5aYY7Ws6YeZlsg41KNaCVD4_40WXKW79N3taQ8g2RUOBQRcoJeUphgxQOTPhgaIyyWEDcISLwBj-tSeMDdrMWYJGs-1VWb-D8vnhmobIoY3qH1aJhDTeuQhoWQKnhVE57qlrW4a53i2oCLkh3_tigqPgneASx_hzU3ADD1yDfn3ylTYkPaKsD9NEYxTLTdcTlVof47lrqFdNHXpfBB9ZMlv5uYOZNqV9DzHuRIOrQZxMrLO1P-xQ",
+      "expect": {
+        "verdict": "bad_signature"
+      }
+    },
+    {
+      "name": "order-log-before-the-frame",
+      "why": "The log does not verify and the seal opens to a bare JSON statement: the log's verdict, not unknown_format.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "entry-missing",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "r0eu_lkVDdsIjLxZTrSkm_40hHoyInBz4g_xIZPTlmwqHvwejVCJNSv44iqsI6M9CyPIa5diRryFQNZxq-XTdE0xbQR67rqEl1aYfAayqAFETWS3jdRvLA4Dm9ujrrh4r8xoOYDq-lvpSyd1JjtaaZpzEf2MIhcnVLxYZiNFq4ojUuJPZAUDqrCKqlwBVcMpnW1js-lgpO5vsRsI2_e70tCoz0rfUDCh5JHeeHUzM_lucuvQ1fISyMse6FWZ2yn3doCZxvJFGtT28BWZR4x8nSU0N20h6GYYGL2jgNH_sqdO3ql1-QWKpMaLBM-AhSnPLr7hxJrajwUBmJroD_f5snPBHBJdbAA5bsNkUhW8RNCwVpGUdrEgVtw_VMtYS77eX5eW02JTG_ptmnfGfjWvzXRmYmxjId-6UotLcOhF8ADSVXFxwOgHigxOPr3hhTI5rwdpm3LIMr0MxLfyAfDOoN-ZtjMTJe3Vor_CJdTSLB0cOb_e3ip7AE6a5bFQnHU",
+      "expect": {
+        "verdict": "bad_seq"
+      }
+    },
+    {
+      "name": "order-log-before-the-parse",
+      "why": "The log does not verify and the grant is not canonical: the log's verdict, not non_canonical.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "broken-signature-after-the-add",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\": \"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "tM1aEhn7mj_W248xB6kCjtgC9PHySDA4saaMxO68-QJ6ocoQRow65zDCzqVdMoQf3M2Lj627toJNMjMc4dCfSPYEIyh45JkYV8uZW0iwJ33-s7_-TBrSAiu_2nGPPhnr3Z8jD4HB29lIXwQJbUMPTq0r3e85qusDCLL25ODAH1dWv9_QabyAA1XqRgcCtgaykvnulsOTyxdmz1Sy-jg03sFS1uNnu1vWpqL_j4ROD_cjIzSUpp2XBA5SSp5iB274tFXk83aS7Mq58hAE613mzEUy8kUJVbwCqFFvTCybMWTjnk67vwibZpmxTzbsEWFErNp89stS-5G56CMCJIFNXb1i_8XsjVg-w7ug9XMfe165x-hTz0q9nNKEibP4YdIqtlQ5iiitpiSDytc72Nb_JptloEBpkhUA2DpcJSQ_MZQbvohPHKe9gC7GqgAcK1k5Jm4FIF7QKn3m4cUGxTmUCU2b1e_6M4O7EG42QjAuwo9JzFMdyW_YltdPWaCTrY7PV20qzIjsFroy_StTmYZcGDMud9FB73sI76SnX23Eig-7rn1ECKaWOmXSZchpqmV10QzIEo8L87uDy4l-0DRIU9C1ZgZIwUtio7E05EeXkN46g2X1D8CQbsrhMCholUPMgRYGKvg",
+      "expect": {
+        "verdict": "bad_signature"
+      }
+    },
+    {
+      "name": "order-log-before-addressing",
+      "why": "The log does not verify and the grant is addressed to carol: the log's verdict, not misaddressed.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "entry-missing",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"33333333-3333-4333-8333-333333333333\",\"toKey\":\"4PBOYZIKFB51vPHTy4JBKRT15qPVyKur_fjVjPI77Xk\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "HflJFF3NL88ZfqYeqR_ayxHQDazvgT0uHCPqA_izCQdcJn22fDX4XMIioCsJogJWiy3H8zezo53A7R9B0ePEq4-f9hNFXRHgRX9JCrwY8xZrZBltlCuoVQK6DwToPAFEAKgkbplyznaEVqqPIerCkP_8SYqd-maBgTj339_GfNCWjgHXLpwV3dtgoNaDhZU1odh-d28oEiyHZ5W-XRvvsgzqvsBZegUFqYdZW-npGd4YBa-OBM6qoOINzMWE9Ec0Pok7H8GppJaHtWSwa6TzMMf8WVIFqt5WfpNh-T1fnkGhYH2MkPkAsPuz9LyXzDGeYthf4ifb6_SahUMoscFWsyFXeqQ57VVO-acI5vAEXD3wf7KbMbgCwohoxyQEasvDzpzfLRcu13GsAHpLk9fpajrSH5WhPnfvVnEKBbiE0CJdsdev58fGACFOjxsP_K1ixio-BZYNkLV10xmeJ-m78PT_W4roQfZ5OSDFjK5NlV3ck6a9Yd0xnPeO6fRvj-ZEWO4rrsaqObKDT-zfOQI8MoPPRXrXBP2V7f437u2FAY_h7PjemswRiRgn1bnM9w8VQkieOELoFqQDGCL-GnzInD36H9OqJ-lGOhCY7uHxNkHRCfnpcZ7TI8rBvo-Biy5JhvhcAA",
+      "expect": {
+        "verdict": "bad_seq"
+      }
+    },
+    {
+      "name": "order-log-before-the-vault",
+      "why": "The log does not verify and the statement names another vault: the log's verdict, not vault_mismatch.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "add-signed-by-a-member",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "EDXa6KGDvqitOF69w0vRX120o70xPQQk7aVWgeWr7yXzKuNT_FKI_U2PYrBSlsxIc2P1J6TF0jIl0GmeAOLhuNvppGjZagwHeUqOz8dmwa8i1_bv6VcHDyquaGLvalmuwkacO3gIcJQ8w39lSJ1Qp8w_H_lhpEY00e3h-UXQieJ8n7_UDbFhwPyHn2GftMhxgrFNdHlUmVuy8PdKq3c4BDEFSnG-sya2HJbQ9z38Nm_qW93Pm2So4m00RWS58jGS5f_t1bCxw7FfXNGL6svOqwtZ2evMXJ4BW-aQCDK5XdT4QHwhx9cjiiXuPO5ehBHltV5UGkE1Ez_X840hifhiXoj7-lusjerVCMsmK_xpFVVLM5fwinG_QoQssnJdS4yEE3g0ZqdF8C9cpa931Y-73-gxX9zpL1l3Tmy-xrWOEaM3NaWVtJbQNja_lJKHTEP2MYNU9s5GhipefrxRcDhjGlGwdWBZuFUoRRm_8Iosi70hbfAkUH61UO68P26pTd8SY5mTDw5IObz3_I37HZma67CVmFUkGJLWKBUIcSHl7SVMv1LibMFVZy-fKEwRj1ZqdploIcPMQCaWlU-98nFUN01Nkj8OHtZzfQogv34joZgZgmn2lS4y6U7xCPcf8zuiURxp9g",
+      "expect": {
+        "verdict": "not_authorized"
+      }
+    },
+    {
+      "name": "order-add-before-removed",
+      "why": "An unknown grantId, for a member the log has removed: no_add_entry (step 6) comes before removed (step 10).",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "bob-removed",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"ocLerJTHZgMbJcVEOutF-w\",\"issuedAt\":1763164860000,\"vk\":\"k95Fbm7jcqHZcZZKkIg-H05uamGvqVUHSHMa7f0gor8\"}",
+      "sealedB64": "126j4ZXTxzFj5YaZQl8rFaOe7iDpwErfnO6MB4_zwibVSWmFSt5utUP7I45uFEHuJadszYZXBi18nXJFrUzI6eCjXVtO5-UuRl2uFY5KGtIU32fRBcg61Wt7Z_pDfCeqWY6o-9TSM7LvM3RpuSjvGqLQ9-2t1lBUXOfurCmOHG0mS904F3zLZTehyOkKbQuwIRrWWvL7ErlgCouL2bIce11k_XG16PJPZrzdgOb9f_qidMkFjUIvJxIonx0jDAA_uPp01hPz8ZTsXWlmpH3uFwbIdO3C6jq9RQPngCoIH3zfyU57Sd4EPGAg88Pew8tcNBJ9JV-AIEtPAXJ23fmzSDAJvwgyoQpDTsva3iZzVXfiG6ueQggcdQRh5pRqQ9Ps96U8Df6JLqZwxOrbp6ksO-VPTin4qv2k1hlns2Wcz_x0vgcE-gEl8Kvv09ByMmeX3tV2ghvIPYY1ljSLqVGzl85las4DfMTrw6ewAL-7YV2K_evazHUbZhcSzgTQLxdMsAGmJtvW0-Bce0Au-77CyxVg2_boyspTqUkmTayMIlYH4gxUhbggdr-JOD8PMIIUP2JLPE1OJtztTfqjFK_of62WH7jsjigSMz_NsHGSp0GDRTLN0fnvis9ZFgsSc6N9TZqn8Q",
+      "expect": {
+        "verdict": "no_add_entry"
+      }
+    },
+    {
+      "name": "order-commitment-before-removed",
+      "why": "A key that fails the commitment, for a member the log has removed.",
+      "me": "bob",
+      "rowVaultId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "log": "bob-removed",
+      "signer": "alice",
+      "statementUtf8": "{\"v\":2,\"purpose\":\"vault-grant\",\"from\":\"11111111-1111-4111-8111-111111111111\",\"to\":\"22222222-2222-4222-8222-222222222222\",\"toKey\":\"RsR6kb6UC2AJ7ChOxdgGDzP6X19IpnQ_nXRkzWMXaRM\",\"vaultId\":\"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\",\"grantId\":\"B9mkr4TBVI9KD5uN68z_bw\",\"issuedAt\":1763164860000,\"vk\":\"SJm2LknzcMmxao9is5K9zP98N05jTL07dCt-4QEOfz4\"}",
+      "sealedB64": "1ctj3j49zCRkaHMoDPp0u8zY5rQNXaTzfCGJ-_xFI2qIsBUMkpXwuwemfjvJEXWDf2apBnOunxtsCTkugwP8slmGFyGqEZPipyPD1wSyz7V2APvfmbfufm8H2zcirz_TunPOQqL4Z9S2W6n5Bf1LEJYqMyCqHPJ6axLUs_mLPoA7VcE6iv5gJZ4sG7nTW3BRYFYA1KzwOt6kVBprKqoSOzY_zSfOfMXblvqCUguFeHrkTSOg1PKKwMSsdsInZjQ6EdRpJjs7c-px_TvADrnItYr5rwWBSG658zQwCSbT11_qTCKKjS5l74uAHviXq1rVnU0g9mw18PZJh6fGj45bvmugTjVBwMPp5V00xTmiWoVFt0uDBSCqYoITtzYI-nYn7JJjFd9LDtjGwdaIpsnTBPbr67X6LAzdAhhp0eo-yKU-4y6o2VU44UaHpWWyYXsO6q9CKk7os3r6eehxCRD51myjSphu5fQLzvmg0ciHwfuk8Eijvw9B6ZIr2XyTmtRg2-CU123ddHojdj68r-hOcb587f9zUy-ji3O6AHU65E8DiP9NT-1U11qKzewfpkN8xrgDCmo6eZwc7hxFKdibNEbfcBoRiHIBA71lE-vG602F5UoRw5EkaupqoOyLqxo4nn5Xhw",
+      "expect": {
+        "verdict": "vk_commit_mismatch"
+      }
+    }
+  ]
+}

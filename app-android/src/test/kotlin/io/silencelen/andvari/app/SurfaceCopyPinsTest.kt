@@ -7,22 +7,14 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * Source-level pins for audit fixes that live INSIDE composables, where a pure-JVM unit test
- * cannot reach the rendered output (the module has no Compose test runtime, and adding one to
- * assert a handful of string call sites would be a poor trade). Same idiom as
- * [BrowserAllowlistLockstepTest]: parse the real shipped source, so a one-sided edit fails
+ * Source-level pins for audit fixes in the old controller ([AndvariViewModel]), which the autofill service still uses.
+ * Same idiom as [BrowserAllowlistLockstepTest]: parse the real shipped source, so a one-sided edit fails
  * `testDebugUnitTest` instead of shipping.
  *
- *  - F04: the Trash header and the delete confirm must RENDER
- *    [io.silencelen.andvari.core.client.HouseholdCopy.TRASH_RESTORE_NO_ATTACHMENTS], never an
- *    inlined copy of it — the sentence is byte-shared with web and desktop, and the whole defect
- *    was three surfaces each owning their own wording while claiming to mirror the others.
- *  - F25: the two TOTP-enrollment copy rows must pass the clipboard-clear window, not 0. A `0`
- *    takes copyToClipboard's early-out, which skips BOTH the auto-clear AND EXTRA_IS_SENSITIVE —
- *    i.e. it silently reclassifies the account's second-factor seed as non-secret.
- *  - F08 / F31: the export and strength warnings must be RENDERED, not merely computed. Both
- *    first shipped as core functions with no call site at all — the exact failure these pins
- *    exist to catch, which is why they assert the wiring and not the wording.
+ * The overhaul deleted the old screens; the pins that read them went with them (the Trash caveat, the TOTP copy rows,
+ * the CSV import's preflight, the pattern warning on the old forms, the old About card and update wall, the old
+ * all-snoozed empty state, the attachment names in the old editor). The new path takes its sentences from the
+ * content and the app API, and its own pins live in the trust/ tests.
  */
 class SurfaceCopyPinsTest {
 
@@ -32,128 +24,9 @@ class SurfaceCopyPinsTest {
 
     private val mainActivity by lazy { sourceFile("src/main/kotlin/io/silencelen/andvari/app/MainActivity.kt").readText() }
     private val viewModel by lazy { sourceFile("src/main/kotlin/io/silencelen/andvari/app/AndvariViewModel.kt").readText() }
-    private val healthScreen by lazy { sourceFile("src/main/kotlin/io/silencelen/andvari/app/HealthScreen.kt").readText() }
-
-    // ---- F04 ----
-
-    @Test
-    fun trashAndDeleteSurfacesRenderTheSharedAttachmentCaveat() {
-        val uses = Regex("HouseholdCopy\\.TRASH_RESTORE_NO_ATTACHMENTS").findAll(mainActivity).count()
-        assertEquals(2, uses, "expected the canon sentence at BOTH moments — the delete confirm and the Trash header")
-        // …and never re-inlined beside it: a literal fragment here means a copy that can drift.
-        assertTrue(
-            !mainActivity.contains("but not its attachments"),
-            "the attachment caveat is inlined as a literal — render HouseholdCopy.TRASH_RESTORE_NO_ATTACHMENTS instead",
-        )
-    }
-
-    // ---- F25 ----
-
-    @Test
-    fun totpEnrollmentRowsCopyAsVaultSecrets() {
-        val rows = Regex("""SelectableCopyRow\("[^"]*", setup\.\w+, ctx(, \w+)?\)""").findAll(mainActivity).toList()
-        assertEquals(2, rows.size, "expected the otpauth URI + base32 seed rows; did the TOTP card move?")
-        for (r in rows) {
-            assertTrue(
-                r.groupValues[1] == ", clipClear",
-                "the TOTP seed must copy with the clipboard window (EXTRA_IS_SENSITIVE + auto-clear), got: ${r.value}",
-            )
-        }
-    }
-
-    // ---- F08 ----
-
-    @Test
-    fun theCsvPreflightRendersTheFormulaRiskRow() {
-        // ExportCsv.warnings() computes the formula cells for every export; the dialog is the ONLY
-        // place a user can ever learn about them (the writer deliberately mangles nothing).
-        // A14 (F6): by CELL — "Password of “…”", our field label before the attacker-chosen name.
-        assertTrue(
-            mainActivity.contains("NamedSkips(ExportCsv.FORMULA_WARNING, pre.warnings.formulaCells.map(ExportCsv::formulaCellLabel))"),
-            "the CSV preflight must enumerate the formula-risk cells beside its five sibling categories",
-        )
-    }
-
-    @Test
-    fun theFormulaWarningIsARequiredAcknowledgement() {
-        // A14 (F6): the warning used to be advisory, with "Choose where to save" enabled beside it.
-        // The button now waits for the acknowledgement, which is bound to the cells it was ticked for.
-        assertTrue(
-            mainActivity.contains("ExportCsv.formulaAckSatisfied(pre.warnings.formulaCells, formulaAcked)"),
-            "the save button must be gated on the formula acknowledgement",
-        )
-        assertTrue(mainActivity.contains("formulaAcked = if (on) pre.warnings.formulaCells else null"), "the tick records exactly the cells shown")
-        assertTrue(mainActivity.contains("Text(ExportCsv.FORMULA_ACK"), "the acknowledgement sentence is the shared canon's")
-    }
-
-    @Test
-    fun theCsvWriteRechecksTheAcknowledgementAgainstWhatItWrites() {
-        // A14 review N3: the RESUMED sync loop can land while the SAF picker is up. The acknowledged cells live in the
-        // ViewModel (a configuration change during the picker must not drop them), the write recomputes the cells from
-        // the docs it actually writes (ExportCsv.gatedWrite, behaviour-tested in core ExportTest), and a mismatch
-        // writes nothing, discards the just-created document and shows the dialog again with the new list.
-        val dialog = mainActivity.substringAfter("private fun CsvPreflightDialog(").substringBefore("private fun NamedSkips(")
-        assertTrue(dialog.contains("onClick = { if (canSave) { vm.csvAcknowledge(formulaAcked); onChooseDestination() } }"), "the tick is handed to the ViewModel")
-        assertTrue(dialog.contains("pre.notice?.let"), "the dialog renders why it came back")
-        val run = viewModel.substringAfter("fun csvRun(").substringBefore("private fun orderedDocs(")
-        assertTrue(run.contains("val acknowledged = _ui.value.csvAcknowledged"), "read before the state is cleared")
-        assertTrue(run.contains("ExportCsv.gatedWrite(docs, acknowledged)"), "the cells are recomputed from the docs being written")
-        assertTrue(run.contains("is ExportCsv.GatedWrite.NeedsAcknowledgement ->"))
-        assertTrue(run.contains("csvSelectedVaults = selected") && run.contains("notice = CSV_CHANGED_NOTICE"), "re-presented for the same selection, saying why")
-        assertTrue(run.contains("runCatching { discard(false) }"), "the empty document the picker created is discarded")
-    }
-
-    // ---- H23 (audit 2026-09-13) ----
-
-    /**
-     * The CSV preflight must show WHICH vaults the plaintext file spans and let the user leave
-     * shared ones out (spec 07 intro, stated for both artifacts; web ExportPanel renders the rows
-     * for both modes). The rows are ONE composable shared with the backup preflight — the copy
-     * cannot drift between the two dialogs — and the write honours the selection.
-     */
-    @Test
-    fun theCsvPreflightNamesEveryVaultAndHonoursTheOptOut() {
-        val csv = mainActivity.substringAfter("private fun CsvPreflightDialog(").substringBefore("private fun NamedSkips(")
-        assertTrue(
-            csv.contains("ExportVaultRows(ui.csvVaults, ui.csvSelectedVaults) { vaultId, _ -> vm.csvToggleVault(vaultId) }"),
-            "the CSV preflight must render the per-vault rows with the opt-out",
-        )
-        val backup = mainActivity.substringAfter("private fun BackupPreflightDialog(").substringBefore("private fun ExportVaultRows(")
-        assertTrue(backup.contains("ExportVaultRows(pre.vaults, selected)"), "…the SAME rows the backup preflight renders")
-        assertEquals(1, Regex("item\\(s\\), shared \\(").findAll(mainActivity).count(), "the shared-vault line is written once (inside ExportVaultRows), never re-inlined")
-        val run = viewModel.substringAfter("fun csvRun(").substringBefore("private fun orderedDocs(")
-        assertTrue(run.contains("val selected = _ui.value.csvSelectedVaults"), "the selection is read before the state is cleared")
-        assertTrue(run.contains("orderedDocs(current, selected)"), "…and the write is filtered by it")
-        assertTrue(viewModel.contains("filter { it.vaultId in selected }.map { it.vaultId }"), "orderedDocs filters vaultLines exactly as buildAndWriteBackup does")
-    }
-
-    // ---- F31 ----
-
-    @Test
-    fun everyPasswordSurfaceRendersThePatternWarning() {
-        // MasterPasswordStrengthHints (enroll + the recovery reset leg, one shared composable)
-        // and the backup-passphrase dialog. Both READ it — a computed warning nobody renders is
-        // the defect, and the backup floor now runs on the pattern-aware score, so the refusal
-        // is unexplainable without this sentence.
-        assertEquals(
-            2,
-            Regex("Strength\\.patternWarning\\(").findAll(mainActivity).count(),
-            "expected the pattern warning at the master-password hints AND the backup passphrase",
-        )
-        assertTrue(
-            mainActivity.contains("pattern?.let { Text(it,"),
-            "the backup dialog must render the pattern sentence, not just branch on it",
-        )
-    }
 
     // ---- H72 (audit 2026-09-13): every duplicate/staleness action states its outcome ----
 
-    /**
-     * Merge, "Keep this one", "Not duplicates", its Restore undo and Unsnooze all used to finish
-     * in silence: the dialog closed, the cluster vanished, and nothing said that several logins
-     * had just been moved to Deleted items. Web states each one. These pin the SENTENCES (web's,
-     * verbatim) at the writes that produce them — a notice nobody sets is the defect.
-     */
     @Test
     fun everyDuplicateAndStalenessActionStatesItsOutcome() {
         for (sentence in listOf(
@@ -164,7 +37,6 @@ class SurfaceCopyPinsTest {
         )) {
             assertTrue(viewModel.contains(sentence), "missing web's outcome sentence: $sentence")
         }
-        // The two sentences said in more than one place are constants, not re-typed literals.
         assertEquals(
             1,
             Regex(Regex.escape("""internal const val BACK_ON_THE_LIST = "Back on the list."""")).findAll(viewModel).count(),
@@ -173,99 +45,39 @@ class SurfaceCopyPinsTest {
         assertEquals(2, Regex("BACK_ON_THE_LIST").findAll(viewModel).count() - 1, "…and be USED by both the unsnooze and the restore path")
     }
 
-    /**
-     * The partial state is the one the old code lied about: the survivor IS saved before any
-     * loser is removed, so a throw in the loser loop reported "Could not save — try again" over a
-     * half-done merge. Pin the local catch AND that the sentence it sets is the named constant.
-     */
     @Test
     fun aMergeThatFailsAfterTheSurvivorSaveNamesTheHalfDoneState() {
         val helper = viewModel.substringAfter("private fun runMergePlan(").substringBefore("\n    /** \"Keep this one\"")
         assertTrue(helper.contains("for (id in plan.loserIds) engine!!.remove(id)"), "the loser loop must be inside the helper")
         assertTrue(helper.contains("healthMessage = partial"), "a throw after the survivor save must set the partial sentence")
-        assertTrue(
-            viewModel.contains("""internal const val MERGE_DIDNT_FINISH ="""),
-            "the partial-merge sentence is a named constant — it is the one most likely to be re-worded into a falsehood",
-        )
-        assertTrue(
-            viewModel.contains("partial = MERGE_DIDNT_FINISH"),
-            "…and the merge action must use it rather than the generic save error",
-        )
+        assertTrue(viewModel.contains("""internal const val MERGE_DIDNT_FINISH ="""), "the partial-merge sentence is a named constant")
+        assertTrue(viewModel.contains("partial = MERGE_DIDNT_FINISH"), "…and the merge action must use it rather than the generic save error")
     }
 
-    // ---- H125 (audit 2026-09-13): the app can answer "which version are you on?" ----
+    // ---- the version line still comes from core's constant ----
 
-    /**
-     * The version must come from core's [io.silencelen.andvari.core.client.ANDVARI_CLIENT_VERSION]
-     * — the same constant the wire header is built from, which verify.sh's lockstep check ties to
-     * the gradle versionName — and never from a literal typed into a composable, which is how a
-     * displayed version starts lying after a release. Both surfaces render the ONE line: Settings
-     * (the place a user is sent to look) and the 426 wall (the place the version is being acted
-     * on).
-     */
     @Test
-    fun theAppNamesItsOwnBuildOnSettingsAndOnTheUpgradeWall() {
+    fun theVersionLineInterpolatesCoresConstant() {
         assertTrue(
             mainActivity.contains("""internal val VERSION_LINE = "andvari ${'$'}ANDVARI_CLIENT_VERSION · android""""),
             "the version line must interpolate core's constant, never a literal version",
         )
-        assertEquals(
-            2,
-            Regex("\\bVERSION_LINE\\b").findAll(mainActivity).count() - 1,
-            "both the Settings About card and the UpgradeRequiredScreen must render it",
-        )
-        val upgrade = mainActivity.substringAfter("private fun UpgradeRequiredScreen(").substringBefore("internal fun ErrorBar(")
-        assertTrue(upgrade.contains("VERSION_LINE"), "the 426 wall must name the build it is calling too old")
-        assertTrue(mainActivity.contains("AboutCard()"), "Settings must render the About card, not merely define it")
-    }
-
-    // ---- H123 (audit 2026-09-13): one sentence, both clients ----
-
-    /**
-     * G31 fixed the all-snoozed staleness empty state on web and on Android, and the two lanes
-     * wrote two different sentences for the same state although the Android change cited "web's
-     * twin". This is that drift as a gate: the pinned sentence is Android's (it names the control
-     * the user has to tap), and the web twin must read identically, character for character.
-     *
-     * Cross-CLIENT on purpose — the drift this catches cannot be seen from inside one module.
-     * A missing web checkout is tolerated (the Kotlin gate must not depend on the JS tree being
-     * present); a web file that is present and DIFFERENT is the failure.
-     */
-    @Test
-    fun theAllSnoozedEmptyStateReadsTheSameOnWebAndAndroid() {
-        val sentence = "Every login is snoozed right now — Show snoozed to see them or bring one back early."
-        assertTrue(healthScreen.contains("""Empty("$sentence")"""), "the Android empty state must render the pinned sentence")
-        val web = listOf(File("../web/src/ui/Staleness.tsx"), File("web/src/ui/Staleness.tsx")).firstOrNull { it.isFile }
-        if (web != null) {
-            assertTrue(
-                web.readText().contains(sentence),
-                "web's all-snoozed empty state has drifted from Android's — one state, one sentence (H123)",
-            )
-        }
     }
 
     @Test
     fun noMasterPasswordDerivedRequestReachesTheServer() {
         // Security review 2026-10, root cause C: enrollment and the backup-passphrase dialog sent
-        // the SHA-1 prefix of the master password (or of a passphrase the dialog suggests making
-        // equal to it) to the vault server's relay, which also receives the Argon2id-derived
-        // authKey. The check is gone from both surfaces; item passwords keep the Health scan,
-        // which is not the server's KDF secret.
+        // the SHA-1 prefix of the master password to the vault server's relay. The check is gone.
         for (needle in listOf("breachWarning", "checkEnrolledPasswordForBreach", "breachAdvisory", "BreachAdvisoryBanner", "Strength.breachCount(", "BREACHED_PASSWORD_WARNING")) {
             assertFalse(viewModel.contains(needle), "AndvariViewModel must not carry the master-password breach path ($needle)")
             assertFalse(mainActivity.contains(needle), "MainActivity must not carry the master-password breach path ($needle)")
         }
         assertFalse(mainActivity.contains("breachNote"), "the backup dialog must not run a breach check on its passphrase")
-        // The item-password scan is the relay's one remaining caller, on purpose.
         assertTrue(viewModel.contains("a.hibpRange(prefix)"), "the Health breach scan keeps the relay")
     }
 
     // ---- H15 (recheck R21): the two recovery ladders name a crypto-unavailable device ----
 
-    /** Both hand-rolled ladders are reached with a live CryptoUnavailableException (MemberRecovery
-     *  runs createCryptoProvider() on the wizard) and used to end at "Recovery failed. Please try
-     *  again." — the retry hypothesis the H15 row exists to forbid. The row is FIRST, above the
-     *  KDF and Api rows, exactly as HouseholdCopy.forError orders it. */
     @Test
     fun recoveryLaddersNameACryptoUnavailableDeviceFirst() {
         for (fn in listOf("private fun recoverVerifyError(t: Throwable): String = when {", "private fun recoverResetError(t: Throwable): String = when {")) {
@@ -277,29 +89,5 @@ class SurfaceCopyPinsTest {
         }
     }
 
-    // ---- H80 (recheck R22): the KDF-upgrade re-wrap zeroizes MK / wrapKey ----
-    //
-    // This WAS a source pin on QuickUnlock's inline re-key ("assert the fill(0)s are written where
-    // Account.enroll writes them"). Audit H85 hoisted that routine into core KdfReKeyCore — the one
-    // MK derivation outside Account.kt is no longer on this client at all — and the pin went with
-    // it, as a STRONGER one: core's KdfReKeyCoreTest records the live arrays through a
-    // CryptoProvider and asserts they really are zero afterwards. The phone's remaining duty is the
-    // wiring, pinned in KdfReKeyAdapterTest.
-
-    // ---- round-10 review 1 ----
-
-    /**
-     * An attachment's name is whatever the client that added it wrote, a co-member's included: the list shows it, and
-     * the save dialog (SAF CreateDocument) is offered it, only as core AttachmentRules.safeFileName has it, so a
-     * right-to-left override cannot make "invoice<RLO>fdp.exe" read as "invoiceexe.pdf".
-     */
-    @Test
-    fun attachmentNamesAreShownAndOfferedOnlyAsSafeFileNames() {
-        assertFalse(mainActivity.contains("Text(ref.name"), "a raw attachment name is rendered")
-        assertFalse(mainActivity.contains("saver.launch(ref.name)"), "a raw attachment name is offered to the save dialog")
-        assertEquals(2, Regex("""Text\(AttachmentRules\.safeFileName\(ref\.name\)""").findAll(mainActivity).count(), "the item's list and the editor's list")
-        assertTrue(mainActivity.contains("saver.launch(AttachmentRules.safeFileName(ref.name))"))
-        assertFalse(viewModel.contains("notice = \"Saved \${ref.name}\""), "nor in the notice after a save")
-        assertEquals("invoicefdp.exe", io.silencelen.andvari.core.app.AttachmentRules.safeFileName("invoice\u202Efdp.exe"))
-    }
+    // The re-wrap of the keys at a change of the key-derivation settings: core's KdfReKeyCoreTest and KdfReKeyAdapterTest pin it (see their notes).
 }

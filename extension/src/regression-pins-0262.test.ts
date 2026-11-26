@@ -49,10 +49,10 @@ test("G14 — the totp SW handler refuses tab senders BEFORE it looks the item u
 // ---- G21: a reader-vault login is never OFFERED a write the server will refuse ----
 
 test("G21 — buildVaultKeys records each opened grant's role beside its key", () => {
-  // A6 (Q8): the builder moved to the UVK-wraps-only leaf grantkeys.ts (buildVaultKeysFromWraps).
+  // A6 (Q8): the builder moved to the UVK-wraps-only leaf grantkeys.ts (buildVaultKeys).
   const leaf = readFileSync(new URL("./grantkeys.ts", import.meta.url), "utf-8");
-  const build = spanOf(leaf, "export function buildVaultKeysFromWraps(", "\nexport function ");
-  const keySet = at(build, "vaultKeys.set(g.vaultId, vk);", "the key record");
+  const build = spanOf(leaf, "export function buildVaultKeys(", "\nexport function ");
+  const keySet = at(build, "vaultKeys.set(g.vaultId, got.vk);", "the key record");
   const roleSet = at(build, "vaultRoles.set(g.vaultId, g.role);", "the role record");
   assert.ok(keySet < roleSet, "the role is recorded for exactly the vaults whose key opened");
   // H64 added a third member of the same triple (`memberGranted`, the sealedVk provenance the
@@ -61,26 +61,26 @@ test("G21 — buildVaultKeys records each opened grant's role beside its key", (
   // without the role.
   // Root cause A §3.1 (security review 2026-10) added the refused-key set; A6 (Q8) dropped the seal compare
   // (vkMismatch) and added the waiting set — all still leave the builder together.
-  assert.ok(build.includes("return { vaultKeys, vaultRoles, memberGranted, keyUnreadable, waiting };"), "every map leaves the builder together");
+  assert.ok(build.includes("return { vaultKeys, vaultRoles, keyUnreadable, waiting };"), "every map leaves the builder together");
 });
 
-test("G21 — writableItem is the one gate, and it reads the recorded role", () => {
+test("§12.2 rule 4 — writableItem is the one gate: only the personal vault is writable", () => {
   const fn = spanOf(bg, "function writableItem(it: DecryptedItem): boolean {", "\n}");
-  assert.ok(fn.includes("const role = session.vaultRoles.get(it.vaultId);") && fn.includes('return role !== "reader";'), "reader ⇒ not writable");
-  // Security review 2026-10, branch A11 (q13): a missing role now fails CLOSED (only the in-force personal vault needs none).
-  assert.ok(fn.includes("if (role === undefined) return session.personalVaultId !== \"\" && it.vaultId === session.personalVaultId;"), "a missing role fails closed");
+  assert.ok(fn.includes('return session.personalVaultId !== "" && it.vaultId === session.personalVaultId;'), "a shared vault is read-only here whatever its role");
 });
 
-test("G21 — the capture banner never offers Update against a reader-vault match", () => {
+test("§12.2 rule 4 — a changed password for a shared-vault match is the notice, never a write", () => {
   const cap = spanOf(bg, "async function capturedCredential(", "\nasync function ");
-  assert.ok(cap.includes("const updatable = existing !== undefined && writableItem(existing) ? existing : undefined;"));
-  assert.ok(cap.includes("updatesItemId: updatable?.itemId ?? null,"), "the pending save targets the WRITABLE match only");
-  assert.ok(!cap.includes("updatesItemId: existing?.itemId ?? null,"), "the pre-fix shape (any match is an update target) must not return");
+  assert.ok(cap.includes("const updatable = existing !== undefined && writableItem(existing) ? existing : shared;"));
+  assert.ok(cap.includes("updatesItemId: updatable?.itemId ?? null,"));
+  const offer = readFileSync(new URL("./saveoffer.ts", import.meta.url), "utf-8");
+  assert.ok(offer.includes("if (sharedLoginNotice(p)) return { parts: slotParts(T.SHARED_LOGIN_NOTICE, named ?? T.A_SHARED_VAULT), primary: T.OK };"), "the shared-login notice, by its line");
 });
 
-test("G21 — commitPendingSave lands a reader-vault update as a NEW personal item", () => {
+test("§12.2 rule 4 — commitPendingSave refuses a shared-vault update and lands an unnamed match as a NEW personal item", () => {
   const commit = spanOf(bg, "async function commitPendingSave(", "\nasync function ");
-  const override = at(commit, 'if (decision.kind === "update" && !writableItem(decision.target)) decision = { kind: "create" };', "the reader override");
+  const override = at(commit, 'if (decision.kind === "update" && !writableItem(decision.target)) {', "the personal-only override");
+  assert.ok(commit.includes('if (frozenTarget !== undefined) return { res: { ok: false, code: "shared_vault", error: "the login is in a shared vault" }, wrote: false };'));
   const suppress = at(commit, 'if (decision.kind === "suppress") {', "the suppress branch");
   assert.ok(override < suppress, "the override runs before any branch consumes the decision");
 });

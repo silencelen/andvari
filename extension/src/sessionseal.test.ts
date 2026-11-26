@@ -91,7 +91,11 @@ function fakeKeys(mode: "ok" | "refuse" | "hang" = "ok") {
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
 /** A value carrying a marker, so "nothing of it is in storage" is checkable on the raw JSON. */
-const secretValue = (kind: string) => ({ kind, access: `SECRET-MARKER-${kind}`, nested: { password: `pw-${kind}`, n: 7 } });
+// Each secret is a marker far longer than chance can spell in base64url ciphertext (the old check, that the
+// sealed JSON held no "pw-", failed now and then: random ciphertext can hold those three characters). A check asks
+// whether the WHOLE secret appears.
+const SECRET_MARKER = "SECRET-MARKER-PLAINTEXT";
+const secretValue = (kind: string) => ({ kind, access: `${SECRET_MARKER}-${kind}`, nested: { password: `plaintext-password-of-${kind}`, n: 7 } });
 
 test("every secret-bearing kind is written sealed — {v:1, iv, ct} — and nothing of the value reaches storage.session", async () => {
   const s = fakeSession();
@@ -104,7 +108,8 @@ test("every secret-bearing kind is written sealed — {v:1, iv, ct} — and noth
     assert.ok(isSealedRecord(raw), `${kind} is stored as a sealed record`);
     assert.deepEqual(Object.keys(raw as object).sort(), ["ct", "iv", "v"]);
     const json = JSON.stringify(raw);
-    assert.ok(!json.includes("SECRET-MARKER") && !json.includes("pw-"), `${kind}: no plaintext in storage`);
+    const secret = secretValue(kind);
+    assert.ok(!json.includes(secret.access) && !json.includes(secret.nested.password), `${kind}: no plaintext in storage`);
     assert.deepEqual(await seal.get(kind, OK_A), secretValue(kind), `${kind} round-trips`);
   }
   // The slots are the worker's existing keys: two global ones, two under the origin's namespace.
@@ -120,9 +125,11 @@ test("every secret-bearing kind is written sealed — {v:1, iv, ct} — and noth
   assert.notEqual(SEAL_DB_NAME, "andvari-qu");
 });
 
-test("the storage.session inventory: four sealed kinds, three plain ones, anything else is not this build's", () => {
+test("the storage.session inventory: four sealed kinds, five plain ones, anything else is not this build's", () => {
   assert.deepEqual([...SEALED_KINDS].sort(), ["knownLogins", "quickUnlock", "session", "tabs"]);
-  assert.deepEqual([...PLAIN_KINDS].sort(), ["lockNotice", "updateChannelQuiet", "updateCheckedAt"]);
+  assert.deepEqual([...PLAIN_KINDS].sort(), ["capturesLost", "forkSeen", "lockNotice", "updateChannelQuiet", "updateCheckedAt"]);
+  assert.deepEqual(classifySessionKey("capturesLost"), { cls: "plain", kind: "capturesLost" });
+  assert.deepEqual(classifySessionKey(nsKey(OK_A, "forkSeen")), { cls: "plain", kind: "forkSeen" });
   assert.deepEqual(classifySessionKey("session"), { cls: "sealed", kind: "session" });
   assert.deepEqual(classifySessionKey("tabs"), { cls: "sealed", kind: "tabs" });
   assert.deepEqual(classifySessionKey(nsKey(OK_A, "quickUnlock")), { cls: "sealed", kind: "quickUnlock" });
@@ -296,7 +303,7 @@ test("no key store (no IndexedDB, refused, or no answer in time): nothing secret
       assert.equal(s.data.has(slotKey(kind, OK_A)), false, `${name}: no ${kind} record at all`);
       assert.equal(await seal.get(kind, OK_A), undefined);
     }
-    assert.ok(!JSON.stringify([...s.data.values()]).includes("SECRET-MARKER"), `${name}: nothing secret in storage.session`);
+    assert.ok(!JSON.stringify([...s.data.values()]).includes(SECRET_MARKER), `${name}: nothing secret in storage.session`);
     // The quick-unlock compartment needs the key, whatever the access-level call said.
     assert.equal(quickUnlockCompartment({ sessionTrusted: true }, seal.available()), false, name);
   }

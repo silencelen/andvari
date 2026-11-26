@@ -80,7 +80,7 @@
     --gold-hi: #8f6b16;
     --gold-lo: #7d5e14;
     --danger: #b3402c;
-    --ok: #4f7a3a;
+    --ok: #4c7538;
     /* Light theme: the golds darken, so primary buttons need light ink and the coin
        needs pale stops to keep the dark monogram readable. */
     --btn-ink: #fdf9f0;
@@ -114,7 +114,7 @@
   --gold-hi: #8f6b16;
   --gold-lo: #7d5e14;
   --danger: #b3402c;
-  --ok: #4f7a3a;
+  --ok: #4c7538;
   --btn-ink: #fdf9f0;
   --glyph-hi: #e9d9a6;
   --glyph-lo: #d8bd7a;
@@ -203,15 +203,18 @@ body {
   letter-spacing: 0.02em;
   color: var(--ink);
 }
-.brand .a-mark { color: var(--gold); }
-/* H138: the appbar lockup (sigil + wordmark). A literal twin of extension/popup.css
-   `.brand .sigil-sm` — the two headers sit centimetres apart on the same screen, so the
-   inline-flow offset and the gold glow have to be the same numbers, not merely similar.
-   vertical-align nudges the 24-unit viewBox's optical centre onto the serif baseline;
-   the drop-shadow is the glow the popup and the hero sigils already carry (a text-shadow
-   does nothing to an <svg>, hence the filter). */
-.brand .sigil-sm { color: var(--gold); margin-right: 6px; }
-.brand .sigil-sm svg { vertical-align: -0.12em; filter: drop-shadow(0 1px 10px rgba(208, 169, 74, 0.35)); }
+/* The name is a drawing in one color (Sigil.tsx Wordmark, assets/brand/wordmark.svg). Its box is
+   0.98 of an em, 1000 units to the em with y = 0 on the baseline: at a height of 0.98em, a width of
+   3.017em and lowered by 0.24em it takes the size and the baseline of the text it stands in for. */
+.wordmark { height: 0.98em; width: 3.017em; vertical-align: -0.24em; }
+/* The appbar lockup (rune, then name), a twin of extension/popup.css `.brand .sigil-sm`: the two
+   headers sit centimetres apart on the same screen, so the numbers are the same. The rune is as
+   tall as the name's "d" (BRAND.md, "Lockups"): 0.719em, so its 24-unit box (the rune 18.9 units of
+   it) is 0.913em; its foot sits on the baseline (2.75 units of the box under it: -0.105em); with
+   the box's own margin and 0.016em more, the gap to the name is the lockup's. The drop-shadow is
+   the glow the popup and the hero runes carry (a text-shadow does nothing to an <svg>). */
+.brand .sigil-sm { color: var(--gold); margin-right: 0.016em; }
+.brand .sigil-sm svg { width: 0.913em; height: 0.913em; vertical-align: -0.105em; filter: drop-shadow(0 1px 10px rgba(208, 169, 74, 0.35)); }
 
 /* ---- centered auth card ---- */
 .auth-shell {
@@ -304,6 +307,30 @@ button.ghost {
   border: 1px solid var(--edge); border-radius: var(--radius); padding: 8px 14px; cursor: pointer; transition: 0.15s;
 }
 button.ghost:hover { color: var(--ink); border-color: var(--edge-strong); }
+/* The full-width second choice beside a primary (the first screen's Sign in, the kit's Print, Try again and
+   Forget this server on the server-stop cards). These buttons used to carry no class at all and fell to the
+   browser's own small grey button, which the 2026-11-16 browser walk found on the first screen a new person
+   meets. Same box as button.primary, quiet surface. */
+button.secondary {
+  width: 100%; font: inherit; font-weight: 600; font-size: 15px;
+  color: var(--ink); cursor: pointer; background: transparent;
+  border: 1px solid var(--edge-strong); border-radius: var(--radius); padding: 11px; transition: 0.15s;
+}
+button.secondary:hover { background: var(--bg-input); }
+button.secondary:disabled { opacity: 0.55; cursor: not-allowed; }
+button.secondary:disabled:hover { background: transparent; }
+/* Settings → Your devices: one row per device, its action at the end of the row. */
+.device-list { list-style: none; margin: 12px 0 0; padding: 0; }
+.device-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid var(--edge); }
+.device-list li:first-child { border-top: 0; }
+.device-list li > div { min-width: 0; overflow-wrap: anywhere; }
+.device-list .tag { margin-left: 8px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-faint); border: 1px solid var(--edge); border-radius: 5px; padding: 2px 6px; }
+.device-list button { flex: none; }
+/* Two link buttons in a row ("Forgot your master password?" then "Back") stand apart instead of running together. */
+button.link + button.link { margin-left: 16px; }
+/* A column of choices (the first screen): the buttons stand apart instead of touching. */
+.stack { display: flex; flex-direction: column; gap: 10px; }
+.stack > p { margin: 4px 0 0; }
 /* H51 (audit 2026-09-13): only button.primary had a disabled treatment. A disabled ghost /
    link-button kept its pointer cursor and its hover lift, and author-origin `color`/`background`
    on inputs and selects overrode the UA's own disabled greying — so Admin's "email it" freezing
@@ -333,6 +360,10 @@ input:disabled, select:disabled, textarea:disabled { opacity: 0.6; cursor: not-a
 @keyframes busy-turn { to { transform: rotate(360deg); } }
 
 .row { display: flex; gap: 10px; align-items: center; }
+/* Two choices of equal weight, neither preferred (the offer to forget an earlier account and its second step): each button
+   takes the same share of the row and the same height, so a label that wraps does not make its button the larger. */
+.row.even { align-items: stretch; }
+.row.even > button { flex: 1 1 0; min-width: 0; }
 .msg { font-size: 13px; padding: 10px 12px; border-radius: var(--radius); margin-bottom: 16px; }
 /* H134 (audit 2026-09-13; web half landed by R09): every tinted PLATE below is mixed from the
    palette token it belongs to, not from a frozen rgba() of the DARK palette. The literals these
@@ -349,6 +380,24 @@ input:disabled, select:disabled, textarea:disabled { opacity: 0.6; cursor: not-a
 .msg.err { background: color-mix(in oklab, var(--danger) 12%, transparent); color: var(--danger); border: 1px solid color-mix(in oklab, var(--danger) 30%, transparent); }
 .msg.info { background: color-mix(in oklab, var(--gold) 10%, transparent); color: var(--gold-bright); border: 1px solid color-mix(in oklab, var(--gold) 25%, transparent); }
 
+/* The 2026-11-16 walk (part five): a prompt above the vault list ("Keep that?", the unsigned-change warning) ran from
+   edge to edge while the list below sat in its column, and on a phone its three buttons shared one row, so "Not now"
+   wrapped onto two lines. It now sits in the list's column, its buttons keep their words on one line and wrap as
+   whole buttons. */
+.top-prompt { width: calc(100% - 40px); max-width: 720px; margin: 14px auto 16px; box-sizing: border-box; }
+.top-prompt > strong { display: block; margin-bottom: 10px; }
+.top-prompt .actions { flex-wrap: wrap; margin-top: 12px; }
+.top-prompt .actions button { white-space: nowrap; }
+.top-prompt .actions .primary { flex: 0 1 auto; }
+/* The same walk: the account deletion's two buttons shared a phone's row and wrapped onto three lines each. */
+.actions.wrap { flex-wrap: wrap; }
+.actions.wrap button { flex: 1 1 14em; }
+
+/* The 2026-11-16 sharing walk: a tick box or a choice button took the text field's full width, so the
+   one-tap list put its box on a line of its own above the name, and the add-a-contact list squeezed the
+   contact's name to nothing: a person was asked to tick or pick someone the screen did not name. */
+input[type="checkbox"], input[type="radio"] { width: auto; flex: none; padding: 0; }
+label.attach-row { text-transform: none; letter-spacing: 0; font-size: 14px; color: var(--ink); margin: 0; }
 .check { display: flex; gap: 9px; align-items: flex-start; font-size: 13px; color: var(--ink-dim); margin-bottom: 18px; }
 .check input { width: auto; margin-top: 3px; }
 /* H49 (audit 2026-09-13; the 2026-07-12 UI audit's action item #8 that never landed): the global
@@ -419,6 +468,11 @@ label.prompt { font-size: 13px; color: var(--ink-dim); }
 /* Inert rows (F80 — e.g. Sharing's vault roster): the row look without the click
    affordance, so nothing lifts under a cursor that can't do anything there. */
 .item.static { cursor: default; }
+/* The 2026-11-16 sharing walk: at phone width a shared vault's row (glyph, name, role tag, Settings)
+   left its name about 25 px, so "Family" read "F…". The name keeps room for a word; the tag and the
+   button go under it when the row is too narrow for all four. */
+.item.static { flex-wrap: wrap; }
+.item.static .body { min-width: 8em; }
 .item.static:hover { border-color: var(--edge); transform: none; }
 /* F56: the vault list virtualizes past 500 rows, and windowing needs one fixed stride —
    so the WINDOWED path pins the row height. Geometry mirrored in Vault.tsx ROW_H/LIST_GAP.
@@ -574,6 +628,19 @@ label.prompt { font-size: 13px; color: var(--ink-dim); }
   padding: 8px 12px;
 }
 .attach-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* A row whose second line must be read whole (the dates of a deleted vault): the name keeps one line, the line under it
+   wraps instead of being cut short on a phone. */
+.attach-name.two-line { white-space: normal; }
+.attach-name.two-line .attach-title { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.attach-name.two-line .attach-sub { display: block; font-size: 13px; overflow-wrap: anywhere; }
+
+/* ---- a list of people that is read, not typed into (the move's members): plain lines, not field boxes ---- */
+.member-lines { display: flex; flex-direction: column; margin: 10px 0; border-top: 1px solid var(--edge); }
+.member-line { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; padding: 8px 2px; border-bottom: 1px solid var(--edge); }
+label.member-line { text-transform: none; letter-spacing: 0; font-size: 14px; color: var(--ink); margin: 0; cursor: pointer; }
+.member-line input[type="checkbox"] { width: auto; margin: 0; }
+.member-line .member-line-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.member-line .member-line-note { flex-basis: 100%; }
 
 /* ---- one-time invite token ---- */
 .token-box {
@@ -610,9 +677,13 @@ input.token { font-size: 15px; color: var(--gold-bright); }
   .appbar { padding: 12px 14px; }
   /* Brand fixed; the view nav scrolls horizontally in whatever space is left so it
      can never push Lock (or the status dot) off-screen. */
-  .appbar > .row:first-child { flex: 1; min-width: 0; }
+  /* The view nav takes a row of its own under the brand and the session controls. Squeezed in beside them it
+     had whatever width was left, which with "Sync now" showing (live updates down) was about 10 px: Vault,
+     Sharing and Health could not be reached on a phone (browser walk, 2026-11-16). */
+  .appbar { flex-wrap: wrap; row-gap: 8px; }
+  .appbar > .row:first-child { display: contents; }
   .appbar .brand { font-size: 18px; flex: none; }
-  .nav { margin-left: 10px; overflow-x: auto; scrollbar-width: none; }
+  .nav { order: 3; flex: 1 1 100%; margin-left: 0; overflow-x: auto; scrollbar-width: none; }
   .nav::-webkit-scrollbar { display: none; }
   /* Cut G (v2 #8): the hidden-scrollbar nav gave NO hint more tabs exist off-screen
      (Admin could be invisible on phones) — a right-edge fade marks the overflow. The
@@ -735,4 +806,18 @@ input.token { font-size: 15px; color: var(--gold-bright); }
     font-size: 12px;
     color: var(--ink-dim);
   }
+  /* §10: the kit document is what Print puts on paper, and nothing else: not the app's header, the card's
+     chrome or the buttons under it. Dark ink on the white page in either theme. */
+  body:has(.kit-document) * { visibility: hidden; }
+  body:has(.kit-document) .kit-document,
+  body:has(.kit-document) .kit-document * { visibility: visible; color: #000; }
+  .kit-document { position: absolute; top: 0; left: 0; right: 0; margin: 0; padding: 0 12mm; background: #fff; }
 }
+/* §10: "the grouped secret, large and monospace". `.mono` alone styles only inputs and table cells, so the
+   secret was set in the body face, where l, I and 1 look alike. The account ID is one long word: it may break
+   anywhere rather than push the card past a phone's edge. */
+.kit-secret { font-family: var(--mono); }
+.kit-document { overflow-wrap: anywhere; }
+/* Opened from the offline copy: what needs the server sits in a disabled fieldset, which disables every control in it
+   at once. The fieldset itself draws nothing. */
+fieldset.needs-server { border: 0; padding: 0; margin: 0; min-width: 0; }

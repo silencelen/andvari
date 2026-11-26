@@ -1,12 +1,19 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ApiClient, type SessionEndKind } from "../api/client";
-import type { ClientPolicy } from "../api/types";
+import { ApiClient, type RefreshEnd, type SessionEndKind } from "../api/client";
+import { browserStorage } from "../api/devicesecret";
+import type { ClientPolicyV2 as ClientPolicy } from "../api/wire";
 import { initSodium } from "../crypto/sodium";
-import { KdfPolicyError, WEAK_KDF_MESSAGE } from "../crypto/keys";
+import { KdfPolicyError } from "../crypto/keys";
 import { Account } from "../vault/account";
+import { cardNamesOperator } from "../vault/pinstore";
+import { ANOTHER_ACCOUNT_SIGNED_IN, fill, kdfRefusalText, LOCK_INTERRUPTED_WORK, OFFLINE_COPY_OFFER, OPERATOR_NOT_ON_WEB, policyWipeText, REMADE_ACCOUNT_REMEMBERED, SIGN_OUT_KEPT_NOT_REMOVED, SIGN_OUT_NOT_CONFIRMED } from "./copy";
+import { dismissRemembered, REMEMBERED_NOTICES_KEY, rememberedNotices } from "../vault/selfidentity";
+import { onPolicyWipeMadeLater, type PolicyWipeNotice, retryHeldPolicyWipes, senderForCopy, serverNameOf, takePolicyWipeNotice } from "../vault/policywipe";
+import { bakedInstance } from "../vault/publicinstance";
 import { VaultStore } from "../vault/store";
+import { createWebContext, endedCopyHold, heldWithoutPin, stopSessionTraffic, type WebContext } from "./opensession";
+import { endByClientDecision, endedUnconfirmed, endSessionByServer, heldEndNotice, keptChangesLine, lostChangesLine, sessionEndLine } from "./sessionend";
 import { Welcome, type LoginMeta } from "./Welcome";
-import { peekPendingEnroll } from "../enroll/enrolllink";
 import { BrandSigil } from "./Sigil";
 import { Busy } from "./Busy";
 import { initTheme } from "./useTheme";
@@ -22,6 +29,7 @@ import {
 } from "./useAutoLock";
 import {
   applyOrgOfflineCachePolicy,
+  policyWipeQuestion,
   claimTabTokens,
   clearLockRevoke,
   clearSession,
@@ -31,6 +39,12 @@ import {
   loadSession,
   LOCK_REVOKE_UNCONFIRMED,
   lockRevokeUnconfirmed,
+  dropKeptAtSignOut,
+  finishOwedWipes,
+  followSignOuts,
+  tellSignedOut,
+  unconfirmedRefresh,
+  holdAccountOpen,
   makeClient,
   migrateCacheConsentOnce,
   migrateLegacySessionTokens,
@@ -38,8 +52,10 @@ import {
   recordLockRevoke,
   REVOKE_UNCONFIRMED,
   setOfflineCopyEnabled,
+  settleForgettings,
   shouldOfferCacheNudge,
   tokensKeptAcrossLock,
+  unsentChangeCount,
   wipeLocalAccountState,
   wipeVaultCache,
   type Session,
@@ -56,15 +72,21 @@ import {
   stepDeletionWatch,
 } from "./account-delete";
 import { DeletionOutcomeUnknownCard, type DeletionEnd, type DeletionTrack } from "./DeleteAccount";
-import { adoptSharedPair, dropOnSignOutElsewhere, idleTimerUserId, lockTabTokens, revokeForSignOut, storageVerdict } from "./tabsession";
+import { adoptSharedPair, dropHeldPair, dropOnSignOutElsewhere, endedInAnotherTabLanding, idleTimerUserId, lockTabTokens, revokeForSignOut, storageVerdict } from "./tabsession";
 
 /** `notice` (F26): one-line reason rendered on the auth card — why the user is looking
  *  at a lock/sign-in screen ("Locked.", "This device's access was revoked.", …). */
 type Phase =
   | { kind: "loading" }
-  | { kind: "welcome"; notice?: string }
-  | { kind: "unlock"; session: Session; notice?: string }
-  | { kind: "vault"; account: Account; store: VaultStore; meta: LoginMeta }
+  /** [knownEmail]: the account of a session the server ended on this profile, which the first screen offers to sign in to first. */
+  | { kind: "welcome"; notice?: string; knownEmail?: string }
+  /** [endedHere]: this browser itself ended the sign-in or session and kept the copy over unsent changes (sessionend.ts
+   *  endByClientDecision); the card then does not say the server ended it. A new number each time, so the card is
+   *  drawn afresh and nothing of the ended sign-in (its kit step) is left on it. */
+  | { kind: "unlock"; session: Session; notice?: string; endedHere?: number }
+  /** `readOnlyCopy`: the session is the read-only copy of design §4.4 (opened under a forked pin, or frozen when a
+   *  refresh found one): its traffic is stopped and the fork warning shows. */
+  | { kind: "vault"; account: Account; store: VaultStore; meta: LoginMeta; readOnlyCopy: boolean }
   /** Account deletion: the session ended while the deletion request was in flight and its answer never came — the
    *  vault is closed and the session wiped; the card offers to forget the account here, or to sign in and check. */
   | { kind: "deletionUnknown"; userId: string; email: string; notice?: string };
@@ -80,8 +102,7 @@ const LOCK_WARNING_NOTICE = "Still there? Locking soon — click, tap, or press 
 // Offline-copy card in Settings.tsx. Without a service-worker shell (design 2026-07-13 D1) a
 // COLD tab cannot load the app at all while the server is unreachable, so the offer promises
 // only the thing that is true: a tab you already have open keeps working.
-const CACHE_NUDGE_OFFER =
-  "Keep an encrypted offline copy of your vault on this device? A tab you already have open could then unlock even when the server can't be reached.";
+const CACHE_NUDGE_OFFER = OFFLINE_COPY_OFFER;
 const CACHE_NUDGE_ACCEPTED = "Offline copy turned on — it will be created at your next unlock or sign-in.";
 /** A14 (F5): how long a per-tab lock waits for the Vault's usage flush before revoking (H33 order). */
 const LOCK_USAGE_FLUSH_WAIT_MS = 2_000;
@@ -104,13 +125,36 @@ export function App() {
   // is older than the server's pin, and every gated API call keeps failing until the
   // tab reloads — sticky once set; only the reload itself clears it.
   const [upgradeStale, setUpgradeStale] = useState(false);
+  // A copy a server's policy removed (decided on 2026-11-17): the notice kept apart from the copy, taken once when the
+  // app starts (a tab closed before it could say it) and after each such wipe.
+  const [policyWipe, setPolicyWipe] = useState<PolicyWipeNotice | null>(() => takePolicyWipeNotice());
+  // After "Forget the earlier account on this device" (decided on 2026-11-17): the addresses whose new account this browser
+  // now remembers, each said once and kept until dismissed, also across a reload, a lock and a closed tab.
+  const [remembered, setRemembered] = useState<string[]>(() => rememberedNotices());
+  // A notice raised, or dismissed, in another tab is drawn here at once, not only at this tab's next unlock or reload.
+  useEffect(() => {
+    const onNoticesChanged = (e: StorageEvent) => {
+      if (e.key === null || e.key === REMEMBERED_NOTICES_KEY) setRemembered(rememberedNotices());
+    };
+    window.addEventListener("storage", onNoticesChanged);
+    return () => window.removeEventListener("storage", onNoticesChanged);
+  }, []);
   const [baseUrl] = useState(defaultBaseUrl());
   const clientRef = useRef<ApiClient | null>(null);
+  const ctxRef = useRef<WebContext | null>(null);
+  /** The transport's refused-refresh hook (set at boot) ends the session through the latest onRevoked. */
+  const onRefreshRefusedRef = useRef<(why: RefreshEnd) => void>(() => {});
+  /** The landing of the `storage` listener for the shared session gone in another tab, set by that listener's effect. */
+  const endedInAnotherTabRef = useRef<() => void>(() => {});
 
   const loadPolicy = useCallback(async () => {
     try {
-      const p = await clientRef.current!.clientPolicy();
+      const ctx = ctxRef.current!;
+      const p = await ctx.wire.clientPolicy();
       setPolicy(p);
+      // Design §4.4: every policy probe refreshes the pinned card chain too (the pin store reports a newly verified
+      // card, and a card naming the signed-in account as the operator signs it out, §12.2 rule 7).
+      if (ctx.pins.state(ctx.origin).kind === "pinned") void ctx.pins.refresh(ctx.origin).catch(() => {});
       setPolicyError(false);
       setPolicyErrorMessage(undefined);
       // §E.4 policy row (design 2026-07-13-web-offline-cache / spec 02 §8): EVERY successful
@@ -120,20 +164,52 @@ export function App() {
       // synchronous (webCacheEnabled consults it immediately); only the wipe is fire-and-forget
       // (deleteDatabase self-completes via the sibling versionchange, idbcache §D.5.3). This runs
       // at boot and at every unlock (onUnlocked → loadPolicy), the spec's re-evaluation points.
+      // Decided on 2026-11-17: before that wipe the changes waiting in the copy are sent once (with a live session of the
+      // account only), and how many could not be sent is said once afterwards, here at the top of whatever is on screen.
       if (p && typeof p === "object") {
-        void applyOrgOfflineCachePolicy(p.offlineCacheAllowed !== false, loadSession()?.userId ?? null);
+        const allowed = p.offlineCacheAllowed !== false;
+        // The copy of the account this tab has open, else the session this browser keeps: never another tab's account,
+        // whose own tab (or next start) sends what waits in its copy with its own session.
+        const p0 = phaseRef.current;
+        const uid = p0.kind === "vault" ? p0.account.userId : (loadSession()?.userId ?? null);
+        // Each change is sent only where this browser may write to its vault at that moment: the open store's question
+        // where this tab has the account open and its first pull has run, else the personal vault alone (policyWipeQuestion).
+        const open =
+          p0.kind === "vault"
+            ? { userId: p0.account.userId, personalVaultId: p0.account.personalVaultId, pulled: () => p0.store.pulledInThisSession(), mayWrite: (v: string) => p0.store.mayWrite(v) }
+            : null;
+        const question = uid === null ? null : policyWipeQuestion(open, uid);
+        const sent =
+          allowed || uid === null || question === null ? null : { send: senderForCopy(ctx.client, ctx.wire, uid, question), server: serverNameOf(ctx.pins, ctx.origin), mayWrite: question };
+        void applyOrgOfflineCachePolicy(allowed, uid, sent).then(async (kept) => {
+          // Said only now that the copy is gone; kept here too where storage refused to keep it.
+          if (kept !== null) setPolicyWipe(takePolicyWipeNotice() ?? kept);
+          // A wipe this policy asked for earlier that could not be made is tried again (nothing is sent again), only
+          // after this read found the policy still forbidding the copy; a read that allows it ended those wipes above.
+          if (!allowed) {
+            await retryHeldPolicyWipes();
+            setPolicyWipe((n) => takePolicyWipeNotice() ?? n);
+          }
+        });
       }
     } catch (e) {
       setPolicy(null);
       setPolicyError(true);
       // H1 (spec 05 T1): a weakened-KDF policy is a security block, NOT a transient "unavailable" —
       // keep the distinct signal so enrollment shows the weak-KDF warning, never "try again".
-      setPolicyErrorMessage(e instanceof KdfPolicyError ? WEAK_KDF_MESSAGE : undefined);
+      setPolicyErrorMessage(e instanceof KdfPolicyError ? kdfRefusalText(e) : undefined);
     }
   }, []);
 
   useEffect(() => {
     (async () => {
+      // A wipe owed from a tab closed while it waited (a sign-out during a policy's run) is made now, with or without a
+      // session; it waits for the copy's lock in the background, so the start is not held up by it.
+      void finishOwedWipes();
+      // A forgetting of an earlier account that was begun and stopped part-way (a tab closed while it ran) is finished
+      // now, before any screen reads the address's record. One that fails again keeps its mark for the next start, or
+      // for the person's next click on the same confirmation.
+      void settleForgettings().catch(() => {});
       await initSodium();
       // A14 (F5): is this tab's sessionStorage pair its own or a duplicated tab's copy? (A copy is
       // dropped: two tabs must never spend one rotating refresh token.)
@@ -152,23 +228,34 @@ export function App() {
       // here covers every phase. Never auto-reload on 426 — an open editor may hold
       // unsaved work; the bar below leaves the reload to the user.
       client.onUpgradeRequired = () => setUpgradeStale(true);
+      // Design §4.4: a refused refresh ends the session at once, whatever screen asked (the copy stays).
+      client.onRefreshRefused = (why) => onRefreshRefusedRef.current(why);
+      client.onEndedElsewhere = () => endedInAnotherTabRef.current();
       clientRef.current = client;
-      await loadPolicy();
-      // One-scan onboarding: a captured enroll link is consumed on the signed-OUT Welcome
-      // (FreshStart prefills the Enroll tab). If a session already exists we boot to Unlock —
-      // surface a notice instead of silently swallowing the scanned link (never repoint the
-      // session's server from a link).
-      const pendingEnroll = peekPendingEnroll();
-      // A14 (F5): on a browser without the offline copy a session with no tokens (after a lock, or a
-      // new tab) still lands on the unlock card, which then runs the normal sign-in. With the offline
-      // copy on, today's rule stands: no tokens, no unlock card.
-      const unlockable = session !== null && (session.tokens !== null || !tokensKeptAcrossLock(session.userId));
-      setPhase(
-        unlockable ? { kind: "unlock", session, notice: pendingEnroll ? "You're signed in on this browser. To set up a NEW account from that invite link, sign out first." : undefined }
-          : { kind: "welcome" },
-      );
+      // The web dials one origin, the one that served it (or the dev override), and pins its card chain (§13). Under a
+      // forked or damaged pin of it the transport sends nothing (§4.4): createWebContext wires that gate.
+      const origin = baseUrl || window.location.origin;
+      // While the copy of a session the server ended is open, nothing leaves either (§4.4): the second stop.
+      ctxRef.current = createWebContext(client, origin, browserStorage, bakedInstance(), undefined, () => endedCopyHold(phaseRef.current));
+      // Design §4.4: a kept session whose origin holds no pin record dials nothing; its card (Welcome) offers only to
+      // forget it, and the first screen after that probes the policy (the effect below).
+      if (!heldWithoutPin(session, ctxRef.current)) await loadPolicy();
+      // Every held session lands on the unlock card. A14 (F5): on a browser without the offline copy a
+      // session with no tokens (after a lock, or a new tab) runs the normal sign-in there. With the offline
+      // copy on, a session with no tokens is one the server ended (design §4.4, sessionend.ts endedByServer):
+      // the card offers the sign-in that restores it and the copy, read-only.
+      setPhase(session !== null ? { kind: "unlock", session } : { kind: "welcome" });
     })();
   }, [baseUrl, loadPolicy]);
+
+  // A policy's wipe that was held up (a connection that did not close) and is made later: said then.
+  useEffect(() => onPolicyWipeMadeLater(() => setPolicyWipe((n) => takePolicyWipeNotice() ?? n)), []);
+
+  // The first screen probes the policy when nothing has yet (a boot that held a session with no pin record skipped it).
+  const policyUnasked = policy === null && !policyError;
+  useEffect(() => {
+    if (phase.kind === "welcome" && policyUnasked) void loadPolicy();
+  }, [phase.kind, policyUnasked, loadPolicy]);
 
   // B2-11 (design 2026-07-15 §5.4.1): the one-time offline-copy nudge — armed at unlock for the
   // unlocking user when policy allows and no per-device marker exists (shouldOfferCacheNudge).
@@ -194,7 +281,19 @@ export function App() {
     stepDeletion({ kind: "session_start" }); // ...nor an outcome nothing settled (a request still in flight keeps its watch)
     lockRevokeRef.current = null; // A14 review W1: this tab holds a new pair; an older lock's record is moot
     clearLockRevoke(); // ...and so is the copy of it in the tab's sessionStorage (A14 review 3, W-b)
-    setPhase({ kind: "vault", account, store, meta });
+    // When a lock or a sign-out overtakes this session's work, the screen it lands on says so.
+    store.onInterrupted(() =>
+      setPhase((p) => (p.kind === "unlock" || p.kind === "welcome" ? { ...p, notice: [p.notice, LOCK_INTERRUPTED_WORK].filter(Boolean).join(" ") } : p)),
+    );
+    setPhase({ kind: "vault", account, store, meta, readOnlyCopy: store.isReadOnlyCopy() });
+    // The session just kept took the address's record afresh where a forgetting left it new: its notice is read now.
+    setRemembered(rememberedNotices());
+    // §4.4: a copy read under a forked pin asks nothing of the server: no nudge (it would write), no policy probe (the
+    // last-known auto-lock window persisted for this user stands).
+    if (store.isReadOnlyCopy()) {
+      setCacheNudge(null);
+      return;
+    }
     setCacheNudge(shouldOfferCacheNudge(account.userId) ? { userId: account.userId, state: "offered" } : null);
     // Refresh policy at unlock so the auto-lock/clipboard windows reflect the CURRENT
     // org policy — via loadPolicy so a success also clears a stale policyError from a
@@ -207,9 +306,11 @@ export function App() {
   // LOCK is not this; see lock() below.
   //
   // §E.4 (design 2026-07-13-web-offline-cache): this is the ONE wipe choke point for the
-  // offline cache — user sign-out, `onRevoked` (WS revoked/expired), and the definitive-401
-  // routed here from Welcome's Unlock card all destroy this account's cache DB (envelopes +
-  // queue + cached accountKeys). A LOCK does NOT come here, so the cache is RETAINED on lock.
+  // offline cache on a sign-out — the person's own (the Sign-out link), and a session the server
+  // ended on a browser WITHOUT the offline copy (endByServer below; there is no copy to keep). Both
+  // destroy this account's cache DB (envelopes + queue + cached accountKeys). Design §4.4: a session
+  // the server ends with the offline copy on does NOT come here (endByServer keeps the copy), and
+  // neither does a LOCK, so the cache is RETAINED on lock.
   // Read the userId BEFORE clearSession removes the session; wipe is fire-and-forget (the
   // deleteDatabase self-completes via the sibling connection's versionchange, idbcache §D.5.3).
   //
@@ -225,6 +326,8 @@ export function App() {
   // Account deletion (spec 03 §13): the account this tab just deleted, so a sign-out the server's `revoked` frame started
   // concurrently leaves the landing to onAccountDeleted. Cleared by the next unlock.
   const deletedAccountRef = useRef<string | null>(null);
+  // Each landing of a sign-in this browser ended by itself (endByClient) draws the card afresh.
+  const endedHereSeq = useRef(0);
 
   // Account deletion (spec 03 §13 client duties; design 2026-11-10 §11): App's side of the deletion request — the hold on
   // a session end that lands while it is in flight, and what each ending does with it — is the pure step function
@@ -240,8 +343,10 @@ export function App() {
   };
 
   // `deletionUnknown` (account deletion): land on DeletionOutcomeUnknownCard for that account instead of the sign-in card.
-  const signOut = useCallback(async (notice?: string, kind: "user" | "expired" | "revoked" = "user", deletionUnknown?: { userId: string; email: string }) => {
+  const signOut = useCallback(async (notice?: string, kind: "user" | SessionEndKind = "user", deletionUnknown?: { userId: string; email: string }) => {
     const uid = loadSession()?.userId ?? null;
+    // A session the server ended: this profile still knows its account, so the first screen offers "Sign in" first.
+    const knownEmail = kind === "user" ? undefined : loadSession()?.email || undefined;
     const unsynced = uid ? await pendingSyncCount(uid) : 0;
     // Audit F07 kept the gate this comment describes — a fully-synced device still took the whole
     // destructive path (session cleared, offline copy deleteDatabase'd) off one click of a control
@@ -254,10 +359,8 @@ export function App() {
     // was for the other two kinds; anything that grows a new user sign-out control must arm through
     // SignOutLink, or it will wipe without asking. `unsynced` is still read here — the "expired"
     // notice below surfaces the count that could not be blocked.
-    const lostCount =
-      kind === "expired" && unsynced > 0
-        ? `${notice ? notice + " " : ""}${unsynced} offline ${unsynced === 1 ? "change" : "changes"} could not be synced — this session expired before reconnecting.`
-        : notice;
+    // "unconfirmed" (a session this browser could not confirm in time) did not expire: its count has a line of its own.
+    const lostCount = lostChangesLine(kind, notice, unsynced);
     // bug-web--0 (spec 03): a USER sign-out revokes the device session server-side BEFORE the
     // local wipe — bounded + best-effort, mirroring the natives; without it the refresh token
     // stays refreshable for ~30 days. "expired"/"revoked" skip it (already dead server-side).
@@ -268,6 +371,15 @@ export function App() {
     // A14 review 3 (W-b): after a reload there is no in-memory lock record; the tab's sessionStorage one answers.
     const revoked = kind === "user" ? await revokeForSignOut(clientRef.current, lockRevokeRef.current, lockRevokeUnconfirmed(uid)) : true;
     lockRevokeRef.current = null;
+    // The person's own sign-out: a token kept from a session of that account this browser could not confirm (or that
+    // this sign-out found with a refresh unanswered) goes with it, so that nothing that may still be a live credential
+    // stays here; the line then says the end was not confirmed, and how to end it. Another account's kept token stays.
+    // A sign-out that is not the person's (the server's end, or this browser's) leaves it for the next sign-in's name.
+    const keptDropped = kind === "user" && dropKeptAtSignOut(uid);
+    // A removal that could not be written (tried twice): the token stays, and the line says so.
+    const keptStays = keptDropped && uid !== null && unconfirmedRefresh(uid) !== null;
+    // The other tabs drop that account's kept token too (each tab's own, on a browser where each tab holds its session).
+    if (kind === "user" && uid !== null) tellSignedOut(uid);
     clearSession();
     clientRef.current?.setTokens(null);
     if (uid) void wipeVaultCache(uid);
@@ -275,8 +387,8 @@ export function App() {
     // Account deletion: the server's `revoked` frame to this tab can start this sign-out just before the deletion's own
     // answer lands; onAccountDeleted then did the wipe and owns the landing (its notice), so don't overwrite it here.
     if (uid !== null && deletedAccountRef.current === uid) return;
-    const line = revoked ? lostCount : [lostCount, REVOKE_UNCONFIRMED].filter(Boolean).join(" ");
-    setPhase(deletionUnknown ? { kind: "deletionUnknown", ...deletionUnknown, notice: line } : { kind: "welcome", notice: line });
+    const line = keptStays ? [lostCount, SIGN_OUT_KEPT_NOT_REMOVED].filter(Boolean).join(" ") : keptDropped ? [lostCount, SIGN_OUT_NOT_CONFIRMED].filter(Boolean).join(" ") : revoked ? lostCount : [lostCount, REVOKE_UNCONFIRMED].filter(Boolean).join(" ");
+    setPhase(deletionUnknown ? { kind: "deletionUnknown", ...deletionUnknown, notice: line } : { kind: "welcome", notice: line, ...(knownEmail ? { knownEmail } : {}) });
   }, []);
 
   // Account deletion (spec 03 §13 client duty; design 2026-11-10 §11): the server CONFIRMED it, so this browser forgets
@@ -298,7 +410,8 @@ export function App() {
     // Its synchronous half (session, tab token slot, userId-scoped keys, self-identity records) has run by the time the
     // call returns, so dropping the pair next writes nothing back; the IndexedDB delete then completes on its own (the
     // live store's handle self-closes on the versionchange — signOut's wipe posture).
-    void wipeLocalAccountState(userId, email);
+    // Only a deletion the server confirmed removes the records of which account the address is and of its key.
+    void wipeLocalAccountState(userId, email, end === "confirmed" ? "confirmed" : "unconfirmed");
     clientRef.current?.setTokens(null);
     clearBreachCache();
     setPhase({ kind: "welcome", notice: end === "confirmed" ? ACCOUNT_DELETED_NOTICE : ACCOUNT_FORGOTTEN_NOTICE });
@@ -315,11 +428,16 @@ export function App() {
 
   // A14 (F5) — owner decision: a browser NOT opted into the offline copy keeps no token once locked.
   // Lock (manual, idle, or a lock announced by another tab) therefore: lets the Vault's usage flush
-  // land (bounded), revokes THIS tab's pair server-side (best-effort, LOGOUT_TIMEOUT_MS; logout()
-  // captures the pair synchronously, so dropping it on the next line is safe), drops it, and lands
+  // land (bounded), ends THIS tab's session server-side (best-effort, LOGOUT_TIMEOUT_MS; endSession()
+  // reads the pair synchronously, so dropping it on the next line is safe), drops it, and lands
   // on the unlock card, which then runs the normal sign-in (email pre-filled, TOTP when enrolled).
   // [revoke] is false only when another tab took over this pair (it turned the offline copy off):
   // revoking would end THAT tab's session too.
+  // 2026-11-16: the lock ends its pair at the server. For a few hours it only forgot the pair,
+  // which left a refresh token valid at the server for 30 days where the browser's session-restore files may
+  // hold a copy; A14's "keeps no token once locked" has to be true at the server too. It ends exactly this
+  // tab's session, by its own refresh token (`end-session`, spec 03 §2), not the logout, which ends every
+  // session of the browser's device row and so the account's other tabs in this browser.
   // A14 review W1: the revocation's result is recorded for a later sign-out, and a refusal is said on
   // the unlock card. W7: the phase change runs in a finally — nothing above (a storage write that
   // throws inside setTokens) can leave the vault open.
@@ -356,14 +474,17 @@ export function App() {
   const lockLocal = useCallback((notice: string) => {
     const meta = loadSession();
     if (meta && !tokensKeptAcrossLock(meta.userId)) {
+      // A14: a browser without the offline copy keeps no token once locked, at the server too: the lock ends this tab's
+      // session (spec 03 §2 end-session). Forgetting it only would leave its refresh token valid for 30 days.
       void lockPerTab(notice, meta, true);
       return;
     }
     setPhase((p) => {
       if (p.kind !== "vault") return p; // nothing unlocked here — nothing to lock
       const session = loadSession();
-      // No persisted session to come back to (shouldn't happen) — fall back to sign-in.
-      return session?.tokens ? { kind: "unlock", session, notice } : { kind: "welcome", notice };
+      // No persisted session to come back to (shouldn't happen) — fall back to sign-in. A held session without
+      // tokens (the copy of one the server ended, §4.4) comes back to its own unlock card.
+      return session ? { kind: "unlock", session, notice } : { kind: "welcome", notice };
     });
   }, [lockPerTab]);
 
@@ -378,17 +499,76 @@ export function App() {
   // Stable identities: Vault's WS-subscription effect depends on onRevoked — a fresh
   // closure per render would tear down and re-mint the events socket every render.
   const onManualLock = useCallback(() => lock("Locked."), [lock]);
-  // The session died server-side, so a mere unlock could never succeed — both kinds
-  // are a full sign-out (F26) — but the COPY must be truthful: only the server's
-  // explicit WS `revoked` frame is a revocation; a dead session at ticket mint is
-  // ordinary expiry (laptop asleep past the refresh lifetime) and saying "revoked"
-  // there would be a false alarm.
+  // Design §4.4 "A session the server ends does not delete the device's copy": the session ends and its tokens go
+  // (sessionend.ts endSessionByServer). With the offline copy on, the copy, its unsent changes and the session record
+  // stay, and the tab lands on that session's unlock card: the sign-in there restores it and sends the changes, or
+  // the copy opens read-only with the master password. Without the offline copy there is nothing to keep, and the
+  // tab signs out as before (F26). The COPY must be truthful either way: only the server's explicit WS `revoked`
+  // frame is a revocation; a dead session at ticket mint is ordinary expiry (laptop asleep past the refresh
+  // lifetime) and saying "revoked" there would be a false alarm.
+  const endByServer = useCallback(
+    async (kind: SessionEndKind, notice?: string) => {
+      const line = notice ?? sessionEndLine(kind);
+      const p = phaseRef.current;
+      // The open vault stops now: nothing queued is sent, the socket closes, and the usage ledger halts at unmount.
+      if (p.kind === "vault") {
+        clientRef.current?.cutLiveTraffic();
+        p.store.freezeAsReadOnlyCopy("ended");
+      }
+      const end = endSessionByServer(clientRef.current, kind);
+      if (end.kind === "sign_out") {
+        // No offline copy: "revoked" is a silent drop (spec 03 §4 accepts it); expiry surfaces the lost count. A session
+        // not confirmed sends nothing either (its token stays kept for the next sign-in).
+        await signOut(line, kind);
+        return;
+      }
+      usageFlushRef.current = null;
+      lockRevokeRef.current = null;
+      clearBreachCache();
+      const uid = end.session.userId;
+      if (deletedAccountRef.current === uid) return; // the deletion's own landing wins (see signOut)
+      const kept = keptChangesLine(await pendingSyncCount(uid));
+      // The card says a session not confirmed itself (Welcome, sessionend.ts endedUnconfirmed): not said twice.
+      setPhase({ kind: "unlock", session: end.session, notice: heldEndNotice(kind, notice, line, kept) });
+    },
+    [signOut],
+  );
   // `notice` (account deletion) replaces the kind's own line where the deletion's state says more.
-  const endSession = useCallback(
-    (kind: SessionEndKind, notice?: string) =>
-      kind === "revoked"
-        ? void signOut(notice ?? "This device's access was revoked.", "revoked") // server-initiated: silent-drop
-        : void signOut(notice ?? "Your session ended — sign in again.", "expired"), // expiry: surface the lost count
+  const endSession = useCallback((kind: SessionEndKind, notice?: string) => void endByServer(kind, notice), [endByServer]);
+  // Design §4.4 (decided on 2026-11-17): a sign-in, or an open session, that this browser ends by itself (the recovery kit
+  // was not confirmed in time; the account is the operator's) says the number of unsent changes before anything is
+  // deleted. The sign-in's own session is already ended by its token (Welcome's abandonSignIn); an open one is revoked
+  // here as at a sign-out ([kind] "user"). With nothing unsent this is the sign-out it always was. Otherwise the copy,
+  // its queue and the session record stay without a pair, and the unlock card says the reason, the number (or that it
+  // cannot tell) and what stays; only the person's own "Sign out" there deletes it, after its own count and second click.
+  const endByClient = useCallback(
+    async (notice: string, kind: "expired" | "user") => {
+      const p = phaseRef.current;
+      // An open vault stops now, as at a session the server ends: nothing queued goes out while the count is read.
+      if (p.kind === "vault") {
+        clientRef.current?.cutLiveTraffic();
+        p.store.freezeAsReadOnlyCopy("ended");
+      }
+      const uid = loadSession()?.userId ?? null;
+      const unsent = uid === null ? 0 : await unsentChangeCount(uid);
+      if (unsent === 0) {
+        await signOut(notice, kind);
+        return;
+      }
+      const revoked = kind === "user" ? await revokeForSignOut(clientRef.current, lockRevokeRef.current, lockRevokeUnconfirmed(uid)) : true;
+      lockRevokeRef.current = null;
+      const end = endByClientDecision(clientRef.current, notice, unsent);
+      if (end.kind === "sign_out") {
+        await signOut(notice, kind);
+        return;
+      }
+      usageFlushRef.current = null;
+      clearBreachCache();
+      if (deletedAccountRef.current === end.session.userId) return; // the deletion's own landing wins (see signOut)
+      const line = revoked ? end.line : [end.line, REVOKE_UNCONFIRMED].join(" ");
+      endedHereSeq.current += 1;
+      setPhase({ kind: "unlock", session: end.session, notice: line, endedHere: endedHereSeq.current });
+    },
     [signOut],
   );
   // The account whose session this tab holds right now — the vault's, or the unlock card's (the tab may have locked while
@@ -423,6 +603,8 @@ export function App() {
   // Every session end goes through the deletion watch: idle, it is the ordinary sign-out; during a deletion request it is
   // held, and acted on when the request settles (never dropped).
   const onRevoked = useCallback((kind: SessionEndKind) => stepDeletion({ kind: "session_end", end: kind, userId: liveUserId() }), [stepDeletion]);
+  // A refresh with no try left ends the session here, unconfirmed: never said as the server's end (sessionEndLine).
+  onRefreshRefusedRef.current = (why) => onRevoked(why === "not_confirmed" ? "unconfirmed" : "expired");
   const onDeletionTrack = useCallback(
     (event: DeletionTrack, who: { userId: string; email: string }) => {
       if (event.kind === "started") {
@@ -455,6 +637,8 @@ export function App() {
     const ch = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("andvari-lock") : null;
     lockChannelRef.current = ch;
     if (ch) ch.onmessage = () => lockLocal("Locked in another tab.");
+    // A person's own sign-out in another tab: this tab drops that account's kept token too.
+    const stopSignOuts = followSignOuts();
     const onStorage = (e: StorageEvent) => {
       // A14 (F5) + A14 review W4/We: the decision is tabsession.storageVerdict, tested there.
       const v = storageVerdict(e, {
@@ -478,6 +662,18 @@ export function App() {
           // the other tab's session — and locks.
           void lockPerTab("The offline copy was turned off in another tab — sign in again.", v.meta, false);
           return;
+        case "endedElsewhere":
+          // Design §4.4: the session every tab shares was ended by the server (another tab saw the refused refresh or
+          // the revoked frame). This tab's session ends too, through the same path, and keeps the copy.
+          if (phaseRef.current.kind === "vault" && !phaseRef.current.readOnlyCopy) onRevoked(endedUnconfirmed(v.meta.userId) ? "unconfirmed" : "expired");
+          else {
+            // A tab on that session's unlock card drops the pair it still holds in memory: nothing of it may leave from here
+            // (a sign-out on the card would otherwise spend its refresh token).
+            const p0 = phaseRef.current;
+            if (p0.kind === "unlock" && p0.session.userId === v.meta.userId) dropHeldPair(clientRef.current);
+            setPhase((p) => (p.kind === "unlock" && p.session.userId === v.meta.userId ? { ...p, session: v.meta } : p));
+          }
+          return;
         case "adopt":
           // SAME-USER guard inside storageVerdict (shared browser): only this tab's own account. We: a
           // per-tab pair being replaced by the shared one (offline copy turned ON elsewhere) is revoked first.
@@ -488,13 +684,24 @@ export function App() {
           return;
       }
     };
+    // The client found the session every tab shares gone from the record before this tab heard of it (it sent nothing,
+    // ApiClient.onEndedElsewhere): the landing that event brings, as the record now stands for this tab's account (kept
+    // with no pair: the server's end; anything else: a sign-out in another tab).
+    endedInAnotherTabRef.current = () => {
+      const landing = endedInAnotherTabLanding(loadSession(), activeUserIdRef.current);
+      if (landing.kind === "event") return onStorage(landing.event as StorageEvent);
+      // Another account is signed in on this browser now: this tab's pair is already dropped (nothing was sent).
+      clearTabTokens();
+      setPhase((p) => (p.kind === "vault" || p.kind === "unlock" ? { kind: "welcome", notice: ANOTHER_ACCOUNT_SIGNED_IN } : p));
+    };
     window.addEventListener("storage", onStorage);
     return () => {
       window.removeEventListener("storage", onStorage);
       lockChannelRef.current = null;
       ch?.close();
+      stopSignOuts();
     };
-  }, [lockLocal, lockPerTab]);
+  }, [lockLocal, lockPerTab, onRevoked]);
 
   // Inactivity auto-lock (spec 01 §8): active only while a vault is open; drives the
   // SAME path as the manual Lock button (F26: session kept → Unlock card + reason).
@@ -511,6 +718,32 @@ export function App() {
   // browser without the offline copy) runs the same policy idle timer; when it fires the tab takes the
   // per-tab lock, revoking and dropping the pair.
   const idleUserId = idleTimerUserId(vaultUserId, phase.kind === "unlock" ? phase.session : null, tokensKeptAcrossLock);
+  // Design §12.2 rule 7: after each card refresh in an open session, a verified card naming this account as the
+  // operator (a handover made this member the operator) signs it out with the operator sentence.
+  useEffect(() => {
+    const pins = ctxRef.current?.pins;
+    if (vaultUserId === null || !pins) return;
+    return pins.onPinned((pin) => {
+      if (cardNamesOperator(pin, vaultUserId)) void endByClient(OPERATOR_NOT_ON_WEB, "user"); // "user": revoked server-side too
+    });
+  }, [vaultUserId, endByClient]);
+  // Design §4.4: a fork (or a damaged pin) found while the vault is open — by the refresh beside a sync, the policy probe
+  // or another tab — stops traffic at once and freezes the store as the read-only copy; the vault then shows the fork
+  // warning. The usage flush and the events socket go with it (Vault's effects key on readOnlyCopy).
+  useEffect(() => {
+    const ctx = ctxRef.current;
+    if (vaultUserId === null || !ctx) return;
+    const react = () => {
+      const p = phaseRef.current;
+      if (p.kind !== "vault" || !stopSessionTraffic(ctx, p.store)) return;
+      usageFlushRef.current = null; // a lock now must not flush usage to the forked origin
+      setPhase((q) => (q.kind === "vault" && q.store === p.store && !q.readOnlyCopy ? { ...q, readOnlyCopy: true } : q));
+    };
+    react(); // a mark another tab wrote before this effect ran
+    return ctx.pins.onStopped((origin) => {
+      if (origin === ctx.origin) react();
+    });
+  }, [vaultUserId]);
   const fetchedAutoLock = policy ? policy.autoLockSeconds ?? 0 : null;
   useEffect(() => {
     if (vaultUserId === null || fetchedAutoLock === null) return;
@@ -526,6 +759,23 @@ export function App() {
   // wiggle first. Rendered as a slim .banner + spoken via the persistent Announcer below.
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
+  // The one way a session's work ends. Whatever takes the tab off the open vault (a lock of either kind,
+  // a lock announced by another tab, a sign-out, the server ending the session, an account deletion), the store it
+  // leaves is closed: its fence refuses every later call of the store, its log layer and the settings flows, so nothing
+  // the session started goes out afterwards, under this account's token or the next one's. The vault's own unmount
+  // runs first (React tears the child down before this cleanup), so its last usage flush is made before the close.
+  const openStore = phase.kind === "vault" ? phase.store : null;
+  useEffect(() => {
+    if (openStore === null) return;
+    return () => openStore.close();
+  }, [openStore]);
+  // While this tab has an account open it holds that account's lock (a Web Lock, which the browser lets go when the tab
+  // ends), so a forgetting of the account in another tab is refused, also where this tab's session record never got written.
+  const openAccountId = phase.kind === "vault" ? phase.account.userId : null;
+  useEffect(() => {
+    if (openStore === null || openAccountId === null) return;
+    return holdAccountOpen(openAccountId);
+  }, [openStore, openAccountId]);
   const onIdle = useCallback(() => {
     const p = phaseRef.current;
     const notice = inactivityNotice(autoLockSeconds);
@@ -557,6 +807,8 @@ export function App() {
       <Announcer text={phaseNotice ?? ""} />
       <Announcer text={lockWarning ? LOCK_WARNING_NOTICE : ""} />
       <Announcer text={cacheNudgeText} />
+      <Announcer text={policyWipe ? policyWipeText(policyWipe) : ""} />
+      <Announcer text={remembered.map((e) => fill(REMADE_ACCOUNT_REMEMBERED, e)).join(" ")} />
       {/* H137: print-only line (display:none on screen) — it explains the blanks a printed page
           carries where a revealed password, one-time code, card number or health table was. */}
       <p className="print-note">Secrets are hidden when printing — passwords, one-time codes, card numbers and the health tables do not appear on paper.</p>
@@ -566,6 +818,26 @@ export function App() {
           <button className="link" onClick={() => window.location.reload()}>Reload</button>
         </div>
       )}
+      {policyWipe && (
+        <div className="banner">
+          <span>{policyWipeText(policyWipe)}</span>
+          <button className="link" onClick={() => setPolicyWipe(null)}>OK</button>
+        </div>
+      )}
+      {remembered.map((e) => (
+        <div className="banner" key={e}>
+          <span>{fill(REMADE_ACCOUNT_REMEMBERED, e)}</span>
+          <button
+            className="link"
+            onClick={() => {
+              dismissRemembered(e);
+              setRemembered(rememberedNotices());
+            }}
+          >
+            OK
+          </button>
+        </div>
+      ))}
       {/* Cut M (v2 #16): pre-lock countdown notice. No dismiss button — ANY tracked
           activity (including tapping the banner) clears it via the hook; a dedicated
           button would just be a slower way to move the pointer. */}
@@ -617,15 +889,17 @@ export function App() {
       <Vault
         account={phase.account}
         store={phase.store}
-        client={clientRef.current!}
+        client={phase.meta.client}
+        usageWire={phase.meta.usageWire}
+        settings={phase.meta.settings}
         email={vaultEmail}
         policy={policy}
-        isAdmin={phase.meta.isAdmin}
-        mustChangePassword={phase.meta.mustChangePassword}
-        escrowStale={phase.meta.escrowStale}
-        escrowNeedsV2={phase.meta.escrowNeedsV2 ?? false}
-        escrowFingerprint={phase.meta.escrowFingerprint}
-        offlineRecoveryReminder={phase.meta.offlineRecoveryReminder ?? false}
+        readOnlyCopy={phase.readOnlyCopy}
+        openedFromCopy={phase.meta.openedFrom === "offline"}
+        copySealedElsewhere={phase.meta.copySealedElsewhere === true}
+        isAdmin={false}
+        mustChangePassword={false}
+        offlineRecoveryReminder={false}
         onLock={onManualLock}
         onRevoked={onRevoked}
         registerUsageFlush={(fn) => {
@@ -650,19 +924,25 @@ export function App() {
 
   return withUpgradeBar(
     <Welcome
-      client={clientRef.current!}
+      key={phase.kind === "unlock" && phase.endedHere !== undefined ? `ended-here-${phase.endedHere}` : "welcome"}
+      ctx={ctxRef.current!}
       policy={policy}
       policyError={policyError}
       policyErrorMessage={policyErrorMessage}
       onRetryPolicy={loadPolicy}
       mode={phase.kind === "unlock" ? { unlock: phase.session } : { fresh: true }}
       notice={phase.notice}
+      knownEmail={phase.kind === "welcome" ? phase.knownEmail : undefined}
       onReady={onUnlocked}
       // §E.4: the Unlock card's "Sign out / use a different account" calls onForget() with NO
-      // notice → a USER sign-out (blocking confirm if the queue is non-empty, breaker #9); a
-      // definitive-401 calls onForget("Session expired…") → an EXPIRED wipe (surfaces the count,
-      // cannot block). Both route through signOut, the one wipe choke point.
-      onForget={(notice?: string) => void signOut(notice, notice ? "expired" : "user")}
+      // notice → a USER sign-out (SignOutLink asked first, with the count). With a notice it is a
+      // sign-in this browser ended by itself (the kit timed out; the operator account), whose own
+      // session Welcome already ended: endByClient says the unsent count before anything is deleted.
+      onForget={(notice?: string) => void (notice ? endByClient(notice, "expired") : signOut(undefined, "user"))}
+      endedByBrowser={phase.kind === "unlock" && phase.endedHere !== undefined}
+      // Design §4.4: the unlock card found the session gone server-side (a definitive 401). It ends as every session the
+      // server ends does, through the deletion watch: the copy stays when the offline copy is on.
+      onSessionEnded={() => onRevoked("expired")}
     />
   );
 }

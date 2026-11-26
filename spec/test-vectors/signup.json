@@ -1,0 +1,742 @@
+{
+  "_about": [
+    "Sign-up of design 2026-11-15-onboarding-trust \u00a77.2, \u00a77.3 and \u00a77.5, with the derivations of \u00a72.3. Server-only: graded by the JVM server suite.",
+    "Hand-authored from the independent oracle in tools/vector-gen/oracle (Node WebCrypto and @noble; no andvari code). Regenerate with `npm run generate` there; `npm run check` fails on any difference.",
+    "codeMac: HMAC-SHA-256(signupSecret, \"andvari/v2|signup-code|\" + emailNorm + \"|\" + code), with the code as its six characters. The 32 bytes are given as hex and as unpadded base64url. emailHash: hex SHA-256 over emailNorm.",
+    "pow: POST /signup/start with `powBits` in force and the server's clock at `serverNow`. The server normalises the address, accepts pow.date only if it is today's or yesterday's UTC date, and recomputes SHA-256(\"andvari/v2|signup-pow|\" + emailNorm + \"|\" + pow.date + \"|\" + pow.nonce); the digest needs at least powBits leading zero bits, counted from the most significant bit of byte 0. expect.verdict: accepted, pow_required (no pow in the body) or bad_pow; and invalid_email (wire 400 invalid_email, emailNorm null) for the one row whose address has no emailNorm (spec 01 \u00a75.5, added on 2026-11-15, fourth batch), which has powBits 0 and no pow so that no other refusal applies.",
+    "verify: POST /signup/verify for an address whose stored row is `stored` (null when there is none). 200, or ONE uniform 400 bad_code whatever the cause: no code, a wrong code, an expired one, attempts used up. A wrong code increments attempts (expect.attemptsAfter); at 5 the code is dead. Expiry is exclusive: the code is valid while now < expiresAt.",
+    "start: for an address that passes every refusal, the answer is always 202 {\"status\":\"sent\"}, whether or not the address has an account; only the email that goes out differs.",
+    "ticket: register step 3. A ticket is bound to hex SHA-256(emailNorm) of the address it was earned with, lives 30 minutes (valid while now < expiresAt) and is single use; anything else is the uniform 400 bad_ticket.",
+    "Not graded: the hash a ticket is stored under (over its 32 bytes or over its text; decided to be out of scope, no row), a proof of work sent while powBits is 0, and the order of the refusals of /signup/start."
+  ],
+  "serverNow": 1794744000000,
+  "codeMac": [
+    {
+      "why": "the code MAC stored for an address",
+      "signupSecretB64": "hpGce3wImfPqACbqLzLCPsbikpbpa1PeVYZ1LMnpBKs",
+      "emailNorm": "alice@example.com",
+      "code": "482915",
+      "inputUtf8": "andvari/v2|signup-code|alice@example.com|482915",
+      "codeMacHex": "c0a4e073133a4d7be06942ca4fa065320daa07bae57bf062cd5ae26229b0f439",
+      "codeMacB64": "wKTgcxM6TXvgaULKT6BlMg2qB7rle_BizVriYimw9Dk"
+    },
+    {
+      "why": "a code with leading zeros is six characters all the same",
+      "signupSecretB64": "hpGce3wImfPqACbqLzLCPsbikpbpa1PeVYZ1LMnpBKs",
+      "emailNorm": "alice@example.com",
+      "code": "000042",
+      "inputUtf8": "andvari/v2|signup-code|alice@example.com|000042",
+      "codeMacHex": "149391aae00bff3b7a228d4897f6c4822c5aed3b914d9c196d63479875ca3156",
+      "codeMacB64": "FJORquAL_zt6Io1Il_bEgixa7TuRTZwZbWNHmHXKMVY"
+    },
+    {
+      "why": "another code for the same address",
+      "signupSecretB64": "hpGce3wImfPqACbqLzLCPsbikpbpa1PeVYZ1LMnpBKs",
+      "emailNorm": "alice@example.com",
+      "code": "482916",
+      "inputUtf8": "andvari/v2|signup-code|alice@example.com|482916",
+      "codeMacHex": "41feee0b649b4dc2d601e14b6024991463d0913215128ebc72cf22087a9c72d7",
+      "codeMacB64": "Qf7uC2SbTcLWAeFLYCSZFGPQkTIVEo68cs8iCHqcctc"
+    },
+    {
+      "why": "the same code for another address",
+      "signupSecretB64": "hpGce3wImfPqACbqLzLCPsbikpbpa1PeVYZ1LMnpBKs",
+      "emailNorm": "bob@example.com",
+      "code": "482915",
+      "inputUtf8": "andvari/v2|signup-code|bob@example.com|482915",
+      "codeMacHex": "24f59a03f595b34fa4362b257e707062ac93b1ec605b340cd95a554a51080b32",
+      "codeMacB64": "JPWaA_WVs0-kNislfnBwYqyTsexgWzQM2VpVSlEICzI"
+    },
+    {
+      "why": "the same address and code under another instance's secret",
+      "signupSecretB64": "i1--0AqTTBkcfR5uk4fxtAKmTueUmAdvoyzOWkxnjLk",
+      "emailNorm": "alice@example.com",
+      "code": "482915",
+      "inputUtf8": "andvari/v2|signup-code|alice@example.com|482915",
+      "codeMacHex": "b7cb8e9eb9d82c5cebfada64b913d91eef2c3f52b7e9c34a6395148706884ebc",
+      "codeMacB64": "t8uOnrnYLFzr-tpkuRPZHu8sP1K36cNKY5UUhwaITrw"
+    }
+  ],
+  "emailHash": [
+    {
+      "why": "the hash is taken over emailNorm, so case and outer white space do not matter",
+      "email": "Alice@Example.com ",
+      "emailNorm": "alice@example.com",
+      "emailHash": "ff8d9819fc0e12bf0d24892e45987e249a28dce836a85cad60e28eaaa8c6d976"
+    },
+    {
+      "why": "an address that is already normal",
+      "email": "alice@example.com",
+      "emailNorm": "alice@example.com",
+      "emailHash": "ff8d9819fc0e12bf0d24892e45987e249a28dce836a85cad60e28eaaa8c6d976"
+    },
+    {
+      "why": "another address",
+      "email": "bob@example.com",
+      "emailNorm": "bob@example.com",
+      "emailHash": "5ff860bf1190596c7188ab851db691f0f3169c453936e9e1eba2f9a47f7a0018"
+    }
+  ],
+  "pow": [
+    {
+      "name": "off",
+      "why": "powBits 0: proof of work is off and none is sent.",
+      "powBits": 0,
+      "serverNow": 1794744000000,
+      "serverNowUtc": "2026-11-15T12:00:00.000Z",
+      "email": "alice@example.com",
+      "emailNorm": "alice@example.com",
+      "pow": null,
+      "expect": {
+        "verdict": "accepted"
+      }
+    },
+    {
+      "name": "required-and-missing",
+      "why": "powBits 8 and no pow in the body.",
+      "powBits": 8,
+      "serverNow": 1794744000000,
+      "serverNowUtc": "2026-11-15T12:00:00.000Z",
+      "email": "alice@example.com",
+      "emailNorm": "alice@example.com",
+      "pow": null,
+      "expect": {
+        "verdict": "pow_required",
+        "wire": "400 pow_required"
+      }
+    },
+    {
+      "name": "8-bits-today",
+      "why": "8 bits, hashed with today's UTC date.",
+      "powBits": 8,
+      "serverNow": 1794744000000,
+      "serverNowUtc": "2026-11-15T12:00:00.000Z",
+      "email": "alice@example.com",
+      "emailNorm": "alice@example.com",
+      "pow": {
+        "date": "2026-11-15",
+        "nonce": 19
+      },
+      "inputUtf8": "andvari/v2|signup-pow|alice@example.com|2026-11-15|19",
+      "digestHex": "00110cc9e57f558b25db2c04c5d86dea8e355b59772f873ba00b058f65a6a982",
+      "leadingZeroBits": 11,
+      "expect": {
+        "verdict": "accepted"
+      }
+    },
+    {
+      "name": "8-bits-yesterday",
+      "why": "8 bits, hashed with yesterday's UTC date: accepted.",
+      "powBits": 8,
+      "serverNow": 1794744000000,
+      "serverNowUtc": "2026-11-15T12:00:00.000Z",
+      "email": "alice@example.com",
+      "emailNorm": "alice@example.com",
+      "pow": {
+        "date": "2026-11-14",
+        "nonce": 315
+      },
+      "inputUtf8": "andvari/v2|signup-pow|alice@example.com|2026-11-14|315",
+      "digestHex": "00c6afc32143e811c71a7edfcb6ac8ccc5fcf9039910a4db0af8f8274bcfbf83",
+      "leadingZeroBits": 8,
+      "expect": {
+        "verdict": "accepted"
+      }
+    },
+    {
+      "name": "8-bits-older",
+      "why": "A nonce that is right for the date two days ago: the date is neither today nor yesterday.",
+      "powBits": 8,
+      "serverNow": 1794744000000,
+      "serverNowUtc": "2026-11-15T12:00:00.000Z",
+      "email": "alice@example.com",
+      "emailNorm": "alice@example.com",
+      "pow": {
+        "date": "2026-11-13",
+        "nonce": 198
+      },
+      "inputUtf8": "andvari/v2|signup-pow|alice@example.com|2026-11-13|198",
+      "digestHex": "00b907d947473f08926abb3f77b3d08f8bc90d7a82aa4c73a0fff1c414b5751f",
+      "leadingZeroBits": 8,
+      "expect": {
+        "verdict": "bad_pow",
+        "wire": "400 bad_pow"
+      }
+    },
+    {
+      "name": "8-bits-tomorrow",
+      "why": "A nonce that is right for tomorrow's date (a client clock ahead).",
+      "powBits": 8,
+      "serverNow": 1794744000000,
+      "serverNowUtc": "2026-11-15T12:00:00.000Z",
+      "email": "alice@example.com",
+      "emailNorm": "alice@example.com",
+      "pow": {
+        "date": "2026-11-16",
+        "nonce": 189
+      },
+      "inputUtf8": "andvari/v2|signup-pow|alice@example.com|2026-11-16|189",
+      "digestHex": "00a69c01f1e11bfde7ce41d44337c8080bfb85f2fbac3c41935e86cfa5f65485",
+      "leadingZeroBits": 8,
+      "expect": {
+        "verdict": "bad_pow",
+        "wire": "400 bad_pow"
+      }
+    },
+    {
+      "name": "7-bits",
+      "why": "The digest has 7 leading zero bits where 8 are needed.",
+      "powBits": 8,
+      "serverNow": 1794744000000,
+      "serverNowUtc": "2026-11-15T12:00:00.000Z",
+      "email": "alice@example.com",
+      "emailNorm": "alice@example.com",
+      "pow": {
+        "date": "2026-11-15",
+        "nonce": 13
+      },
+      "inputUtf8": "andvari/v2|signup-pow|alice@example.com|2026-11-15|13",
+      "digestHex": "01b5b3d69d18d4db0cafed9a067f6302ad7338c396eee508905bf3ed6e60c294",
+      "leadingZeroBits": 7,
+      "expect": {
+        "verdict": "bad_pow",
+        "wire": "400 bad_pow"
+      }
+    },
+    {
+      "name": "more-bits-than-needed",
+      "why": "A digest with more than 8 leading zero bits.",
+      "powBits": 8,
+      "serverNow": 1794744000000,
+      "serverNowUtc": "2026-11-15T12:00:00.000Z",
+      "email": "alice@example.com",
+      "emailNorm": "alice@example.com",
+      "pow": {
+        "date": "2026-11-15",
+        "nonce": 4354
+      },
+      "inputUtf8": "andvari/v2|signup-pow|alice@example.com|2026-11-15|4354",
+      "digestHex": "000cafe9f41ceb2357d60c0407e14dcf03e5bc6166f7bc9c51c1873b68467ba9",
+      "leadingZeroBits": 12,
+      "expect": {
+        "verdict": "accepted"
+      }
+    },
+    {
+      "name": "nonce-for-another-address",
+      "why": "A nonce found for another address.",
+      "powBits": 8,
+      "serverNow": 1794744000000,
+      "serverNowUtc": "2026-11-15T12:00:00.000Z",
+      "email": "alice@example.com",
+      "emailNorm": "alice@example.com",
+      "pow": {
+        "date": "2026-11-15",
+        "nonce": 327
+      },
+      "inputUtf8": "andvari/v2|signup-pow|alice@example.com|2026-11-15|327",
+      "digestHex": "e2cf9ac124e4fbc71e43661ae7be4ad07cf29530b00be201e08834a5520dd36e",
+      "leadingZeroBits": 0,
+      "expect": {
+        "verdict": "bad_pow",
+        "wire": "400 bad_pow"
+      }
+    },
+    {
+      "name": "nonce-for-another-date",
+      "why": "Yesterday's nonce sent with today's date.",
+      "powBits": 8,
+      "serverNow": 1794744000000,
+      "serverNowUtc": "2026-11-15T12:00:00.000Z",
+      "email": "alice@example.com",
+      "emailNorm": "alice@example.com",
+      "pow": {
+        "date": "2026-11-15",
+        "nonce": 315
+      },
+      "inputUtf8": "andvari/v2|signup-pow|alice@example.com|2026-11-15|315",
+      "digestHex": "ccc54c10d36daa47054cf715378311d34b625db9a5462b5c1902ce7a7055016e",
+      "leadingZeroBits": 0,
+      "expect": {
+        "verdict": "bad_pow",
+        "wire": "400 bad_pow"
+      }
+    },
+    {
+      "name": "address-is-normalised-first",
+      "why": "The body's address has capitals and a trailing space; the hash is over emailNorm.",
+      "powBits": 8,
+      "serverNow": 1794744000000,
+      "serverNowUtc": "2026-11-15T12:00:00.000Z",
+      "email": "Alice@Example.com ",
+      "emailNorm": "alice@example.com",
+      "pow": {
+        "date": "2026-11-15",
+        "nonce": 19
+      },
+      "inputUtf8": "andvari/v2|signup-pow|alice@example.com|2026-11-15|19",
+      "digestHex": "00110cc9e57f558b25db2c04c5d86dea8e355b59772f873ba00b058f65a6a982",
+      "leadingZeroBits": 11,
+      "expect": {
+        "verdict": "accepted"
+      }
+    },
+    {
+      "name": "just-after-midnight-yesterday",
+      "why": "Thirty seconds after midnight UTC, yesterday's date is still accepted.",
+      "powBits": 8,
+      "serverNow": 1794700830000,
+      "serverNowUtc": "2026-11-15T00:00:30.000Z",
+      "email": "alice@example.com",
+      "emailNorm": "alice@example.com",
+      "pow": {
+        "date": "2026-11-14",
+        "nonce": 315
+      },
+      "inputUtf8": "andvari/v2|signup-pow|alice@example.com|2026-11-14|315",
+      "digestHex": "00c6afc32143e811c71a7edfcb6ac8ccc5fcf9039910a4db0af8f8274bcfbf83",
+      "leadingZeroBits": 8,
+      "expect": {
+        "verdict": "accepted"
+      }
+    },
+    {
+      "name": "just-after-midnight-two-days-ago",
+      "why": "Thirty seconds after midnight UTC, the date before yesterday is refused.",
+      "powBits": 8,
+      "serverNow": 1794700830000,
+      "serverNowUtc": "2026-11-15T00:00:30.000Z",
+      "email": "alice@example.com",
+      "emailNorm": "alice@example.com",
+      "pow": {
+        "date": "2026-11-13",
+        "nonce": 198
+      },
+      "inputUtf8": "andvari/v2|signup-pow|alice@example.com|2026-11-13|198",
+      "digestHex": "00b907d947473f08926abb3f77b3d08f8bc90d7a82aa4c73a0fff1c414b5751f",
+      "leadingZeroBits": 8,
+      "expect": {
+        "verdict": "bad_pow",
+        "wire": "400 bad_pow"
+      }
+    },
+    {
+      "name": "just-before-midnight-tomorrow",
+      "why": "One second before midnight UTC, tomorrow's date is not yet today.",
+      "powBits": 8,
+      "serverNow": 1794700799000,
+      "serverNowUtc": "2026-11-14T23:59:59.000Z",
+      "email": "alice@example.com",
+      "emailNorm": "alice@example.com",
+      "pow": {
+        "date": "2026-11-15",
+        "nonce": 19
+      },
+      "inputUtf8": "andvari/v2|signup-pow|alice@example.com|2026-11-15|19",
+      "digestHex": "00110cc9e57f558b25db2c04c5d86dea8e355b59772f873ba00b058f65a6a982",
+      "leadingZeroBits": 11,
+      "expect": {
+        "verdict": "bad_pow",
+        "wire": "400 bad_pow"
+      }
+    },
+    {
+      "name": "20-bits-today",
+      "why": "20 bits (about a second on a phone).",
+      "powBits": 20,
+      "serverNow": 1794744000000,
+      "serverNowUtc": "2026-11-15T12:00:00.000Z",
+      "email": "alice@example.com",
+      "emailNorm": "alice@example.com",
+      "pow": {
+        "date": "2026-11-15",
+        "nonce": 506139
+      },
+      "inputUtf8": "andvari/v2|signup-pow|alice@example.com|2026-11-15|506139",
+      "digestHex": "00000dca8e5dc9a475b55802b4b31ad67aa3f9b37f11e5fc57100e3a151214b7",
+      "leadingZeroBits": 20,
+      "expect": {
+        "verdict": "accepted"
+      }
+    },
+    {
+      "name": "20-bits-needed-8-found",
+      "why": "powBits 20 with a nonce that reaches only 8 bits.",
+      "powBits": 20,
+      "serverNow": 1794744000000,
+      "serverNowUtc": "2026-11-15T12:00:00.000Z",
+      "email": "alice@example.com",
+      "emailNorm": "alice@example.com",
+      "pow": {
+        "date": "2026-11-15",
+        "nonce": 19
+      },
+      "inputUtf8": "andvari/v2|signup-pow|alice@example.com|2026-11-15|19",
+      "digestHex": "00110cc9e57f558b25db2c04c5d86dea8e355b59772f873ba00b058f65a6a982",
+      "leadingZeroBits": 11,
+      "expect": {
+        "verdict": "bad_pow",
+        "wire": "400 bad_pow"
+      }
+    },
+    {
+      "name": "one-bit-short",
+      "why": "powBits 21 with a digest of exactly 20 leading zero bits: one bit short.",
+      "powBits": 21,
+      "serverNow": 1794744000000,
+      "serverNowUtc": "2026-11-15T12:00:00.000Z",
+      "email": "alice@example.com",
+      "emailNorm": "alice@example.com",
+      "pow": {
+        "date": "2026-11-15",
+        "nonce": 506139
+      },
+      "inputUtf8": "andvari/v2|signup-pow|alice@example.com|2026-11-15|506139",
+      "digestHex": "00000dca8e5dc9a475b55802b4b31ad67aa3f9b37f11e5fc57100e3a151214b7",
+      "leadingZeroBits": 20,
+      "expect": {
+        "verdict": "bad_pow",
+        "wire": "400 bad_pow"
+      }
+    },
+    {
+      "name": "address-in-a-display-name-form",
+      "why": "powBits 0 and no pow, and the body's address is alice<alice@example.com>: lower case, one @, printable ASCII, but the local part is not a dot-atom, so the address has no emailNorm (spec 01 \u00a75.5): 400 invalid_email. emailNorm is null.",
+      "powBits": 0,
+      "serverNow": 1794744000000,
+      "serverNowUtc": "2026-11-15T12:00:00.000Z",
+      "email": "alice<alice@example.com>",
+      "emailNorm": null,
+      "pow": null,
+      "expect": {
+        "verdict": "invalid_email",
+        "wire": "400 invalid_email"
+      }
+    }
+  ],
+  "verify": [
+    {
+      "name": "right-code",
+      "why": "The stored code, in time, no attempts used: 200 with a ticket.",
+      "signupSecretB64": "hpGce3wImfPqACbqLzLCPsbikpbpa1PeVYZ1LMnpBKs",
+      "emailNorm": "alice@example.com",
+      "stored": {
+        "codeMacB64": "wKTgcxM6TXvgaULKT6BlMg2qB7rle_BizVriYimw9Dk",
+        "expiresAt": 1794744900000,
+        "attempts": 0
+      },
+      "code": "482915",
+      "now": 1794744060000,
+      "expect": {
+        "status": 200
+      }
+    },
+    {
+      "name": "wrong-code",
+      "why": "A wrong code: the uniform 400 bad_code, and attempts goes to 1.",
+      "signupSecretB64": "hpGce3wImfPqACbqLzLCPsbikpbpa1PeVYZ1LMnpBKs",
+      "emailNorm": "alice@example.com",
+      "stored": {
+        "codeMacB64": "wKTgcxM6TXvgaULKT6BlMg2qB7rle_BizVriYimw9Dk",
+        "expiresAt": 1794744900000,
+        "attempts": 0
+      },
+      "code": "482916",
+      "now": 1794744060000,
+      "expect": {
+        "status": 400,
+        "code": "bad_code",
+        "attemptsAfter": 1
+      }
+    },
+    {
+      "name": "right-code-after-four-wrong",
+      "why": "Four wrong codes so far: the right one still verifies.",
+      "signupSecretB64": "hpGce3wImfPqACbqLzLCPsbikpbpa1PeVYZ1LMnpBKs",
+      "emailNorm": "alice@example.com",
+      "stored": {
+        "codeMacB64": "wKTgcxM6TXvgaULKT6BlMg2qB7rle_BizVriYimw9Dk",
+        "expiresAt": 1794744900000,
+        "attempts": 4
+      },
+      "code": "482915",
+      "now": 1794744060000,
+      "expect": {
+        "status": 200
+      }
+    },
+    {
+      "name": "fifth-wrong-code",
+      "why": "The fifth wrong code: attempts reaches 5 and the code is dead.",
+      "signupSecretB64": "hpGce3wImfPqACbqLzLCPsbikpbpa1PeVYZ1LMnpBKs",
+      "emailNorm": "alice@example.com",
+      "stored": {
+        "codeMacB64": "wKTgcxM6TXvgaULKT6BlMg2qB7rle_BizVriYimw9Dk",
+        "expiresAt": 1794744900000,
+        "attempts": 4
+      },
+      "code": "111111",
+      "now": 1794744060000,
+      "expect": {
+        "status": 400,
+        "code": "bad_code",
+        "attemptsAfter": 5
+      }
+    },
+    {
+      "name": "right-code-on-a-dead-code",
+      "why": "Attempts used up (5): even the right code gets the same 400 bad_code.",
+      "signupSecretB64": "hpGce3wImfPqACbqLzLCPsbikpbpa1PeVYZ1LMnpBKs",
+      "emailNorm": "alice@example.com",
+      "stored": {
+        "codeMacB64": "wKTgcxM6TXvgaULKT6BlMg2qB7rle_BizVriYimw9Dk",
+        "expiresAt": 1794744900000,
+        "attempts": 5
+      },
+      "code": "482915",
+      "now": 1794744060000,
+      "expect": {
+        "status": 400,
+        "code": "bad_code"
+      }
+    },
+    {
+      "name": "right-code-expired",
+      "why": "The right code one millisecond after its 15 minutes: the same 400 bad_code.",
+      "signupSecretB64": "hpGce3wImfPqACbqLzLCPsbikpbpa1PeVYZ1LMnpBKs",
+      "emailNorm": "alice@example.com",
+      "stored": {
+        "codeMacB64": "wKTgcxM6TXvgaULKT6BlMg2qB7rle_BizVriYimw9Dk",
+        "expiresAt": 1794744900000,
+        "attempts": 0
+      },
+      "code": "482915",
+      "now": 1794744900001,
+      "expect": {
+        "status": 400,
+        "code": "bad_code"
+      }
+    },
+    {
+      "name": "right-code-at-its-expiry",
+      "why": "now equals expiresAt: expiry is exclusive, so the code has expired. The same 400 bad_code.",
+      "signupSecretB64": "hpGce3wImfPqACbqLzLCPsbikpbpa1PeVYZ1LMnpBKs",
+      "emailNorm": "alice@example.com",
+      "stored": {
+        "codeMacB64": "wKTgcxM6TXvgaULKT6BlMg2qB7rle_BizVriYimw9Dk",
+        "expiresAt": 1794744900000,
+        "attempts": 0
+      },
+      "code": "482915",
+      "now": 1794744900000,
+      "expect": {
+        "status": 400,
+        "code": "bad_code"
+      }
+    },
+    {
+      "name": "right-code-one-millisecond-before-expiry",
+      "why": "One millisecond before expiresAt the code still verifies.",
+      "signupSecretB64": "hpGce3wImfPqACbqLzLCPsbikpbpa1PeVYZ1LMnpBKs",
+      "emailNorm": "alice@example.com",
+      "stored": {
+        "codeMacB64": "wKTgcxM6TXvgaULKT6BlMg2qB7rle_BizVriYimw9Dk",
+        "expiresAt": 1794744900000,
+        "attempts": 0
+      },
+      "code": "482915",
+      "now": 1794744899999,
+      "expect": {
+        "status": 200
+      }
+    },
+    {
+      "name": "no-code-for-the-address",
+      "why": "No code was ever sent to this address (or it has an account already): the same 400 bad_code.",
+      "signupSecretB64": "hpGce3wImfPqACbqLzLCPsbikpbpa1PeVYZ1LMnpBKs",
+      "emailNorm": "alice@example.com",
+      "stored": null,
+      "code": "482915",
+      "now": 1794744060000,
+      "expect": {
+        "status": 400,
+        "code": "bad_code"
+      }
+    },
+    {
+      "name": "code-of-another-address",
+      "why": "The stored code belongs to another address: the MAC covers the address, so it does not verify.",
+      "signupSecretB64": "hpGce3wImfPqACbqLzLCPsbikpbpa1PeVYZ1LMnpBKs",
+      "emailNorm": "alice@example.com",
+      "stored": {
+        "codeMacB64": "JPWaA_WVs0-kNislfnBwYqyTsexgWzQM2VpVSlEICzI",
+        "expiresAt": 1794744900000,
+        "attempts": 0
+      },
+      "code": "482915",
+      "now": 1794744060000,
+      "expect": {
+        "status": 400,
+        "code": "bad_code",
+        "attemptsAfter": 1
+      }
+    },
+    {
+      "name": "replaced-code",
+      "why": "A new code replaced the first one for this address; the first code no longer verifies.",
+      "signupSecretB64": "hpGce3wImfPqACbqLzLCPsbikpbpa1PeVYZ1LMnpBKs",
+      "emailNorm": "alice@example.com",
+      "stored": {
+        "codeMacB64": "FrKGdPXNm84yU-wJ2SVmp41JEP17SqB_jCwL2koS31I",
+        "expiresAt": 1794744900000,
+        "attempts": 0
+      },
+      "code": "482915",
+      "now": 1794744060000,
+      "expect": {
+        "status": 400,
+        "code": "bad_code",
+        "attemptsAfter": 1
+      }
+    }
+  ],
+  "start": [
+    {
+      "why": "the address has no account: a code is stored and the code email is sent",
+      "accountExists": false,
+      "expect": {
+        "status": 202,
+        "body": {
+          "status": "sent"
+        }
+      },
+      "email": "signup_code"
+    },
+    {
+      "why": "the address already has an account: the SAME answer; an \"already registered\" email goes out instead, at most once a day",
+      "accountExists": true,
+      "expect": {
+        "status": 202,
+        "body": {
+          "status": "sent"
+        }
+      },
+      "email": "signup_existing"
+    }
+  ],
+  "ticket": [
+    {
+      "name": "same-address",
+      "why": "The ticket was issued for this address, is unused and in time.",
+      "ticket": {
+        "emailHash": "ff8d9819fc0e12bf0d24892e45987e249a28dce836a85cad60e28eaaa8c6d976",
+        "expiresAt": 1794745800000,
+        "used": false
+      },
+      "registerEmail": "alice@example.com",
+      "now": 1794744060000,
+      "expect": {
+        "verdict": "ok"
+      }
+    },
+    {
+      "name": "same-address-other-spelling",
+      "why": "The register body spells the address with capitals and a space: the binding is to SHA-256(emailNorm).",
+      "ticket": {
+        "emailHash": "ff8d9819fc0e12bf0d24892e45987e249a28dce836a85cad60e28eaaa8c6d976",
+        "expiresAt": 1794745800000,
+        "used": false
+      },
+      "registerEmail": " Alice@EXAMPLE.com",
+      "now": 1794744060000,
+      "expect": {
+        "verdict": "ok"
+      }
+    },
+    {
+      "name": "another-address",
+      "why": "A ticket earned with one address used to register another.",
+      "ticket": {
+        "emailHash": "ff8d9819fc0e12bf0d24892e45987e249a28dce836a85cad60e28eaaa8c6d976",
+        "expiresAt": 1794745800000,
+        "used": false
+      },
+      "registerEmail": "bob@example.com",
+      "now": 1794744060000,
+      "expect": {
+        "verdict": "bad_ticket",
+        "wire": "400 bad_ticket"
+      }
+    },
+    {
+      "name": "expired",
+      "why": "One millisecond after its 30 minutes.",
+      "ticket": {
+        "emailHash": "ff8d9819fc0e12bf0d24892e45987e249a28dce836a85cad60e28eaaa8c6d976",
+        "expiresAt": 1794745800000,
+        "used": false
+      },
+      "registerEmail": "alice@example.com",
+      "now": 1794745800001,
+      "expect": {
+        "verdict": "bad_ticket",
+        "wire": "400 bad_ticket"
+      }
+    },
+    {
+      "name": "at-its-expiry",
+      "why": "now equals expiresAt: expiry is exclusive, so the ticket has expired.",
+      "ticket": {
+        "emailHash": "ff8d9819fc0e12bf0d24892e45987e249a28dce836a85cad60e28eaaa8c6d976",
+        "expiresAt": 1794745800000,
+        "used": false
+      },
+      "registerEmail": "alice@example.com",
+      "now": 1794745800000,
+      "expect": {
+        "verdict": "bad_ticket",
+        "wire": "400 bad_ticket"
+      }
+    },
+    {
+      "name": "one-millisecond-before-expiry",
+      "why": "One millisecond before expiresAt the ticket is still good.",
+      "ticket": {
+        "emailHash": "ff8d9819fc0e12bf0d24892e45987e249a28dce836a85cad60e28eaaa8c6d976",
+        "expiresAt": 1794745800000,
+        "used": false
+      },
+      "registerEmail": "alice@example.com",
+      "now": 1794745799999,
+      "expect": {
+        "verdict": "ok"
+      }
+    },
+    {
+      "name": "used",
+      "why": "A ticket is single use.",
+      "ticket": {
+        "emailHash": "ff8d9819fc0e12bf0d24892e45987e249a28dce836a85cad60e28eaaa8c6d976",
+        "expiresAt": 1794745800000,
+        "used": true
+      },
+      "registerEmail": "alice@example.com",
+      "now": 1794744060000,
+      "expect": {
+        "verdict": "bad_ticket",
+        "wire": "400 bad_ticket"
+      }
+    },
+    {
+      "name": "unknown",
+      "why": "No such ticket.",
+      "ticket": null,
+      "registerEmail": "alice@example.com",
+      "now": 1794744060000,
+      "expect": {
+        "verdict": "bad_ticket",
+        "wire": "400 bad_ticket"
+      }
+    }
+  ]
+}

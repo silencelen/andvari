@@ -69,13 +69,9 @@ describe("main.tsx wiring", () => {
     expect(mainTsx).toContain("<InsecureContextCard />");
   });
 
-  it("does NOT strip the enroll fragment on an origin that cannot use it", () => {
-    // captureEnrollFromLocation() consumes the invite link from the URL. Running it here would
-    // burn a one-time invite on an origin where enrollment can never complete.
-    const gate = mainTsx.indexOf("if (webCryptoUnavailable())");
-    const capture = mainTsx.indexOf("captureEnrollFromLocation()");
-    expect(gate).toBeGreaterThan(-1);
-    expect(capture).toBeGreaterThan(gate);
-    expect(mainTsx.slice(gate, capture)).toContain("} else {");
+  it("reads no link from the URL at all (design §13: the web opens no links)", () => {
+    expect(mainTsx).toContain("if (webCryptoUnavailable())");
+    expect(mainTsx).not.toContain("captureEnrollFromLocation");
+    expect(mainTsx).not.toContain("location.hash");
   });
 });

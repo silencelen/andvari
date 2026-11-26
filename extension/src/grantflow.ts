@@ -20,9 +20,14 @@
  */
 
 /** The broad optional host permission the dynamic autofill script needs to inject on arbitrary pages
- *  (design §5.1 manifest model). An all-hosts `http` pattern is deliberately NOT requested — the
- *  manifest's `optional_host_permissions` only allows `http://localhost`/`127.0.0.1`, so autofill on
- *  plain-http pages is out of scope by construction; https covers the real web. */
+ *  (design §5.1 manifest model). An all-hosts `http` pattern is deliberately NOT requested: the
+ *  manifest's host permissions name only `http://localhost`/`127.0.0.1` for plain http. The script itself is
+ *  registered for `http://*\/*` as well as `https://*\/*` (background.ts reconcileAutofillScripts), and the
+ *  browser runs it only where a host permission is held, so plain http IS reachable: loopback through that grant,
+ *  and an http page the person opened the popup on, for as long as the browser keeps that tab's activeTab grant;
+ *  the popup itself lists and fills on any http page. There, spec 05 autofill (e) holds, in the page and
+ *  in the popup alike: a plain-http page matches only an address saved as `http://`, never a login saved for https
+ *  (urimatch.ts `matchLoginsAt`). */
 export const BROAD_ORIGIN_PATTERN = "https://*/*";
 
 export interface GrantDecision {

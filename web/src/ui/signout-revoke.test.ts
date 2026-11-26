@@ -2,7 +2,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { REVOKE_UNCONFIRMED } from "./session";
-import { SIGN_OUT_QUESTION, signOutQuestion } from "./SignOutLink";
+import { fill, UNSENT_LOST_MANY, UNSENT_LOST_ONE, UNSENT_SEND_FIRST_SIGN_IN, UNSENT_SEND_FIRST_UNLOCK, UNSENT_UNKNOWN } from "./copy";
+import { SIGN_OUT_QUESTION, signOutQuestion, unsentArmStep } from "./SignOutLink";
 
 /**
  * bug-web--0 (polish audit 2026-07-27): the revocation HELPER is unit-tested in session.test.ts,
@@ -96,20 +97,22 @@ describe("App lock — a browser WITH the offline copy never revokes", () => {
 });
 
 describe("Welcome's two sign-out teardowns — the paths App.signOut cannot reach", () => {
-  const calls = [...welcomeTsx.matchAll(/void revokeSessionBestEffort\(client\);/g)];
-
-  it("both the capture-gate sign-out and the reveal idle-timeout revoke", () => {
-    // (1) signOutOfCapture — sign-out from the recovery-capture gate; (2) the RecoveryReveal
-    // auto-lock expiry, which is a full sign-out of a session already saved at register.
-    expect(calls).toHaveLength(2);
-  });
-
-  it("each fires before its own clearSession()/setTokens(null)", () => {
-    for (const m of calls) {
-      const after = welcomeTsx.slice(m.index!, m.index! + 240);
-      expect(after).toContain("clearSession();");
-      expect(after).toContain("client.setTokens(null);");
-    }
+  it("the kit gate's idle timeout revokes the not-yet-saved session before it leaves", () => {
+    // The kit is shown before the session is persisted (design §10: before the vault opens), so App.signOut
+    // cannot see it: the gate revokes and drops the pair itself (abandonSignIn), then hands the notice on.
+    // The entry gate wraps the shared KitGate (ui/KitCard.tsx), which wipes the secret before it calls onTimeout.
+    const gate = welcomeTsx.slice(welcomeTsx.indexOf("function EntryKitGate("), welcomeTsx.indexOf("async function rotateFor("));
+    const t = gate.indexOf("onTimeout={() => {");
+    expect(t).toBeGreaterThan(-1);
+    const body = gate.slice(t, gate.indexOf("}}", t));
+    expect(body.indexOf("void abandonSignIn(ctx.client, flow);")).toBeGreaterThan(-1);
+    expect(body.indexOf("void abandonSignIn(ctx.client, flow);")).toBeLessThan(body.indexOf("onTimeout();"));
+    const kitTsx = readFileSync(fileURLToPath(new URL("./KitCard.tsx", import.meta.url)), "utf8");
+    const shared = kitTsx.slice(kitTsx.indexOf("export function KitGate("), kitTsx.indexOf("export function RotateKitCard("));
+    const s = shared.indexOf("onTimeout={() => {");
+    const sharedBody = shared.slice(s, shared.indexOf("}}", s));
+    expect(sharedBody.indexOf("current.secret.fill(0);")).toBeGreaterThan(-1);
+    expect(sharedBody.indexOf("current.secret.fill(0);")).toBeLessThan(sharedBody.indexOf("onTimeout();"));
   });
 });
 
@@ -138,8 +141,11 @@ describe("H135 — the sign-out confirm is the inline arm, and App.signOut raise
   });
 
   it("both user sign-out seams go through SignOutLink — nothing calls onForget()/onSignOut raw", () => {
-    expect(welcomeTsx).toContain("<SignOutLink userId={session.userId} onSignOut={() => onForget()} />");
-    expect(welcomeTsx).toContain("<SignOutLink userId={account.userId} onSignOut={onSignOut} />");
+    // The unlock card, its per-tab sign-in, and the card of a session the server ended (design §4.4), each saying how
+    // to try sending unsent changes first from where the person is.
+    expect(welcomeTsx.split("<SignOutLink userId={session.userId} onSignOut={() => onForget()} sendFirst={UNSENT_SEND_FIRST_SIGN_IN} />").length - 1).toBe(2);
+    expect(welcomeTsx.split("<SignOutLink userId={session.userId} onSignOut={() => onForget()} sendFirst={UNSENT_SEND_FIRST_UNLOCK} />").length - 1).toBe(1);
+    expect(welcomeTsx.split("<SignOutLink ").length - 1).toBe(3);
     // The old bare links are gone: a raw link would wipe with no confirm at all now.
     expect(welcomeTsx).not.toMatch(/className="link" onClick=\{\(\) => onForget\(\)\}/);
     expect(welcomeTsx).not.toMatch(/className="link" onClick=\{onSignOut\}/);
@@ -151,9 +157,9 @@ describe("H135 — the sign-out confirm is the inline arm, and App.signOut raise
 
   it("confirms on unsynced work OR a standing offline copy, not on unsynced work alone", async () => {
     // No queue, but a durable copy on the device: still a thing to lose ⇒ still asks.
-    expect(await signOutQuestion("u1", { queued: async () => 0, durable: async () => true })).toBe(SIGN_OUT_QUESTION);
+    expect(await signOutQuestion("u1", { unsent: async () => 0, durable: async () => true })).toBe(SIGN_OUT_QUESTION);
     // Neither ⇒ one click, no confirm (the pre-F07 behaviour, kept for the device with nothing at stake).
-    expect(await signOutQuestion("u1", { queued: async () => 0, durable: async () => false })).toBeNull();
+    expect(await signOutQuestion("u1", { unsent: async () => 0, durable: async () => false })).toBeNull();
   });
 
   it("uses the natives' sentence, so all three clients state the same cost", () => {
@@ -163,20 +169,40 @@ describe("H135 — the sign-out confirm is the inline arm, and App.signOut raise
   });
 
   it("still names the unsynced count when there is one (breaker #9 — the queue dies with the cache)", async () => {
-    expect(await signOutQuestion("u1", { queued: async () => 1, durable: async () => false })).toContain(
-      "1 unsynced change will be permanently lost.",
-    );
-    expect(await signOutQuestion("u1", { queued: async () => 4, durable: async () => true })).toContain(
-      "4 unsynced changes will be permanently lost.",
-    );
+    expect(await signOutQuestion("u1", { unsent: async () => 1, durable: async () => false })).toBe(`${SIGN_OUT_QUESTION} ${UNSENT_LOST_ONE}`);
+    expect(await signOutQuestion("u1", { unsent: async () => 4, durable: async () => true })).toBe(`${SIGN_OUT_QUESTION} ${fill(UNSENT_LOST_MANY, "4")}`);
   });
 
-  it("a FAILED probe asks rather than wipes — not knowing is a reason to confirm", async () => {
+  it("a FAILED probe asks rather than wipes, and says that this browser cannot tell (never none)", async () => {
     const boom = async (): Promise<never> => {
       throw new Error("idb closed");
     };
-    expect(await signOutQuestion("u1", { queued: boom, durable: async () => false })).toBe(SIGN_OUT_QUESTION);
-    expect(await signOutQuestion("u1", { queued: async () => 0, durable: boom })).toBe(SIGN_OUT_QUESTION);
+    expect(await signOutQuestion("u1", { unsent: boom, durable: async () => false })).toBe(`${SIGN_OUT_QUESTION} ${UNSENT_UNKNOWN}`);
+    expect(await signOutQuestion("u1", { unsent: async () => null, durable: async () => false })).toBe(`${SIGN_OUT_QUESTION} ${UNSENT_UNKNOWN}`);
+    expect(await signOutQuestion("u1", { unsent: async () => 0, durable: boom })).toBe(SIGN_OUT_QUESTION);
+  });
+
+  it("says how to try sending them first, only when there are any or this browser cannot tell", async () => {
+    expect(await signOutQuestion("u1", { unsent: async () => 2, durable: async () => true }, UNSENT_SEND_FIRST_UNLOCK)).toBe(
+      `${SIGN_OUT_QUESTION} ${fill(UNSENT_LOST_MANY, "2")} ${UNSENT_SEND_FIRST_UNLOCK}`,
+    );
+    expect(await signOutQuestion("u1", { unsent: async () => null, durable: async () => true }, UNSENT_SEND_FIRST_SIGN_IN)).toBe(
+      `${SIGN_OUT_QUESTION} ${UNSENT_UNKNOWN} ${UNSENT_SEND_FIRST_SIGN_IN}`,
+    );
+    expect(await signOutQuestion("u1", { unsent: async () => 0, durable: async () => true }, UNSENT_SEND_FIRST_UNLOCK)).toBe(SIGN_OUT_QUESTION);
+  });
+
+  it("nothing is deleted on a first click, and a count that moved since it arms again instead of signing out", () => {
+    const two = { text: "two", unsent: 2 };
+    expect(unsentArmStep(null, two)).toEqual({ act: false, armed: two }); // first click: armed, nothing done
+    expect(unsentArmStep(two, { text: "two", unsent: 2 })).toEqual({ act: true, armed: null }); // second click, same count
+    const three = { text: "three", unsent: 3 };
+    expect(unsentArmStep(two, three)).toEqual({ act: false, armed: three }); // another tab queued one more meanwhile
+    const unknown = { text: "?", unsent: null };
+    expect(unsentArmStep(two, unknown)).toEqual({ act: false, armed: unknown }); // the count could no longer be read
+    expect(unsentArmStep(unknown, { text: "?", unsent: null })).toEqual({ act: true, armed: null }); // told it cannot tell, confirmed
+    expect(unsentArmStep(null, null)).toEqual({ act: true, armed: null }); // nothing at stake: one click
+    expect(unsentArmStep(two, null)).toEqual({ act: true, armed: null }); // everything was sent meanwhile
   });
 
   it("no session id ⇒ nothing persisted to lose ⇒ no question", async () => {

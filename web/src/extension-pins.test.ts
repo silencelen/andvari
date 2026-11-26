@@ -40,6 +40,12 @@ import {
  */
 
 const extensionSrc = fileURLToPath(new URL("../../extension/src/", import.meta.url));
+/** The words of the extension's line [name] in copy.ts, as they stand (named, so a test holds whatever they are). */
+function extCopy(name: string): string {
+  const m = readFileSync(extensionSrc + "copy.ts", "utf-8").match(new RegExp(`export const ${name} = ("(?:[^"\\\\]|\\\\.)*");`));
+  if (!m) throw new Error(`extension copy.ts has no ${name}`);
+  return JSON.parse(m[1]!) as string;
+}
 const vectorsDir = fileURLToPath(new URL("../../spec/test-vectors/", import.meta.url));
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const v: any = JSON.parse(readFileSync(vectorsDir + "card.json", "utf-8"));
@@ -506,12 +512,14 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     // F24 (2026-08-13 audit): lowercase brand — if a sentence-initial capital is ever wanted, rephrase so the brand is
     // not the first word.
     const er = readFileSync(extensionSrc + "errors.ts", "utf-8");
-    expect(er).toContain(`export const CARD_PAGE_FORM = "andvari fills a card only into a payment provider's card form, and this page takes the card itself.";`);
+    // Each reason is a named line of errors.ts (its words are the owner's to give, so they are not pinned here).
+    for (const k of ["CARD_PAGE_FORM", "CARD_PROVIDER_NOT_ALLOWED_SAFARI", "CARD_PROVIDER_NOT_ALLOWED", "CARD_PROVIDER_NOT_ALLOWED_ANY_SAFARI", "CARD_PROVIDER_NOT_ALLOWED_ANY", "CARD_DUPLICATE_FIELDS"]) {
+      expect(er).toMatch(new RegExp(`export const ${k} =\\s*"`));
+    }
     expect(er, "the brand is lowercase in running copy").not.toContain("Andvari fills a card");
-    expect(er).toContain("`The card form comes from ${host}, where Safari doesn't let andvari run yet. To fill it, allow andvari on ${host} or on Every Website in Safari's extension settings.`");
-    expect(er).toContain("`The card form comes from ${host}, where andvari isn't allowed to run. To fill it, allow andvari on ${host} in the extension's site access.`");
-    expect(er).toContain(`"andvari isn't running on this page, so it can't fill a card here. To let it, allow andvari on Every Website in Safari's extension settings."`);
-    expect(er).toContain(`export const CARD_DUPLICATE_FIELDS = "This page shows more than one payment form asking for the same card detail, so andvari fills none of them.";`);
+    // The provider's host fills the line's slot(s); with none known, every website.
+    expect(er).toContain("return fillApproved(safari ? CARD_PROVIDER_NOT_ALLOWED_SAFARI : CARD_PROVIDER_NOT_ALLOWED, host);");
+    expect(er).toContain("if (host === null) return safari ? CARD_PROVIDER_NOT_ALLOWED_ANY_SAFARI : CARD_PROVIDER_NOT_ALLOWED_ANY;");
     // The SW answers ONE of them, in one place: a provider's card form → fillable (with the frames the person chose in),
     // unless two provider frames offer one kind → doubled; else a provider's frame the page shows on a site it has heard
     // nothing from → allowOrigin; else the page's own card form → pageFormOnly; else, in Safari, nothing of the page
@@ -533,11 +541,12 @@ describe("Tier-2 card autofill pins (design 2026-07-23-…-tier2.md §9) — str
     expect(offers).toMatch(/if \(BUILD_TARGET === "safari" && cardReports\.get\(tabId\)\?\.top !== true[^\n]*\n\s*await delay\(250\);\n\s*if \(cardReports\.get\(tabId\)\?\.top !== true\) return \{ \.\.\.none, allowEverywhere: true \};/);
     // The site named is a HINT from the page's own srcs (its top frame's report): it picks the words, never a frame.
     expect(bg).toContain("return heard?.hints.find((o) => !heard.origins.has(o)) ?? null;");
-    expect(pp).toMatch(/if \(cardFill\.fillable\) \{\s*acts\.append\(\s*actBtn\(\s*"fill"/);
+    expect(pp).toMatch(/if \(cardFill\.fillable\) \{\s*acts\.append\(\s*actBtn\(\s*T\.BTN_FILL/);
     // The Fill names exactly which card details it writes, never a bare count (round-12 review).
     // Round-13 review: and names the documents a provider frame sits in below the top one ("js.stripe.com inside
     // rewards.example"; cardrelease.ts fillDestination).
-    expect(pp).toContain('dest.textContent = cardFill.frames.length > 0 ? `Fill → ${fillDestination(cardFill.frames)}: ${cardDetailNames(cardFill.frames.flatMap((f) => f.kinds))}` : `Fill → ${cardFill.origin}`;');
+    expect(pp).toContain("? fillApproved(T.FILL_DESTINATION_DETAILS, fillDestination(cardFill.frames), cardDetailNames(cardFill.frames.flatMap((f) => f.kinds)))");
+    expect(pp).toContain(": fillApproved(T.FILL_DESTINATION, String(cardFill.origin));");
     expect(pp).not.toMatch(/fields\)`/);
     const reason = spanOf(pp, "function cardCopyReason(", "function renderCards(");
     expect(reason).toMatch(/if \(cardFill\.fillOff === true\) return cardFillOffLine\(safari\);\s*if \(cardFill\.mixed === true\) return CARD_MIXED_FORMS;\s*if \(cardFill\.fillable\) return null;/);
@@ -909,12 +918,11 @@ describe("C1 in-page card chip pins (design 2026-07-26 §Gate + pins) — zero-d
     // Reverting it to "Unlock to fill card" would invert that teaching silently — the page controls
     // the anchor position and could seat the REAL chip against a page-drawn master-password box.
     const chip = spanOf(cu, "function showCardChip(", "function closeCardChip(");
-    expect(chip).toContain("andvari is locked — click the andvari toolbar icon");
-    expect(chip).toContain("Fill card with andvari");
+    expect(chip).toContain("const text = state.locked ? T.CARD_CHIP_LOCKED : T.CARD_CHIP;");
     // [K-label] neither label may match detect.ts's SUBMIT_TEXT_RX, or our own chip would read as
-    // a submit control to the G2 capture gesture path.
+    // a submit control to the G2 capture gesture path (read from the lines themselves, whatever their words).
     const submitRx = /sign.?in|log.?in|continue|next|submit|anmelden|einloggen/i;
-    for (const label of ["Fill card with andvari", "andvari is locked — click the andvari toolbar icon"]) {
+    for (const label of [extCopy("CARD_CHIP"), extCopy("CARD_CHIP_LOCKED")]) {
       expect(submitRx.test(label), `chip label "${label}" reads as a submit control`).toBe(false);
     }
   });
@@ -1078,8 +1086,8 @@ describe("2026-07-27 polish-release audit pins (extension lane) — checkout gat
     // session (quick-unlock re-arm).
     const so = spanOf(bg, "async function doSignOut(", "/** Re-arm the policy idle lock");
     expect(so).toMatch(/Promise\.race\(\[revoker\.logout\(\), delay\(5000\)\]\)/);
-    expect(so.indexOf('await doLock("signout", seen);')).toBeGreaterThan(-1);
-    expect(so.indexOf('await doLock("signout", seen);')).toBeLessThan(so.indexOf("revoker.logout()"));
+    expect(so.indexOf('await doLock("signout", seen, sayLost);')).toBeGreaterThan(-1);
+    expect(so.indexOf('await doLock("signout", seen, sayLost);')).toBeLessThan(so.indexOf("revoker.logout()"));
     const lock = spanOf(bg, "async function doLock(", "async function doSignOut(");
     expect(lock).not.toContain("logout(");
   });
@@ -1135,8 +1143,11 @@ describe("2026-07-27 polish-release audit pins (extension lane) — in-page a11y
     expect(keyCode, "[K4]: the chip must never touch the dropdown's reopen suppression").not.toContain("suppressOpenUntil");
     // Discoverability: an untabbable surface that does not say its key does not have one.
     const chip = spanOf(cu, "function showCardChip(", "function closeCardChip(");
-    expect(chip).toContain("Press Alt plus Down Arrow to open andvari.");
-    expect(chip, "the SPOKEN form must not alter the [S6] visible sentences").toContain('"Fill card with andvari"');
+    expect(chip).toContain("const spoken = state.locked ? T.CARD_CHIP_LOCKED_LABEL : T.CARD_CHIP_LABEL;");
+    expect(chip, "the SPOKEN form must not alter the [S6] visible sentences").toContain("const text = state.locked ? T.CARD_CHIP_LOCKED : T.CARD_CHIP;");
+    // The spoken lines are lines of their own, not the visible ones.
+    expect(extCopy("CARD_CHIP_LABEL")).not.toBe(extCopy("CARD_CHIP"));
+    expect(extCopy("CARD_CHIP_LOCKED_LABEL")).not.toBe(extCopy("CARD_CHIP_LOCKED"));
   });
 
   it("a11y-webext--0: the banners answer Escape, carry a labelled role, and never drop focus to <body>", () => {
@@ -1299,7 +1310,8 @@ describe("2026-07-27 polish-release audit pins (extension lane) — in-page a11y
     // engine maps to bio_cancelled → "Setup was cancelled — try again when you're ready.", forever.
     // The probe routes it to the honest bio_unsupported line (which names the PIN) instead.
     expect(bg).toContain("async function bioRpPermissionHeld(): Promise<boolean> {");
-    expect(bg).toContain("const BIO_RP_ORIGIN_PATTERN = `${DEFAULT_SERVER_URL}/*`;");
+    // Design 2026-11-15 §15: no build has a default server; the RP origin is the public instance's.
+    expect(bg).toContain("const BIO_RP_ORIGIN_PATTERN = `${PUBLIC_INSTANCE.origin}/*`;");
     const enroll = spanOf(bg, "const biometricDep: QuBiometric = {", "async evalPrf(");
     expect(enroll).toContain("if (!(await bioRpPermissionHeld())) return { credentialId: \"\", prfEnabled: false, prfSalt };");
     // The popup's capability probe must ask the same question — a button that can only fail is the
@@ -1309,18 +1321,20 @@ describe("2026-07-27 polish-release audit pins (extension lane) — in-page a11y
     expect(probe).toContain("typeof navigator.credentials?.create === \"function\"");
     // One spelling of the RP origin, derived — connector.ts claims it, the SW probes it.
     const cx = readFileSync(extensionSrc + "connector.ts", "utf-8");
-    expect(cx).toContain("const RP_ID = new URL(DEFAULT_SERVER_URL).hostname;");
-    expect(cx, "the reference host must not be re-spelled as a literal").not.toContain('"andvari.monahanhosting.com"');
+    expect(cx).toContain("const RP_ID = new URL(PUBLIC_INSTANCE.origin).hostname;");
+    expect(cx, "the public host must not be re-spelled as a literal").not.toContain('"vault.andvaripass.com"');
   });
 
   it("ux-parity--1 (extension half): sign-out is a two-step arm-confirm, disarmed on blur", () => {
     // Every other surface confirms; here one click on a footer button adjacent to "Lock" wiped the
     // quick-unlock enrollment (PIN/biometric re-setup required). The popup has no dialog surface,
     // so this is the options page's own inline idiom.
-    const so = spanOf(pu, "let signOutArmed = false;", "/* ---- footer ---- */");
-    expect(so).toContain("if (!signOutArmed) {");
-    expect(so).toContain('signOutArmed = true;');
-    expect(so.indexOf("signOutArmed = true;")).toBeLessThan(so.indexOf('ask({ type: "signOut" })'));
+    // Design §4.4 (decided on 2026-11-17): the first click also says how many captures not saved the sign-out deletes;
+    // the step (unsavedarm.ts unsavedArmStep, tested in the extension) asks a sign-out once always.
+    const so = spanOf(pu, "let signOutArmed: number | null = null;", "/* ---- footer ---- */");
+    expect(so).toContain("const step = unsavedArmStep(signOutArmed, now.count, true);");
+    expect(so).toContain("signOutArmed = step.armed;");
+    expect(so.indexOf("signOutArmed = step.armed;")).toBeLessThan(so.indexOf('ask({ type: "signOut" })'));
     expect(so).toContain('el("sign-out").addEventListener("blur", disarmSignOut)');
   });
 });
@@ -1377,26 +1391,28 @@ describe("2026-08-13 audit pins (extension lane) — F18 caller binding on the t
     // `fillFromPopup(msg.itemId)` and `linkUri(msg.itemId, msg.host)` were the only two effectful
     // cases in the switch that never saw who was calling.
     // (2026-11: the popup's confirmed other-site fill rides a third argument; the sender is still the second.)
-    // (Release 0.30.0: and the page the popup showed rides a fourth; the worker fills only while the tab is still on it.)
     expect(bg).toContain('return fillFromPopup(msg.itemId, sender, typeof msg.confirmedOtherSite === "string" ? msg.confirmedOtherSite : null, typeof msg.page === "string" ? msg.page : null);');
     expect(bg).toContain("return linkUri(msg, sender);");
   });
 
-  it("Safari: a login saved for another site fills only after the person confirmed THIS page's host (confirmedOtherSite)", () => {
+  it("every build: a login saved for another site fills only after the person confirmed it, for THIS login on THIS page (confirmedOtherSite)", () => {
     const f = spanOf(bg, "async function fillFromPopup(", "// ---- S3 in-page card fill");
-    // The confirmation holds only while the active tab is still on the host it was given for.
-    expect(f).toContain("const confirmed = confirmedOtherSite !== null && confirmedOtherSite === (page ?? top);");
+    // The confirmation is the token of the question asked: it holds for that login, on that top-level origin only.
+    expect(f).toContain("const confirmed = confirmedOtherSite !== null && confirmedOtherSite === otherSiteConfirmation(itemId, top);");
     expect(f).toContain('if (!confirmed && (page === null || !matchLogins(uris, { webHost: page, packageName: "" }, pslResolve))) {');
-    expect(f).toContain('return { ok: false, code: "not_allowed", error: "confirm other site", needsConfirm: { savedFor, page: page ?? top } };');
+    expect(f).toContain('return { ok: false, code: "not_allowed", error: "confirm other site", needsConfirm: otherSiteQuestion(itemId, saved, top, pslResolve) };');
+    const q = readFileSync(extensionSrc + "othersite.ts", "utf-8");
+    expect(q).toContain("return `${top} ${itemId}`;");
+    expect(q).toContain("confirm: otherSiteConfirmation(itemId, top)");
     // Decided before any grant exists for the tab.
     expect(f.indexOf("const confirmed =")).toBeGreaterThan(-1);
     expect(f.indexOf("const confirmed =")).toBeLessThan(f.indexOf("grants.set(tab.id,"));
-    // The popup sends it only from the confirmation's own Fill button, naming the page the worker named.
+    // The popup sends it only from the confirmation's own Fill button, with the token the worker handed over.
     const popup = readFileSync(extensionSrc + "popup.ts", "utf-8");
     expect(popup).toContain('const r = await ask(confirmedOtherSite === undefined ? { type: "fillFromPopup", itemId, page } : { type: "fillFromPopup", itemId, confirmedOtherSite, page });');
-    expect(popup).toContain("confirmOtherSite(itemId, r.needsConfirm.savedFor, r.needsConfirm.page);");
-    expect(popup.match(/void fillItem\(itemId, page\);/g), "one caller passes a confirmation").toHaveLength(1);
-    expect(spanOf(popup, "function confirmOtherSite(", "/** The list payload already carries the username")).toContain("void fillItem(itemId, page);");
+    expect(popup).toContain("confirmOtherSite(itemId, r.needsConfirm);");
+    expect(popup.match(/void fillItem\(itemId, q\.confirm\);/g), "one caller passes a confirmation").toHaveLength(1);
+    expect(spanOf(popup, "function confirmOtherSite(", "/** The list payload already carries the username")).toContain("void fillItem(itemId, q.confirm);");
   });
 
   it("fillFromPopup is POPUP ONLY, refused before anything else runs (its card twin's guard, verbatim)", () => {
@@ -1662,9 +1678,11 @@ describe("H122 — the weakened-KDF sentence is one sentence in all three canons
 
   it("the extension's sign-in row is byte-equal to core's WEAK_KDF_SIGN_IN, at every one of its copies", () => {
     const signIn = kotlinConst("WEAK_KDF_SIGN_IN");
-    const copies = errorsTs.match(/"This server sent weakened security settings[^"]*"/g) ?? [];
-    expect(copies.length, "errors.ts states the sentence once per error surface").toBeGreaterThanOrEqual(3);
-    for (const c of copies) expect(JSON.parse(c)).toBe(signIn);
+    // One named line, which every error surface returns.
+    const line = errorsTs.match(/export const KDF_POLICY_BLOCKED = ("[^"]*");/);
+    expect(line, "errors.ts KDF_POLICY_BLOCKED").not.toBeNull();
+    expect(JSON.parse(line![1]!)).toBe(signIn);
+    expect((errorsTs.match(/return KDF_POLICY_BLOCKED;/g) ?? []).length, "the sign-in, the PIN and the device unlock").toBeGreaterThanOrEqual(3);
   });
 
   it("all three canons end on the house word — 'admin', the identity-mismatch twin's word", () => {
@@ -1711,8 +1729,13 @@ describe("H03 / R37 — the push MutationResult union is one union on every push
     for (const f of ["messages.ts", "errors.ts"]) {
       // A9 review MEDIUM-1 added `no_personal_vault` (a served wrap the browser never confirmed is no capture destination).
       // 2026-11: the Safari build saves through the app, so its two outcomes of that hand-off joined the union.
+      // Design 2026-11-15 §12.2 rule 4: `shared_vault`, a login in a shared vault is never written by the extension.
+      // Design 2026-11-15 §4.4: `server_fork`, nothing is written while a fork stops the server.
+      // Design 2026-11-15 §4.4 (a session the server ends): `server_ended`, nothing is saved once the server ended the session.
+      // A new item's save whose answer was lost: `cannot_tell`, never "could not save" (a second try sends the same ids).
+      // The Safari app's own refusal of a capture handed to it: `app_refused`, never the server's `rejected`.
       expect(readFileSync(extensionSrc + f, "utf-8"), f).toMatch(
-        /type SaveErrorCode = "locked" \| "no_personal_vault" \| "conflict" \| "rejected" \| "failed" \| "app_no_account" \| "app_unavailable";/,
+        /type SaveErrorCode = "locked" \| "no_personal_vault" \| "conflict" \| "rejected" \| "failed" \| "app_no_account" \| "app_unavailable" \| "shared_vault" \| "server_fork" \| "server_ended" \| "cannot_tell" \| "app_refused";/,
       );
     }
   });

@@ -80,7 +80,22 @@ function CheckCell({ row, now }: { row: StalenessRow; now: number }) {
   );
 }
 
-export function Staleness({ items, roleFor, store, onOpenItem, onChanged, clearSeconds, lastUsedAt, onUsed }: Props) {
+/**
+ * [items] as the store's guarded reader lists their vaults at THIS render: a view that draws items it was handed (Health,
+ * Staleness, Duplicates) draws none of a vault whose key no longer works, even when it renders by its own state before the
+ * screen above it has read the list again. The vaults are those the store shows (VaultStore.shownVaultIds: the listed ones
+ * and the account's own, also where the server serves no row for it). The same array while they read the same, so memos keep.
+ */
+export function useListedNow<T extends { readonly vaultId: string }>(store: Pick<VaultStore, "shownVaultIds">, items: readonly T[]): T[] {
+  const key = store.shownVaultIds().join(",");
+  return useMemo(() => {
+    const listed = new Set(key.split(","));
+    return items.filter((it) => listed.has(it.vaultId));
+  }, [items, key]);
+}
+
+export function Staleness({ items: given, roleFor, store, onOpenItem, onChanged, clearSeconds, lastUsedAt, onUsed }: Props) {
+  const items = useListedNow(store, given);
   const { flash, copyErr, wipeStuck, copy } = useCopy(clearSeconds);
   const [showSnoozed, setShowSnoozed] = useState(false);
   const [msg, setMsg] = useState<{ kind: "err" | "info"; text: string } | null>(null);

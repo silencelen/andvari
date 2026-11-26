@@ -35,9 +35,11 @@ describe("H49 — the caption caps are scoped OUT of sentence-length labels", ()
     // ("Per item", "Display name", …) and below the shortest sentence in the set.
     const SENTENCE_LEN = 45;
     const found: string[] = [];
+    let scanned = 0;
     for (const file of readdirSync(here("./")).filter((f) => f.endsWith(".tsx"))) {
       const src = readFileSync(here(`./${file}`), "utf8");
       for (const m of src.matchAll(/label="([^"]*)"/g)) {
+        scanned++;
         if (m[1]!.length <= SENTENCE_LEN) continue;
         found.push(`${file}: ${m[1]}`);
         const tagStart = src.lastIndexOf("<", m.index!);
@@ -46,17 +48,16 @@ describe("H49 — the caption caps are scoped OUT of sentence-length labels", ()
         expect(tag, `${file}: sentence-length label must carry the prompt opt-in — ${m[1]}`).toMatch(/\sprompt(?=[\s>])/);
       }
     }
-    // The five the H49 evidence enumerated are all still in the scan (a threshold change that
-    // silently drops them would make the loop above vacuous for exactly the labels it exists for).
-    for (const known of [
-      "Vault.tsx: Type the FIRST 32 characters of the fingerprint on your printed recovery sheet",
-      "Welcome.tsx: Recovery check — type the FIRST 32 characters of the fingerprint on your printed recovery sheet",
-      "Welcome.tsx: Type your recovery phrase back to confirm you saved it",
-      "Admin.tsx: Confirm your recovery sheet (first 32 characters) to stamp a scannable code into the QR",
-      "Admin.tsx: KDF (read-only — changing it requires a coordinated re-enrollment)",
-    ]) {
-      expect(found, known).toContain(known);
-    }
+    // The scan read the views' static labels (a pattern change that matched nothing would make the loop vacuous). The
+    // last static sentence-length label the H49 evidence named, Vault's re-seal prompt, went with ReSealBanner (design
+    // §15's web row), so `found` may be empty; a new one is checked by the loop above.
+    expect(scanned).toBeGreaterThan(20);
+    expect("Type the FIRST 32 characters of the fingerprint on your printed recovery sheet".length).toBeGreaterThan(SENTENCE_LEN);
+    // Welcome's sentence-length labels are filled from the design's copy, so they are expressions the scan above
+    // cannot read: each of them carries the opt-in by hand.
+    const welcome = readFileSync(here("./Welcome.tsx"), "utf8");
+    for (const m of welcome.matchAll(/<Field label=\{(fill\(MASTER_PASSWORD_FOR|KIT_PASTE_LABEL)[^>]*>/g)) expect(m[0]).toMatch(/\sprompt(?=[\s>])/);
+    expect([...welcome.matchAll(/<Field label=\{(fill\(MASTER_PASSWORD_FOR|KIT_PASTE_LABEL)/g)]).toHaveLength(3);
     const sharing = readFileSync(here("./Sharing.tsx"), "utf8");
     expect(sharing).toContain('<label className="prompt" style={{ marginTop: 10 }}>Type the vault\'s name to delete it:</label>');
   });

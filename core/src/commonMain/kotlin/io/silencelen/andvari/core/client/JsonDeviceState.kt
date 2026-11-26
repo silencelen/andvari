@@ -22,8 +22,11 @@ interface DeviceStateFile {
  * platform purges (cache policy flip, revocation, sign-out) delete named files in that directory and never
  * this one, exactly like the self-identity pin. Values are public ids or UVK-sealed blobs.
  *
- * A file that does not parse reads as empty (local corruption is not an adversary capability here; the
- * device then behaves like one that never saw a wrap, which asks the human and mints nothing on its own).
+ * A file that cannot be read, or does not parse, is never taken for an empty one (design §4.4 "A trust record that
+ * cannot be read is not an empty one"): [get] throws and [set] writes nothing, because [set] writes the whole map
+ * back and that would replace every record (pins, fork marks, high-water marks, vault checkpoints) with what is
+ * written next. The engine reads a throwing record as unknown and keeps what it guards closed (a pin reads as
+ * damaged). The way out is the platform's: removing the namespace ("Forget this server").
  */
 class JsonDeviceState(private val file: DeviceStateFile) : DeviceState {
     companion object {
@@ -35,13 +38,13 @@ class JsonDeviceState(private val file: DeviceStateFile) : DeviceState {
     private val lock = SynchronizedObject()
 
     private fun readAll(): Map<String, String> {
-        // A file that cannot be read is never taken for an empty one: [set] writes the whole map back, so that would
-        // replace every record. Only a file that does not parse reads as empty.
         val text = file.read() ?: return emptyMap()
-        return runCatching { json.decodeFromString(codec, text) }.getOrNull() ?: emptyMap()
+        return runCatching { json.decodeFromString(codec, text) }.getOrNull() ?: throw IllegalStateException("device state does not parse")
     }
 
     override fun get(key: String): String? = synchronized(lock) { readAll()[key] }
+
+    override fun keys(): Set<String> = synchronized(lock) { readAll().keys.toSet() }
 
     override fun set(key: String, value: String?): Unit = synchronized(lock) {
         val next = readAll().toMutableMap()

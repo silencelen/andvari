@@ -1,0 +1,1013 @@
+{
+  "about": "Lines of the extension's copy whose words are the released extension's own (the 0.30.0 line), marked \"Approved wording (the released extension's own words)\". A line listed here whose words change is a new sentence: turn it back into a placeholder and take it off this list.",
+  "lines": {
+    "ACCOUNT_KEYS_DAMAGED": {
+      "file": "errors.ts",
+      "text": "This account's stored keys are damaged or from a newer version, so sign-in cannot continue. Contact your admin or restore from a backup."
+    },
+    "ANOTHER_SITE": {
+      "file": "copy.ts",
+      "text": "another site"
+    },
+    "APP_NOT_REACHED": {
+      "file": "copy.ts",
+      "text": "Couldn’t reach the andvari app. Open it once, then try again."
+    },
+    "APP_SERVER_NONE": {
+      "file": "copy.ts",
+      "text": "Choose your server in the andvari app. This extension uses the same one."
+    },
+    "APP_SERVER_UNKNOWN": {
+      "file": "copy.ts",
+      "text": "andvari couldn’t ask the andvari app which server you use. Open the app once, then open this again."
+    },
+    "BACKEND_NOT_RESPONDING": {
+      "file": "copy.ts",
+      "text": "Extension backend not responding — try reloading the extension."
+    },
+    "BAD_WIRE_ID": {
+      "file": "errors.ts",
+      "text": "The server sent a malformed account record, so sign-in was stopped. Tell your admin — the server may be misbehaving."
+    },
+    "BIO_SETUP_CANCELLED": {
+      "file": "errors.ts",
+      "text": "Setup was cancelled — try again when you're ready."
+    },
+    "BIO_UNLOCK_CANCELLED": {
+      "file": "errors.ts",
+      "text": "Device unlock was cancelled — try again, or use your master password."
+    },
+    "BIO_UNLOCK_FAILED": {
+      "file": "errors.ts",
+      "text": "Couldn't unlock with your device — unlock with your master password."
+    },
+    "BIO_UNSUPPORTED": {
+      "file": "errors.ts",
+      "text": "This device can't do biometric quick unlock — set up a PIN instead."
+    },
+    "BTN_ADD": {
+      "file": "copy.ts",
+      "text": "add"
+    },
+    "BTN_COPY": {
+      "file": "copy.ts",
+      "text": "copy"
+    },
+    "BTN_CVV": {
+      "file": "copy.ts",
+      "text": "cvv"
+    },
+    "BTN_EXP": {
+      "file": "copy.ts",
+      "text": "exp"
+    },
+    "BTN_FILL": {
+      "file": "copy.ts",
+      "text": "fill"
+    },
+    "BTN_HIDE": {
+      "file": "copy.ts",
+      "text": "hide"
+    },
+    "BTN_NAME": {
+      "file": "copy.ts",
+      "text": "name"
+    },
+    "BTN_NUM": {
+      "file": "copy.ts",
+      "text": "num"
+    },
+    "BTN_PASS": {
+      "file": "copy.ts",
+      "text": "pass"
+    },
+    "BTN_SHOW": {
+      "file": "copy.ts",
+      "text": "show"
+    },
+    "BTN_USER": {
+      "file": "copy.ts",
+      "text": "user"
+    },
+    "CANCEL": {
+      "file": "copy.ts",
+      "text": "Cancel"
+    },
+    "CANT_TELL_SERVER": {
+      "file": "copy.ts",
+      "text": "andvari can’t tell which server to open right now — close this window and try again."
+    },
+    "CARDS_LABEL": {
+      "file": "copy.ts",
+      "text": "Cards"
+    },
+    "CARD_CHIP": {
+      "file": "copy.ts",
+      "text": "Fill card with andvari"
+    },
+    "CARD_CHIP_LABEL": {
+      "file": "copy.ts",
+      "text": "Fill card with andvari. Press Alt plus Down Arrow to open andvari."
+    },
+    "CARD_CHIP_LOCKED": {
+      "file": "copy.ts",
+      "text": "andvari is locked — click the andvari toolbar icon"
+    },
+    "CARD_CHIP_LOCKED_LABEL": {
+      "file": "copy.ts",
+      "text": "andvari is locked — click the andvari toolbar icon. Press Alt plus Down Arrow to open andvari."
+    },
+    "CARD_CLOSED_FORM": {
+      "file": "errors.ts",
+      "text": "This payment form keeps its fields where andvari can't tell which one you tapped, so nothing was filled. Fill it by hand."
+    },
+    "CARD_COPY_FAILED": {
+      "file": "errors.ts",
+      "text": "Could not copy from this card — reopen the popup and try again."
+    },
+    "CARD_COPY_INSTEAD": {
+      "file": "copy.ts",
+      "text": "Copy instead:"
+    },
+    "CARD_COPY_IN_APP": {
+      "file": "copy.ts",
+      "text": "Copy what you need from the andvari app."
+    },
+    "CARD_COPY_MISSING_IN_APP": {
+      "file": "copy.ts",
+      "text": "Copy what's missing from the andvari app."
+    },
+    "CARD_DETAIL_CVV": {
+      "file": "copy.ts",
+      "text": "security code"
+    },
+    "CARD_DETAIL_EXPIRY": {
+      "file": "copy.ts",
+      "text": "expiry date"
+    },
+    "CARD_DETAIL_NAME": {
+      "file": "copy.ts",
+      "text": "name on card"
+    },
+    "CARD_DETAIL_NUMBER": {
+      "file": "copy.ts",
+      "text": "card number"
+    },
+    "CARD_DETAIL_POSTAL": {
+      "file": "copy.ts",
+      "text": "postal code"
+    },
+    "CARD_DETAIL_TYPE": {
+      "file": "copy.ts",
+      "text": "card type"
+    },
+    "CARD_DUPLICATE_FIELDS": {
+      "file": "errors.ts",
+      "text": "This page shows more than one payment form asking for the same card detail, so andvari fills none of them."
+    },
+    "CARD_FALLBACK_NAME": {
+      "file": "copy.ts",
+      "text": "Card"
+    },
+    "CARD_FILL_FROM_APP": {
+      "file": "errors.ts",
+      "text": "andvari fills no cards here: copy a card's number and code in the andvari app."
+    },
+    "CARD_FILL_OFF_COPY": {
+      "file": "errors.ts",
+      "text": "This build of andvari fills no cards into pages: copy a card's details with the buttons below."
+    },
+    "CARD_FORM_CHANGED": {
+      "file": "errors.ts",
+      "text": "The payment form changed after andvari opened. Open andvari again and fill."
+    },
+    "CARD_KIND_EXPIRY": {
+      "file": "copy.ts",
+      "text": "expiry"
+    },
+    "CARD_KIND_NUMBER": {
+      "file": "copy.ts",
+      "text": "number"
+    },
+    "CARD_MIXED_FORMS": {
+      "file": "errors.ts",
+      "text": "You tapped card fields in two different payment forms; tap the one you want to pay with, then Fill."
+    },
+    "CARD_NOT_VISIBLE": {
+      "file": "errors.ts",
+      "text": "The card field you tapped can't be seen on the page, so nothing was filled. Scroll to the form and try again, or fill it by hand."
+    },
+    "CARD_NO_FIELDS": {
+      "file": "errors.ts",
+      "text": "Couldn't fill the card fields on this page."
+    },
+    "CARD_NO_FOCUS": {
+      "file": "errors.ts",
+      "text": "Tap the card field in the payment form first, then fill again."
+    },
+    "CARD_NO_FORM": {
+      "file": "errors.ts",
+      "text": "The payment form changed — tap its card field and try again."
+    },
+    "CARD_NO_FRAME_ORIGIN": {
+      "file": "errors.ts",
+      "text": "This browser doesn't tell andvari which site a payment form's frame comes from, so andvari fills no card into one. Update the browser to fill cards here."
+    },
+    "CARD_PAGE_FORM": {
+      "file": "errors.ts",
+      "text": "andvari fills a card only into a payment provider's card form, and this page takes the card itself."
+    },
+    "CARD_PROVIDER_NOT_ALLOWED": {
+      "file": "errors.ts",
+      "text": "The card form comes from {0}, where andvari isn't allowed to run. To fill it, allow andvari on {0} in the extension's site access."
+    },
+    "CARD_PROVIDER_NOT_ALLOWED_ANY": {
+      "file": "errors.ts",
+      "text": "andvari isn't running on this page, so it can't fill a card here. To let it, allow andvari on all sites in the extension's site access."
+    },
+    "CARD_PROVIDER_NOT_ALLOWED_ANY_SAFARI": {
+      "file": "errors.ts",
+      "text": "andvari isn't running on this page, so it can't fill a card here. To let it, allow andvari on Every Website in Safari's extension settings."
+    },
+    "CARD_PROVIDER_NOT_ALLOWED_SAFARI": {
+      "file": "errors.ts",
+      "text": "The card form comes from {0}, where Safari doesn't let andvari run yet. To fill it, allow andvari on {0} or on Every Website in Safari's extension settings."
+    },
+    "CARD_SAVED": {
+      "file": "copy.ts",
+      "text": "Card saved to the hoard."
+    },
+    "CARD_SUBTITLE_NO_NUMBER": {
+      "file": "copy.ts",
+      "text": "card"
+    },
+    "CARD_USE_COPY_BUTTONS": {
+      "file": "copy.ts",
+      "text": "Use the copy buttons instead."
+    },
+    "CLIPBOARD_FAILED": {
+      "file": "errors.ts",
+      "text": "Couldn't copy to the clipboard — try again."
+    },
+    "CONNECTED_SERVER": {
+      "file": "copy.ts",
+      "text": "Connected server: {0}"
+    },
+    "CONNECTED_TO": {
+      "file": "copy.ts",
+      "text": "Connected to {0}. Sign in from the toolbar popup."
+    },
+    "CONNECTOR_CANCELLED": {
+      "file": "copy.ts",
+      "text": "Cancelled — you can close this window and try again."
+    },
+    "CONNECTOR_DONE": {
+      "file": "copy.ts",
+      "text": "Done — you can close this window and reopen andvari."
+    },
+    "CONNECTOR_FINISHING": {
+      "file": "copy.ts",
+      "text": "Finishing setup…"
+    },
+    "CONNECTOR_FOLLOW_PROMPT": {
+      "file": "copy.ts",
+      "text": "Follow your device’s prompt…"
+    },
+    "CONNECTOR_NOTHING_TO_DO": {
+      "file": "copy.ts",
+      "text": "Nothing to do here — you can close this window."
+    },
+    "CONNECTOR_NO_BIO": {
+      "file": "copy.ts",
+      "text": "This device can’t do biometric quick unlock. Use a PIN instead."
+    },
+    "CONNECTOR_SET_UP": {
+      "file": "copy.ts",
+      "text": "Set up unlocking with your device’s biometrics or PIN."
+    },
+    "CONNECTOR_SET_UP_DONE": {
+      "file": "copy.ts",
+      "text": "Quick unlock is on ✓"
+    },
+    "CONNECTOR_SET_UP_TITLE": {
+      "file": "copy.ts",
+      "text": "Set up quick unlock"
+    },
+    "CONNECTOR_UNLOCK": {
+      "file": "copy.ts",
+      "text": "Confirm it’s you to unlock andvari."
+    },
+    "CONNECTOR_UNLOCKING": {
+      "file": "copy.ts",
+      "text": "Unlocking…"
+    },
+    "CONNECTOR_UNLOCK_DONE": {
+      "file": "copy.ts",
+      "text": "Unlocked ✓ — reopen andvari."
+    },
+    "CONNECTOR_UNLOCK_TITLE": {
+      "file": "copy.ts",
+      "text": "Unlock andvari"
+    },
+    "CONTINUE": {
+      "file": "copy.ts",
+      "text": "Continue"
+    },
+    "COPIED_CLEARS_SOON": {
+      "file": "copy.ts",
+      "text": "Copied — it clears from your clipboard soon"
+    },
+    "COPIED_FLASH": {
+      "file": "copy.ts",
+      "text": "copied"
+    },
+    "COPY_CARD_CVV": {
+      "file": "copy.ts",
+      "text": "Copy security code"
+    },
+    "COPY_CARD_DETAILS": {
+      "file": "copy.ts",
+      "text": "Copy card details"
+    },
+    "COPY_CARD_EXPIRY": {
+      "file": "copy.ts",
+      "text": "Copy expiry (MM/YY)"
+    },
+    "COPY_CARD_NAME": {
+      "file": "copy.ts",
+      "text": "Copy name on card"
+    },
+    "COPY_CARD_NUMBER": {
+      "file": "copy.ts",
+      "text": "Copy card number"
+    },
+    "COPY_CODE_CHIP": {
+      "file": "copy.ts",
+      "text": "copy code"
+    },
+    "COPY_PASSWORD": {
+      "file": "copy.ts",
+      "text": "Copy password"
+    },
+    "COPY_TOTP": {
+      "file": "copy.ts",
+      "text": "Copy one-time code"
+    },
+    "COPY_USERNAME": {
+      "file": "copy.ts",
+      "text": "Copy username"
+    },
+    "DETAILS": {
+      "file": "copy.ts",
+      "text": "Details"
+    },
+    "DEVICE_QUICK_UNLOCK_ON": {
+      "file": "copy.ts",
+      "text": "Device quick unlock is on for this browser."
+    },
+    "ENROLL_BIO_FAILED": {
+      "file": "errors.ts",
+      "text": "Couldn't turn on device quick unlock — try again."
+    },
+    "ENROLL_FAILED": {
+      "file": "errors.ts",
+      "text": "Couldn't turn on quick unlock — try again."
+    },
+    "ENROLL_LOCKED": {
+      "file": "errors.ts",
+      "text": "Unlock andvari first to set up quick unlock."
+    },
+    "ENROLL_MUST_CHANGE_PASSWORD": {
+      "file": "errors.ts",
+      "text": "Set a new master password in the web vault before turning on quick unlock."
+    },
+    "ENROLL_NEED_FULL_UNLOCK": {
+      "file": "errors.ts",
+      "text": "Enter your master password once more to set up quick unlock."
+    },
+    "ENTER_ALL_DIGITS": {
+      "file": "copy.ts",
+      "text": "Enter all 6 digits of the code."
+    },
+    "FILL_CARD_DETAILS_INTO": {
+      "file": "copy.ts",
+      "text": "Fill this card's {0} into {1}"
+    },
+    "FILL_CARD_INTO": {
+      "file": "copy.ts",
+      "text": "Fill this card into {0}"
+    },
+    "FILL_DESTINATION": {
+      "file": "copy.ts",
+      "text": "Fill → {0}"
+    },
+    "FILL_DESTINATION_DETAILS": {
+      "file": "copy.ts",
+      "text": "Fill → {0}: {1}"
+    },
+    "FILL_LOCKED": {
+      "file": "errors.ts",
+      "text": "andvari locked before it could fill — unlock and try again."
+    },
+    "FILL_NOT_ALLOWED": {
+      "file": "errors.ts",
+      "text": "andvari wouldn't release this login for this page — try again from the popup."
+    },
+    "FILL_NO_FIELDS": {
+      "file": "errors.ts",
+      "text": "Couldn't fill the fields on this page — copy the username and password instead."
+    },
+    "FILL_NO_FORM": {
+      "file": "errors.ts",
+      "text": "No login fields found on this page — copy the username and password instead."
+    },
+    "FILL_NO_SECRET": {
+      "file": "errors.ts",
+      "text": "Nothing to fill — this login has no username or password saved."
+    },
+    "FILL_ON": {
+      "file": "copy.ts",
+      "text": "Fill on {0}"
+    },
+    "FILL_OTHER_SITE": {
+      "file": "copy.ts",
+      "text": "This login is saved for {0}. You are on {1}. Fill it here only if you trust this page."
+    },
+    "FILL_THIS_PAGE": {
+      "file": "copy.ts",
+      "text": "Fill this page"
+    },
+    "FILL_THIS_PAGE_TITLE": {
+      "file": "copy.ts",
+      "text": "Type this login into the current tab"
+    },
+    "FILL_UNREACHABLE": {
+      "file": "errors.ts",
+      "text": "Couldn't reach the page — reload the tab and retry."
+    },
+    "GENERATED_PASSWORD": {
+      "file": "copy.ts",
+      "text": "Generated password: "
+    },
+    "HOARD_EMPTY": {
+      "file": "copy.ts",
+      "text": "The hoard is empty."
+    },
+    "IDENTITY_MISMATCH": {
+      "file": "errors.ts",
+      "text": "Server identity key mismatch — possible tampering. Do not proceed; contact your admin."
+    },
+    "KDF_POLICY_BLOCKED": {
+      "file": "errors.ts",
+      "text": "This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your admin."
+    },
+    "LOCK": {
+      "file": "copy.ts",
+      "text": "Lock"
+    },
+    "LOGIN_FILLED": {
+      "file": "copy.ts",
+      "text": "Login filled"
+    },
+    "LOGIN_UNNAMED": {
+      "file": "copy.ts",
+      "text": "Login"
+    },
+    "MASTER_PASSWORD_LABEL": {
+      "file": "copy.ts",
+      "text": "Master password"
+    },
+    "MENU_COVERED": {
+      "file": "copy.ts",
+      "text": "Something on this page is covering andvari — use the andvari toolbar icon instead"
+    },
+    "MENU_LABEL": {
+      "file": "copy.ts",
+      "text": "andvari — saved logins for {0}"
+    },
+    "MENU_LOCKED": {
+      "file": "copy.ts",
+      "text": "Locked — click the andvari toolbar icon to unlock"
+    },
+    "MENU_LOCKED_ANNOUNCE": {
+      "file": "copy.ts",
+      "text": "andvari is locked — click the andvari toolbar icon to unlock"
+    },
+    "MENU_NO_LOGIN": {
+      "file": "copy.ts",
+      "text": "No saved login for {0}"
+    },
+    "MENU_NO_LOGIN_ANNOUNCE": {
+      "file": "copy.ts",
+      "text": "No saved login for {0}, arrows to browse"
+    },
+    "MENU_SEARCH_ALL": {
+      "file": "copy.ts",
+      "text": "Search all logins…"
+    },
+    "MENU_STRONG_PASSWORD": {
+      "file": "copy.ts",
+      "text": "Use a strong password"
+    },
+    "MENU_UNCONFIRMED": {
+      "file": "copy.ts",
+      "text": "This browser can't confirm andvari's menu is unobstructed — use the andvari toolbar icon instead"
+    },
+    "NEW_PASSWORD_GENERATED": {
+      "file": "copy.ts",
+      "text": "New password generated"
+    },
+    "NOTHING_MATCHES": {
+      "file": "copy.ts",
+      "text": "Nothing in the hoard matches “{0}”."
+    },
+    "NOT_NOW": {
+      "file": "copy.ts",
+      "text": "Not now"
+    },
+    "NO_LOGIN_FOR": {
+      "file": "copy.ts",
+      "text": "No login saved for {0}."
+    },
+    "NO_PASSWORD_ON_ITEM": {
+      "file": "copy.ts",
+      "text": "No password on this item."
+    },
+    "NO_PERSONAL_VAULT_CONFIRM": {
+      "file": "errors.ts",
+      "text": "Open andvari to confirm your personal vault."
+    },
+    "NO_SERVER_YET": {
+      "file": "copy.ts",
+      "text": "No server yet"
+    },
+    "NO_SITE_SAVED": {
+      "file": "copy.ts",
+      "text": "no site saved"
+    },
+    "NO_USERNAME": {
+      "file": "copy.ts",
+      "text": "no username"
+    },
+    "ONE_TIME_CODE_LABEL": {
+      "file": "copy.ts",
+      "text": "One-time code"
+    },
+    "OPENING_SETUP_PROMPT": {
+      "file": "copy.ts",
+      "text": "Opening your device’s setup prompt…"
+    },
+    "OPENING_UNLOCK_PROMPT": {
+      "file": "copy.ts",
+      "text": "Opening your device’s unlock prompt…"
+    },
+    "OPEN_APP_AND_UNLOCK": {
+      "file": "copy.ts",
+      "text": "Open andvari and unlock it, then try again."
+    },
+    "OPEN_FROM_TOOLBAR_TO_FILL_CARD": {
+      "file": "copy.ts",
+      "text": "Open andvari from the toolbar to fill this card"
+    },
+    "OPTIONS_SERVER_NOT_ANSWERING": {
+      "file": "copy.ts",
+      "text": "unknown — andvari isn't answering. Close this page and open it again."
+    },
+    "OPTIONS_SERVER_UNSETTLED": {
+      "file": "copy.ts",
+      "text": "unknown — andvari couldn't load its settings, so it signs in nowhere. Close this page and open it again in a minute."
+    },
+    "PASSWORD_COPIED": {
+      "file": "copy.ts",
+      "text": "Password copied"
+    },
+    "PASSWORD_FILLED": {
+      "file": "copy.ts",
+      "text": "Password filled"
+    },
+    "PASSWORD_LABEL": {
+      "file": "copy.ts",
+      "text": "Password"
+    },
+    "PIN_DIGITS_NEED_LENGTH": {
+      "file": "errors.ts",
+      "text": "An all-number PIN needs at least 10 digits — or add a letter to a shorter one."
+    },
+    "PIN_EXHAUSTED": {
+      "file": "errors.ts",
+      "text": "Too many wrong PINs — quick unlock is off. Unlock with your master password."
+    },
+    "PIN_TOO_SHORT": {
+      "file": "errors.ts",
+      "text": "Use at least 6 characters for your PIN."
+    },
+    "PIN_TRIVIAL": {
+      "file": "errors.ts",
+      "text": "That PIN is too easy to guess — avoid sequences and repeats."
+    },
+    "PIN_UNLOCK_FAILED": {
+      "file": "errors.ts",
+      "text": "Couldn't quick-unlock — unlock with your master password."
+    },
+    "PURGE_BUTTON": {
+      "file": "copy.ts",
+      "text": "Remove data for this server…"
+    },
+    "PURGE_DONE": {
+      "file": "copy.ts",
+      "text": "Removed this browser's stored data for {0}."
+    },
+    "PURGE_FAILED": {
+      "file": "copy.ts",
+      "text": "Couldn't remove the stored data."
+    },
+    "PURGE_NOT_ANSWERING": {
+      "file": "copy.ts",
+      "text": "andvari isn't answering, so nothing was removed. Close this page and open it again."
+    },
+    "QUICK_UNLOCK_EXPIRED": {
+      "file": "errors.ts",
+      "text": "It's been a while since you signed in — enter your master password to continue."
+    },
+    "QUICK_UNLOCK_IS_OFF": {
+      "file": "copy.ts",
+      "text": "Quick unlock is off"
+    },
+    "QUICK_UNLOCK_IS_ON": {
+      "file": "copy.ts",
+      "text": "Quick unlock is on"
+    },
+    "QUICK_UNLOCK_ON_HERE": {
+      "file": "copy.ts",
+      "text": "Quick unlock is on for this browser."
+    },
+    "QUICK_UNLOCK_SERVER_ERROR": {
+      "file": "errors.ts",
+      "text": "The server had a problem answering — try again in a moment."
+    },
+    "QUICK_UNLOCK_SESSION_ENDED": {
+      "file": "errors.ts",
+      "text": "Your session ended — sign in again with your master password."
+    },
+    "QUICK_UNLOCK_SET_UP_AGAIN": {
+      "file": "errors.ts",
+      "text": "Quick unlock needs to be set up again — unlock with your master password."
+    },
+    "QUICK_UNLOCK_TURNED_OFF": {
+      "file": "copy.ts",
+      "text": "Quick unlock turned off."
+    },
+    "QUICK_UNLOCK_UNAVAILABLE": {
+      "file": "errors.ts",
+      "text": "Quick unlock isn't available in this browser mode — andvari has no private storage here to keep it in (Firefox does this when it never remembers history)."
+    },
+    "REUSED_MANY": {
+      "file": "copy.ts",
+      "text": "The password you just typed on this page is already used for {0} other logins — a unique one is safer."
+    },
+    "REUSED_ONE": {
+      "file": "copy.ts",
+      "text": "The password you just typed on this page is already used for another login — a unique one is safer."
+    },
+    "REVEAL_FAILED": {
+      "file": "errors.ts",
+      "text": "Could not release that login — try again."
+    },
+    "REVEAL_LOCKED": {
+      "file": "errors.ts",
+      "text": "andvari locked before it could release that login — unlock and try again."
+    },
+    "REVEAL_NOT_ALLOWED": {
+      "file": "errors.ts",
+      "text": "andvari wouldn't release that login — reopen the popup and try again."
+    },
+    "REVEAL_PASSWORD": {
+      "file": "copy.ts",
+      "text": "Reveal password"
+    },
+    "SAVE": {
+      "file": "copy.ts",
+      "text": "Save"
+    },
+    "SAVED_TO_HOARD": {
+      "file": "copy.ts",
+      "text": "Saved to the hoard."
+    },
+    "SAVE_APP_NO_ACCOUNT": {
+      "file": "errors.ts",
+      "text": "Could not save — open the andvari app and sign in first."
+    },
+    "SAVE_APP_UNAVAILABLE": {
+      "file": "errors.ts",
+      "text": "Could not save — open the andvari app, then try again."
+    },
+    "SAVE_CONFLICT_KEPT_BOTH": {
+      "file": "errors.ts",
+      "text": "Saved — this login also changed elsewhere; both versions are in your vault."
+    },
+    "SAVE_FAILED": {
+      "file": "errors.ts",
+      "text": "Could not save — try again."
+    },
+    "SAVE_LOCKED": {
+      "file": "errors.ts",
+      "text": "Could not save — unlock andvari and try again."
+    },
+    "SAVE_REJECTED_ATTACHMENT": {
+      "file": "errors.ts",
+      "text": "The server refused this save — an attachment it references is no longer there. Remove that attachment, then save again."
+    },
+    "SAVE_SENT_TO_APP": {
+      "file": "errors.ts",
+      "text": "Sent to andvari. Open the app to finish saving."
+    },
+    "SAVE_UNLOCK_PROMPTED": {
+      "file": "errors.ts",
+      "text": "Unlock andvari to finish saving."
+    },
+    "SAVE_UNLOCK_TOOLBAR": {
+      "file": "errors.ts",
+      "text": "Open andvari from the toolbar and unlock to finish saving."
+    },
+    "SEARCH_FROM_TOOLBAR": {
+      "file": "copy.ts",
+      "text": "Click the andvari toolbar icon to search all your logins"
+    },
+    "SECONDS_LEFT": {
+      "file": "copy.ts",
+      "text": "{0} seconds left"
+    },
+    "SERVER_DOT_NONE": {
+      "file": "copy.ts",
+      "text": "no server confirmed"
+    },
+    "SERVER_DOT_REACHABLE": {
+      "file": "copy.ts",
+      "text": "server reachable"
+    },
+    "SERVER_DOT_UNREACHABLE": {
+      "file": "copy.ts",
+      "text": "server unreachable"
+    },
+    "SERVER_NONE_CONFIRMED": {
+      "file": "copy.ts",
+      "text": "No server confirmed"
+    },
+    "SERVER_REACHABLE": {
+      "file": "copy.ts",
+      "text": "Server reachable"
+    },
+    "SERVER_REACHABLE_DONE": {
+      "file": "copy.ts",
+      "text": "Server reachable."
+    },
+    "SERVER_UNKNOWN": {
+      "file": "copy.ts",
+      "text": "Server unknown"
+    },
+    "SERVER_UNREACHABLE": {
+      "file": "copy.ts",
+      "text": "Server unreachable"
+    },
+    "SESSION_LOCKED": {
+      "file": "copy.ts",
+      "text": "Session locked — unlock to continue."
+    },
+    "SETTINGS_NOT_LOADED": {
+      "file": "copy.ts",
+      "text": "It can’t tell which server you use right now, so it won’t sign in anywhere. Close this window and open it again in a minute."
+    },
+    "SETTINGS_NOT_LOADED_TITLE": {
+      "file": "copy.ts",
+      "text": "andvari couldn’t load its settings"
+    },
+    "SET_UP": {
+      "file": "copy.ts",
+      "text": "Set up"
+    },
+    "SIGN_IN_FAILED": {
+      "file": "errors.ts",
+      "text": "Sign-in failed. Please try again."
+    },
+    "SIGN_IN_INTERRUPTED": {
+      "file": "errors.ts",
+      "text": "Sign-in was interrupted — try again."
+    },
+    "SIGN_IN_SERVER_ERROR": {
+      "file": "errors.ts",
+      "text": "The server had a problem answering — your details may be fine. Try again in a moment."
+    },
+    "SIGN_OUT": {
+      "file": "copy.ts",
+      "text": "Sign out"
+    },
+    "SIGN_OUT_CONFIRM": {
+      "file": "copy.ts",
+      "text": "Sign out? Click again to confirm"
+    },
+    "SIGN_OUT_EXPLAINED": {
+      "file": "copy.ts",
+      "text": "Signing out removes this browser's quick unlock (PIN or biometric) and its saved session. Your vault on the server is untouched."
+    },
+    "SITES_LABEL": {
+      "file": "copy.ts",
+      "text": "Sites"
+    },
+    "SITE_LABEL": {
+      "file": "copy.ts",
+      "text": "Site"
+    },
+    "START_OVER": {
+      "file": "copy.ts",
+      "text": "Start over"
+    },
+    "STRONG_PASSWORD_FILLED": {
+      "file": "copy.ts",
+      "text": "Strong password filled"
+    },
+    "THE_PAGE": {
+      "file": "copy.ts",
+      "text": "the page"
+    },
+    "THIS_LOGIN": {
+      "file": "copy.ts",
+      "text": "this login"
+    },
+    "THIS_SITE_FOR": {
+      "file": "copy.ts",
+      "text": "This site — {0}"
+    },
+    "TOO_MANY_WRONG_CODES": {
+      "file": "copy.ts",
+      "text": "Too many wrong codes — sign in again."
+    },
+    "TOTP_ADDED": {
+      "file": "errors.ts",
+      "text": "One-time code added."
+    },
+    "TOTP_ADD_CONFLICT": {
+      "file": "errors.ts",
+      "text": "One-time code added — this login also changed elsewhere; both versions are in your vault."
+    },
+    "TOTP_ADD_EXISTS": {
+      "file": "errors.ts",
+      "text": "This login already has a one-time code — manage it in the web vault."
+    },
+    "TOTP_ADD_FAILED": {
+      "file": "errors.ts",
+      "text": "Could not add the code — try again."
+    },
+    "TOTP_ADD_INVALID": {
+      "file": "errors.ts",
+      "text": "That doesn't look like a one-time-code secret — paste the otpauth:// link or the setup key."
+    },
+    "TOTP_ADD_LOCKED": {
+      "file": "errors.ts",
+      "text": "andvari locked before it could add the code — unlock and try again."
+    },
+    "TOTP_ADD_NOT_ALLOWED": {
+      "file": "errors.ts",
+      "text": "andvari couldn't tell which login this code belongs to — add it from the popup instead."
+    },
+    "TOTP_ADD_READ_ONLY": {
+      "file": "errors.ts",
+      "text": "This login is in a shared vault you can only view — ask its owner to add a one-time code."
+    },
+    "TOTP_ADD_TITLE": {
+      "file": "copy.ts",
+      "text": "Add this one-time code"
+    },
+    "TOTP_BAD_CODE": {
+      "file": "errors.ts",
+      "text": "That code didn’t work — codes change every 30 seconds, so try the current one."
+    },
+    "TOTP_COPIED": {
+      "file": "copy.ts",
+      "text": "One-time code copied"
+    },
+    "TOTP_ENTER_CODE": {
+      "file": "errors.ts",
+      "text": "Enter the 6-digit code from your authenticator app."
+    },
+    "TOTP_EXPIRED": {
+      "file": "errors.ts",
+      "text": "That took too long — sign in again."
+    },
+    "TOTP_NONE": {
+      "file": "copy.ts",
+      "text": "none"
+    },
+    "TOTP_SAVE_BUTTON": {
+      "file": "copy.ts",
+      "text": "save"
+    },
+    "TOTP_SECRET_HINT": {
+      "file": "copy.ts",
+      "text": "otpauth:// link or setup key"
+    },
+    "TOTP_SECRET_LABEL": {
+      "file": "copy.ts",
+      "text": "One-time code secret — paste the otpauth:// link or the setup key"
+    },
+    "TRUST_GATE_HTTP_CAUTION": {
+      "file": "trustgate.ts",
+      "text": "This is a plain http:// address — traffic to it is not encrypted in transit."
+    },
+    "TRUST_GATE_PUNYCODE_CAUTION": {
+      "file": "trustgate.ts",
+      "text": "This address uses international characters, shown here in their punycode (xn--) form. Make sure it is exactly the server you intend."
+    },
+    "TURN_OFF": {
+      "file": "copy.ts",
+      "text": "Turn off"
+    },
+    "UNEXPECTED_PROBLEM": {
+      "file": "copy.ts",
+      "text": "andvari hit a problem: {0}"
+    },
+    "UNLOCK": {
+      "file": "copy.ts",
+      "text": "Unlock"
+    },
+    "UNLOCK_WITH": {
+      "file": "copy.ts",
+      "text": "Unlock with {0}"
+    },
+    "UNLOCK_WITH_FACE_ID": {
+      "file": "copy.ts",
+      "text": "Unlock with Face ID"
+    },
+    "UNLOCK_WITH_YOUR_DEVICE": {
+      "file": "copy.ts",
+      "text": "Unlock with your device"
+    },
+    "UNREACHABLE": {
+      "file": "errors.ts",
+      "text": "Can't reach the andvari server — check your connection (and your VPN, if your server is private), then try again."
+    },
+    "UNSEALING": {
+      "file": "copy.ts",
+      "text": "Unsealing…"
+    },
+    "UPDATE": {
+      "file": "copy.ts",
+      "text": "Update"
+    },
+    "UPDATE_AVAILABLE": {
+      "file": "copy.ts",
+      "text": "Update available — andvari {0}. "
+    },
+    "UPDATE_DOWNLOAD_RELOAD": {
+      "file": "copy.ts",
+      "text": "Download & reload"
+    },
+    "UPDATE_LISTING_STALE": {
+      "file": "copy.ts",
+      "text": "Updates: the server’s update listing hasn’t been re-signed in a while — if you’re expecting an update, mention it to your admin."
+    },
+    "UPDATE_LISTING_UNVERIFIED": {
+      "file": "copy.ts",
+      "text": "Updates: the server’s update listing couldn’t be verified, so no update will be offered from it. Your vault and sync are unaffected."
+    },
+    "UPGRADE_REQUIRED": {
+      "file": "errors.ts",
+      "text": "Your server requires a newer extension — get the update from the web vault or the link above."
+    },
+    "USERNAME_FILLED": {
+      "file": "copy.ts",
+      "text": "Username filled"
+    },
+    "USERNAME_LABEL": {
+      "file": "copy.ts",
+      "text": "Username"
+    },
+    "VERIFY": {
+      "file": "copy.ts",
+      "text": "Verify"
+    },
+    "VERIFYING": {
+      "file": "copy.ts",
+      "text": "Verifying…"
+    },
+    "VIEW_DETAILS": {
+      "file": "copy.ts",
+      "text": "View details"
+    },
+    "WAITING_FOR_FACE_ID": {
+      "file": "copy.ts",
+      "text": "Waiting for Face ID…"
+    },
+    "WRONG_CREDENTIALS": {
+      "file": "errors.ts",
+      "text": "Wrong email or master password."
+    },
+    "WRONG_VAULT_LINE": {
+      "file": "itemhome.ts",
+      "text": "The server sent an item under the wrong vault. andvari kept the item where it was and ignored the other copy. Tell your admin — the server may be misbehaving."
+    },
+    "YOUR_DEVICE": {
+      "file": "copy.ts",
+      "text": "your device"
+    }
+  }
+}

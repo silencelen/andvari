@@ -566,7 +566,8 @@ internal class SaveImporter(
         for (entry in stored.records.take(MAX_LISTED)) {
             // A record that is not this account's own (its MAC does not hold, round-9 review 2) is never read: one an
             // earlier version wrote among them. It is removed below, and counted (round-10 review 3).
-            val plain = runCatching { live.account.openLocalRecord(APPLIED_RECORD, Bytes.fromB64(entry)) }.getOrNull()
+            // A lock passes through: nothing is counted unreadable or rewritten because of it.
+            val plain = io.silencelen.andvari.core.crypto.orNullUnlessLocked { live.account.openLocalRecord(APPLIED_RECORD, Bytes.fromB64(entry)) }
             val record = plain?.let { p ->
                 try {
                     runCatching { json.decodeFromString(AppliedRecord.serializer(), p.decodeToString()) }.getOrNull()

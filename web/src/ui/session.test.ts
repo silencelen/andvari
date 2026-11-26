@@ -1,6 +1,7 @@
 import { IDBFactory as FakeIDBFactory } from "fake-indexeddb";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { LOGOUT_TIMEOUT_MS, type Tokens } from "../api/client";
+import { type ApiClient, LOGOUT_TIMEOUT_MS, type Tokens } from "../api/client";
+import { WireApi } from "../api/wireclient";
 import { loadSession, makeClient, revokeSessionBestEffort, saveSession, type Session } from "./session";
 
 /**
@@ -31,11 +32,12 @@ const sess = (userId: string, tokens: Tokens): Session => ({
   userId,
   personalVaultId: "pv",
   email: `${userId}@example.com`,
-  isAdmin: false,
   tokens,
 });
 
 const SYNC_BODY = { rev: 1, full: true, vaults: [], grants: [], items: [], removedGrants: [] };
+/** An authenticated pull over [client]: the item layer's wire client rides the transport's refresh and 401 retry. */
+const syncOver = (client: ApiClient) => new WireApi(client).sync(0);
 
 const jsonResp = (status: number, body: unknown): Response =>
   ({
@@ -61,7 +63,7 @@ describe("makeClient same-user token guards", () => {
     vi.restoreAllMocks();
   });
 
-  it("does NOT adopt a different user's persisted pair — rotates its own token instead", async () => {
+  it("does NOT adopt a different user's persisted pair, and sends nothing of its own: the shared record no longer holds it", async () => {
     // X's tab: client created while X's session was the persisted one.
     const xTokens: Tokens = { accessToken: "xa0", refreshToken: "xr0" };
     saveSession(sess("user-x", xTokens));
@@ -83,11 +85,15 @@ describe("makeClient same-user token guards", () => {
       }),
     );
 
-    // X's access token expires → refresh. It must fall through to a REAL rotation
-    // with X's own refresh token, not graft Y's pair into X's live client.
-    await client.sync(0);
-    expect(refreshedWith).toBe("xr0");
-    expect(client.getTokens()).toEqual({ accessToken: "xa1", refreshToken: "xr1" });
+    // X's access token expires → refresh. Y's pair is never grafted into X's live client; and with the offline copy on,
+    // X's own token leaves only while the shared record holds it, which it no longer does (another tab may have spent
+    // it before Y signed in): nothing is sent, and X's tab ends as signed out elsewhere.
+    let elsewhere = 0;
+    client.onEndedElsewhere = () => elsewhere++;
+    await expect(syncOver(client)).rejects.toThrow();
+    expect(refreshedWith).toBeNull();
+    expect(client.getTokens()).toBeNull();
+    expect(elsewhere).toBe(1);
 
     // …and X's rotation was NOT written over Y's persisted session either.
     expect(loadSession()?.userId).toBe("user-y");
@@ -114,7 +120,7 @@ describe("makeClient same-user token guards", () => {
       }),
     );
 
-    await client.sync(0);
+    await syncOver(client);
     expect(refreshPosts).toBe(0); // adopted instead of spending the consumed xr0
     expect(client.getTokens()).toEqual({ accessToken: "xa5", refreshToken: "xr5" });
   });
@@ -139,7 +145,7 @@ describe("makeClient same-user token guards", () => {
       }),
     );
 
-    await client.sync(0);
+    await syncOver(client);
     expect(refreshedWith).toBe("fr0");
   });
 });

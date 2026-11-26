@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -5,13 +6,7 @@ import { adIdkey, adItem, adUvk, adVaultMeta, adVk } from "./ad";
 import { fromB64, fromUtf8, toB64, utf8 } from "./bytes";
 import { open, sealWithNonce } from "./envelope";
 import { CANARY_KEY, CANARY_USER_ID, KEY_TYPE_UVK, fingerprint, openCanary, shortFingerprint } from "./escrow";
-import {
-  canonicalGrantPayload,
-  identityFingerprint,
-  openSharedGrant,
-  sealSharedGrant,
-  shortIdentityFingerprint,
-} from "./sharedgrant";
+import { identityFingerprint, shortIdentityFingerprint } from "./fingerprint";
 import { generatePassword } from "./generator";
 import { hibpCountInRange, hibpPrefix, hibpSha1UpperHex, hibpSuffix } from "./hibp";
 import { hkdfSha256 } from "./hkdf";
@@ -139,36 +134,14 @@ describe("seal.json", () => {
   });
 });
 
-describe("sharedgrant.json", () => {
-  const v = load("sharedgrant.json");
-  it("seal-grant open + canonical payload + vaultId-mismatch reject + fingerprint", async () => {
-    const kp = boxKeypairFromSeed(fromB64(v.memberSeedB64));
-    expect(toB64(kp.publicKey)).toBe(v.memberIdentityPubB64);
-    // Canonical payload bytes must match the Kotlin reference byte-for-byte.
-    expect(toB64(canonicalGrantPayload(v.vaultId, fromB64(v.vkB64)))).toBe(toB64(utf8(v.payloadUtf8)));
-    // Open pins the VK.
-    expect(toB64(openSharedGrant(kp.publicKey, kp.privateKey, v.vaultId, fromB64(v.sealedB64)))).toBe(v.vkB64);
-    // A seal naming a different vaultId must be rejected under the real vaultId.
-    expect(() =>
-      openSharedGrant(kp.publicKey, kp.privateKey, v.rejectVaultMismatch.expectedVaultId, fromB64(v.rejectVaultMismatch.sealedB64)),
-    ).toThrow();
-    // A seal whose payload carries a non-32-byte "vk" under the RIGHT vaultId must be refused
-    // (H93 — the guard all three twins now share; the extension had shipped without it).
-    expect(v.rejectVkLength.vkLen).not.toBe(32);
-    expect(() =>
-      openSharedGrant(kp.publicKey, kp.privateKey, v.rejectVkLength.expectedVaultId, fromB64(v.rejectVkLength.sealedB64)),
-    ).toThrow(/32 bytes/);
-    // R48: the third recipient check — a payload whose `v` is not 1 is refused on the version.
-    expect(v.rejectVersion.v).not.toBe(1);
-    expect(() =>
-      openSharedGrant(kp.publicKey, kp.privateKey, v.rejectVersion.expectedVaultId, fromB64(v.rejectVersion.sealedB64)),
-    ).toThrow(/version/);
-    // Round-trip this impl's own (nondeterministic) seal.
-    const own = sealSharedGrant(kp.publicKey, v.vaultId, fromB64(v.vkB64));
-    expect(toB64(openSharedGrant(kp.publicKey, kp.privateKey, v.vaultId, own))).toBe(v.vkB64);
-    // Seed-derived fingerprint matches the reference.
-    expect(await identityFingerprint(kp.publicKey)).toBe(v.fingerprint);
-    expect(await shortIdentityFingerprint(kp.publicKey)).toBe(v.shortFingerprint);
+// sharedgrant.json (the v1 seal) is deleted by design 2026-11-15 §15 and no longer graded here. The identity
+// fingerprint it also carried (spec 01 §5) is checked against Node's own SHA-256, an oracle outside andvari's code.
+describe("identity fingerprint (spec 01 §5)", () => {
+  it("is the lowercase hex SHA-256 of the seed-derived identity key, and its short form the first 32 hex", async () => {
+    const kp = boxKeypairFromSeed(new Uint8Array(32).fill(0x5a));
+    const oracle = createHash("sha256").update(kp.publicKey).digest("hex");
+    expect(await identityFingerprint(kp.publicKey)).toBe(oracle);
+    expect(await shortIdentityFingerprint(kp.publicKey)).toBe(oracle.slice(0, 32));
   });
 });
 

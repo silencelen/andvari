@@ -128,8 +128,8 @@ test("the parser reads whole unions, past trailing comments and line breaks", ()
   // FillFailCode is the trap case: every member in messages.ts carries a `// …` gloss, and the
   // union spans six lines. A truncating parser reports 1 member here and then "passes" forever.
   assert.deepEqual(seam.get("FillFailCode"), ["locked", "not_allowed", "no_form", "no_fields", "no_secret", "unreachable"]);
-  assert.equal(seam.get("UnlockCode")?.length, 16); // multi-line + commented (H67 added `keys_damaged`; A11 `bad_wire_id`; A15 review `confirm_server`)
-  assert.deepEqual(seam.get("SaveErrorCode"), ["locked", "no_personal_vault", "conflict", "rejected", "failed", "app_no_account", "app_unavailable"]); // single-line (H03/R37 added `rejected`; A9 `no_personal_vault`; the Safari app-save pair)
+  assert.equal(seam.get("UnlockCode")?.length, 23); // multi-line + commented (H67 added `keys_damaged`; A11 `bad_wire_id`; A15 review `confirm_server`; design 2026-11-15 `link_required`, `server_fork`, `card_invalid`, `operator_account`; the sign-in's own back-off `rate_limited`; decided 2026-11-17 `remade_account`; an unreadable record `memory_unreadable`)
+  assert.deepEqual(seam.get("SaveErrorCode"), ["locked", "no_personal_vault", "conflict", "rejected", "failed", "app_no_account", "app_unavailable", "shared_vault", "server_fork", "server_ended", "cannot_tell", "app_refused"]); // single-line (H03/R37 added `rejected`; A9 `no_personal_vault`; the Safari app-save pair; §12.2 rule 4 `shared_vault`; §4.4 `server_fork`, `server_ended`; a lost answer `cannot_tell`; the Safari app's own refusal `app_refused`)
   // Object-shaped unions (Req/TabMsg) and generic conditionals (Res) are not string unions and
   // must not leak into the comparison set as truncated garbage.
   assert.equal(seam.has("Req"), false);

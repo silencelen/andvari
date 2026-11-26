@@ -9,7 +9,7 @@ release**: no roadmap items, no new capability — fix, unify, and clean up what
 - **Gate baseline:** `scripts/verify.sh` EXIT=0 at HEAD (Kotlin + TypeScript green off the shared
   spec/test-vectors; extension suite 247 tests). Every finding below is *on top of* a green gate —
   which is itself one of the findings.
-- **Method:** 9 module mappers → 16 review lanes (152 raw findings) → adversarial refute pass
+- **Method:** 9 module mappers → 16 review areas (152 raw findings) → adversarial refute pass
   (46 two-lens refuters on every high finding + 12 batched skeptics on the mediums), then inline
   verification of the batches that died. See §8.
 - **Outcome:** 16 high · 64 medium · 72 low. Two findings were killed by the refuters and are
@@ -28,7 +28,7 @@ backlog.
 |---|---|
 | Shipped in a build wave | 127 |
 | Shipped in the closeout pass (`1b12380`) | 6 |
-| Shipped as a side effect of an adjacent lane | 6 |
+| Shipped as a side effect of adjacent work | 6 |
 | Refuted / not defects | 6 |
 | Severity reviewed down, left out of scope | 2 |
 | Deliberately deferred | 5 |
@@ -51,7 +51,7 @@ an inverted trust model and a ceremony that signed an unverified base before eit
   <br><sub>Originally: Extension 0.19.0 (in-page card chip) is staged and partially shipped — signed xpi built, firefox-updates.json advertising it — with ZERO automated coverage of any chip code</sub>
 - **`ux-copy--12`** — Verified **largely deliberate and documented** at `HouseholdCopy.kt:56,108` — the extension popup's shorter "contact your admin" is intentional brevity. A blunt unification would overwrite a recorded decision. The residual is a minor inconsistency inside the canon itself; not worth forking a pinned twin over.
   <br><sub>Originally: 'contact your admin' vs 'contact your administrator' split inside the core canon itself</sub>
-- **`ux-parity--8`** — It IS the refuted-leads ledger for that lane, not a defect.
+- **`ux-parity--8`** — It IS the refuted-leads ledger for that review area, not a defect.
   <br><sub>Originally: REFUTED LEADS (for the refuter's ledger): five mapper observations are not cross-platform divergences</sub>
 
 ### Severity reviewed down, left out of scope
@@ -111,7 +111,7 @@ campaign could not provide.
 | `hygiene-release--0` | H | Wave 2 |
 | `quality-tests--0` | H | Wave 2 |
 | `quality-tests--1` | H | Wave 2 |
-| `quality-tests--2` | H | Same defect as bug-cache-lifecycle--0; fixed there (8b81306) |
+| `quality-tests--2` | H | Same defect as bug-cache-lifecycle--0; fixed there (2026-07-27) |
 | `ux-copy--1` | H | Closeout pass (`1b12380`) |
 | `ux-error--0` | H | Wave 1 + fold |
 | `a11y-native--0` | M | Wave 2 |
@@ -160,13 +160,13 @@ campaign could not provide.
 | `quality-tests--3` | M | Wave 2 |
 | `quality-tests--5` | M | Wave 3 |
 | `quality-tests--6` | M | Wave 1 + fold |
-| `quality-tests--7` | M | Fixed as a side effect — the docs lane added the vector-provenance manifest (1842c9d) |
+| `quality-tests--7` | M | Fixed as a side effect — the documents' update added the vector-provenance manifest (2026-07-27) |
 | `ux-copy--0` | M | Wave 1 + fold |
 | `ux-copy--2` | M | Wave 1 + fold |
-| `ux-copy--3` | M | Twin pass (1cd59b8) |
+| `ux-copy--3` | M | Twin pass (2026-07-27) |
 | `ux-copy--4` | M | Wave 2 |
 | `ux-copy--5` | M | Closeout pass (`1b12380`) |
-| `ux-copy--6` | M | Fixed as a side effect — the docs lane rewrote INSTALL.txt (1842c9d) |
+| `ux-copy--6` | M | Fixed as a side effect — the documents' update rewrote INSTALL.txt (2026-07-27) |
 | `ux-error--1` | M | Closeout pass (`1b12380`) |
 | `ux-error--2` | M | Wave 1 + fold |
 | `ux-error--3` | M | Wave 1 + fold |
@@ -201,12 +201,12 @@ campaign could not provide.
 | `bug-server--8` | L | Wave 3 |
 | `bug-server--9` | L | Wave 3 |
 | `bug-web--3` | L | Wave 3 |
-| `bug-web--4` | L | Fixed as a side effect of the Trash N+1 work (b6eba07) |
+| `bug-web--4` | L | Fixed as a side effect of the Trash N+1 work (2026-07-27) |
 | `bug-web--5` | L | Wave 3 |
 | `bug-web--6` | L | Wave 3 |
 | `hygiene-docs--12` | L | Wave 2 |
 | `hygiene-docs--14` | L | Closeout pass (`1b12380`) |
-| `hygiene-docs--15` | L | Fixed as a side effect — the 1.8 MB HTML twin is no longer tracked (1842c9d) |
+| `hygiene-docs--15` | L | Fixed as a side effect — the 1.8 MB HTML twin is no longer tracked (2026-07-27) |
 | `hygiene-docs--16` | L | Wave 2 |
 | `hygiene-docs--17` | L | Wave 2 |
 | `hygiene-release--6` | L | Wave 2 |
@@ -545,15 +545,15 @@ files back to 0.6.1 with byte-identical duplicate names per release.
 A defensible 0.21.0 / ext 0.20.0:
 
 1. **Paperwork first** (§2.1) — before any code, so the baseline is knowable.
-2. **Correctness lane:** §2.2–2.6, §2.11. Each is small and independently testable; the cache
+2. **Correctness work:** §2.2–2.6, §2.11. Each is small and independently testable; the cache
    migration is the only one needing a schema bump.
-3. **Gate lane:** §2.7–2.8 plus the Android pure-gate tests (`quality-tests--3`, corrected to medium:
-   about half the listed functions are security-relevant, the rest cosmetic). Do this lane *early* so
+3. **Gate work:** §2.7–2.8 plus the Android pure-gate tests (`quality-tests--3`, corrected to medium:
+   about half the listed functions are security-relevant, the rest cosmetic). Do this work *early* so
    the rest of the release ships behind a gate that means something.
 4. **Copy + a11y sweep:** §2.9, §2.10, and §3. High user-visible value per hour, low regression risk,
    and the byte-twin discipline already has pins to extend.
 5. **Docs sweep:** §5. Independent of all code work — parallelizable.
-6. **Opportunistic structure:** §4, only in files the lanes above already touch.
+6. **Opportunistic structure:** §4, only in files the items above already touch.
 
 Defer: god-file decomposition as a standalone project, the E2E harness the extension README claims,
 and every §7 item.
@@ -579,8 +579,8 @@ Recorded so a future review does not re-find them.
   script emits"). Critically, this was **not** the cause of §2.1: that was a deliberate dual-channel
   publish — the same run pushed Chrome live too — that skipped the paperwork ritual. Gating the
   emission would not have prevented it.
-- **Five mapper observations were not real cross-platform divergences** and were refuted in-lane
-  (`ux-parity--8` carries the ledger).
+- **Five mapper observations were not real cross-platform divergences** and were refuted within
+  their review area (`ux-parity--8` carries the ledger).
 - **Not defects, deliberate and pinned:** the `LEGACY_*` match-targets; core's
   `UriMatch.normalizeHost` vs `CsvImport.nameFallback` host-extraction split (documented divergence);
   the extension/core `MIN_SEQ` 0-vs-1 asymmetry; `matches` being classified as re-arming activity was
@@ -593,16 +593,16 @@ Recorded so a future review does not re-find them.
 
 ## 8. Method, coverage, and limits
 
-**Phase 1 — map (9 agents).** One reader per module (core, server, android, desktop, web, extension)
+**Phase 1 — map (9 readers).** One reader per module (core, server, android, desktop, web, extension)
 plus docs/spec, an open-items sweep, and release hygiene. Produced architecture maps, key-file
 indexes, and 200+ leads.
 
-**Phase 2 — review (16 lanes).** Correctness (cache/lifecycle, server, extension gating, autofill UX,
+**Phase 2 — review (16 areas).** Correctness (cache/lifecycle, server, extension gating, autofill UX,
 web), Experience (parity, copy, web+ext a11y, native a11y, failure UX), Quality (perf, tests, dead
-code, post-audit security drift), Hygiene (docs, release). Each lane received its module map as leads
+code, post-audit security drift), Hygiene (docs, release). Each area received its module map as leads
 and was scoped to polish only. 152 findings, 148 self-rated confirmed.
 
-**Phase 3 — adversarial verify (58 agents, 53 completed).** Every high finding faced two refuters with
+**Phase 3 — adversarial verify (58 refuters and skeptics, 53 completed).** Every high finding faced two refuters with
 different lenses — one re-deriving the mechanism from scratch, one hunting for evidence the behavior
 is deliberate (spec, design doc, decision-ID comment, test pin) and scope-checking polish-vs-feature.
 Mediums went to 12 batched skeptics. Default verdict on uncertainty was *refuted*.
@@ -610,7 +610,7 @@ Mediums went to 12 batched skeptics. Default verdict on uncertainty was *refuted
 **Limits, stated plainly:**
 
 - Four medium batches and one high batch died mid-run (monthly spend limit; one API overload). Their
-  findings were **not** dropped: 21 were re-verified inline against the tree by the orchestrator
+  findings were **not** dropped: 21 were re-verified inline against the tree by the auditor
   (marked `(inline)` in Appendix A). Three medium findings remain unverified —
   `bug-ext-gating--4` (biometric host-permission probe), `hygiene-docs--7` (compliance-review closure
   ledger), `hygiene-release--2` (release-ritual scripting) — treat them as reported, not confirmed.
@@ -623,8 +623,8 @@ Mediums went to 12 batched skeptics. Default verdict on uncertainty was *refuted
 
 ## Appendix A — all 152 findings
 
-Severity is post-refutation. Verdict `(inline)` = verified by the orchestrator after its agent batch
-died. `UNVERIFIED` = reported by the review lane, not put through the refute pass (all lows, plus the
+Severity is post-refutation. Verdict `(inline)` = verified by the auditor after its refuter batch
+died. `UNVERIFIED` = reported by the review area, not put through the refute pass (all lows, plus the
 three named in §8).
 | # | Sev | Effort | Verdict | Finding | Primary file |
 |---|-----|--------|---------|---------|--------------|

@@ -1,6 +1,7 @@
 import { concat, ctEquals, fromB64, toB64 } from "./bytes";
 import { ed25519PkToCurve25519, type KeyPairBytes, signDetached, signVerifyDetached } from "./provider";
 import { CryptoError } from "./sodium";
+import { decodeEmail, encodeEmail, NONE } from "./trust/grammar";
 
 /**
  * The v2 `SignedStatement` envelope and its canonical statement (security review 2026-10, root cause A
@@ -55,6 +56,11 @@ export interface VaultGrantStatement {
   readonly vk: Uint8Array;
 }
 
+/**
+ * `purpose = escrow-uvk`. [email] is the account's `emailNorm` (spec 04 §3): given, the
+ * statement is the version-3 form, which says whose copy it is, and the only one a client seals; absent or null, the
+ * old version-2 form, which only the vectors still build and the opener still reads. Twin of core `Statement.EscrowUvk`.
+ */
 export interface EscrowUvkStatement {
   readonly purpose: "escrow-uvk";
   readonly userId: string;
@@ -62,6 +68,7 @@ export interface EscrowUvkStatement {
   readonly recoveryFp: string;
   readonly issuedAt: number;
   readonly key: Uint8Array;
+  readonly email?: string | null;
 }
 
 export type Statement = VaultGrantStatement | EscrowUvkStatement;
@@ -83,7 +90,7 @@ declare const unverifiedBrand: unique symbol;
  */
 export type UnverifiedStatement =
   | { readonly [unverifiedBrand]: true; readonly purpose: "vault-grant"; readonly from: string; readonly to: string; readonly vaultId: string }
-  | { readonly [unverifiedBrand]: true; readonly purpose: "escrow-uvk"; readonly userId: string; readonly recoveryFp: string };
+  | { readonly [unverifiedBrand]: true; readonly purpose: "escrow-uvk"; readonly userId: string; readonly recoveryFp: string; readonly email: string | null };
 
 const verifiedToken: unique symbol = Symbol("verified-statement");
 /**
@@ -135,6 +142,8 @@ const B64_43_RE = /^[A-Za-z0-9_-]{43}$/;
 
 const GRANT_KEYS = ["v", "purpose", "from", "to", "toKey", "vaultId", "grantId", "issuedAt", "vk"];
 const ESCROW_KEYS = ["v", "purpose", "userId", "identityKey", "recoveryFp", "issuedAt", "key"];
+/** The version-3 escrow template (spec 04 §3, spec 01 §5.1 "Version-3 templates"): the old keys with `email` after `userId`. */
+const ESCROW_V3_KEYS = ["v", "purpose", "userId", "email", "identityKey", "recoveryFp", "issuedAt", "key"];
 
 const ascii = (s: string) => new TextEncoder().encode(s);
 const refuse = (verdict: StatementVerdict, detail: string): never => {
@@ -159,6 +168,16 @@ const grantTemplate = (v: number, purpose: string, from: string, to: string, toK
 const escrowTemplate = (v: number, purpose: string, userId: string, identityKey: string, recoveryFp: string, issuedAt: number, key: string) =>
   `{"v":${v},"purpose":"${purpose}","userId":"${userId}","identityKey":"${identityKey}","recoveryFp":"${recoveryFp}","issuedAt":${issuedAt},"key":"${key}"}`;
 
+/** The version-3 escrow statement (spec 04 §3); [email] is the `email_b64` text. [v] is the parsed number on a re-encode. */
+const escrowV3Template = (v: number, purpose: string, userId: string, email: string, identityKey: string, recoveryFp: string, issuedAt: number, key: string) =>
+  `{"v":${v},"purpose":"${purpose}","userId":"${userId}","email":"${email}","identityKey":"${identityKey}","recoveryFp":"${recoveryFp}","issuedAt":${issuedAt},"key":"${key}"}`;
+
+/** The `email_b64` form of [email] (spec 01 §5.1): null when it is not already an `emailNorm`. Never the literal `none`. */
+function emailField(email: string): string | null {
+  const field = encodeEmail(email);
+  return field === null || field === NONE ? null : field;
+}
+
 /**
  * The canonical statement bytes. Throws {@link CryptoError} for any value outside the closed grammar
  * and for a vault grant with `from == to`, so a statement this client signs always parses back.
@@ -181,7 +200,13 @@ export function encodeStatement(st: Statement): Uint8Array {
     need(HEX64_RE.test(st.recoveryFp), "recoveryFp is not 64 lowercase hex");
     need(isMs(st.issuedAt), "issuedAt out of range");
     need(st.key.length === 32, "key must be 32 bytes");
-    text = escrowTemplate(2, "escrow-uvk", st.userId, toB64(st.identityKey), st.recoveryFp, st.issuedAt, toB64(st.key));
+    if (st.email == null) {
+      text = escrowTemplate(2, "escrow-uvk", st.userId, toB64(st.identityKey), st.recoveryFp, st.issuedAt, toB64(st.key));
+    } else {
+      const email = emailField(st.email);
+      need(email !== null, "email is not an emailNorm");
+      text = escrowV3Template(3, "escrow-uvk", st.userId, email!, toB64(st.identityKey), st.recoveryFp, st.issuedAt, toB64(st.key));
+    }
   } else {
     throw new CryptoError("signed statement: unknown purpose");
   }
@@ -232,7 +257,7 @@ export function parseStatement(purposeCode: number, statement: Uint8Array): Unve
   const routing =
     st.purpose === "vault-grant"
       ? { purpose: st.purpose, from: st.from, to: st.to, vaultId: st.vaultId }
-      : { purpose: st.purpose, userId: st.userId, recoveryFp: st.recoveryFp };
+      : { purpose: st.purpose, userId: st.userId, recoveryFp: st.recoveryFp, email: st.email ?? null };
   return Object.freeze(routing) as UnverifiedStatement;
 }
 
@@ -248,10 +273,25 @@ export function parseVaultGrantRouting(statement: Uint8Array): { from: string; t
   return { from: st.from, to: st.to, toKey: st.toKey.slice(), vaultId: st.vaultId, grantId: st.grantId.slice() };
 }
 
+/**
+ * Spec 01 §5.1 "no nesting" (design 2026-11-15 §2.2): a statement is ONE flat object, so a `[` anywhere, or
+ * a second `{`, is refused before any general JSON parser is handed the text. No value of the grammar holds
+ * either character, so nothing canonical is lost; what is gained is that no input can make a parser nest.
+ */
+function isFlat(statement: Uint8Array): boolean {
+  let braces = 0;
+  for (const b of statement) {
+    if (b === 0x5b) return false;
+    if (b === 0x7b && ++braces > 1) return false;
+  }
+  return true;
+}
+
 function parseFields(purposeCode: number, statement: Uint8Array): Statement {
   if (!isPurposeCode(purposeCode)) return refuse("bad_frame", "unknown purpose code");
   if (statement.length < MIN_STATEMENT_BYTES || statement.length > MAX_STATEMENT_BYTES) refuse("bad_frame", "statement length");
   for (const b of statement) if (b < 0x20 || b > 0x7e) refuse("non_canonical", "not printable ASCII");
+  if (!isFlat(statement)) refuse("non_canonical", "nesting");
   const text = String.fromCharCode(...statement);
   let parsed: unknown;
   try {
@@ -261,7 +301,10 @@ function parseFields(purposeCode: number, statement: Uint8Array): Statement {
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return refuse("non_canonical", "not a JSON object");
   const obj = parsed as Record<string, unknown>;
-  const expected = purposeCode === 1 ? GRANT_KEYS : ESCROW_KEYS;
+  // Spec 01 §5.1: a reader of 0x02 tries both templates, and the key set picks one: a statement with `email` is matched
+  // against the version-3 template, one without against the version-2 template; step 6 then requires that one's own `v`.
+  const escrowV3 = purposeCode === 2 && Object.prototype.hasOwnProperty.call(obj, "email");
+  const expected = purposeCode === 1 ? GRANT_KEYS : escrowV3 ? ESCROW_V3_KEYS : ESCROW_KEYS;
   const keys = Object.keys(obj);
   if (keys.length !== expected.length || !expected.every((k) => Object.prototype.hasOwnProperty.call(obj, k))) {
     refuse("non_canonical", "key set");
@@ -284,19 +327,31 @@ function parseFields(purposeCode: number, statement: Uint8Array): Statement {
     reEncoded = grantTemplate(v, purposeLiteral, g.from, g.to, toB64(g.toKey), g.vaultId, toB64(g.grantId), g.issuedAt, toB64(g.vk));
     st = g;
   } else {
+    const userId = uuid(obj, "userId");
+    // `email_b64` (spec 01 §5.1): an address, never `none`, already normal.
+    const emailText = escrowV3 ? str(obj, "email") : null;
+    let email: string | null = null;
+    if (emailText !== null) {
+      const d = decodeEmail(emailText);
+      if (d === null || d.email === null) return refuse("non_canonical", "email grammar");
+      email = d.email;
+    }
+    const identityKey = b64(obj, "identityKey", 32);
     const recoveryFp = str(obj, "recoveryFp");
     if (!HEX64_RE.test(recoveryFp)) refuse("non_canonical", "recoveryFp grammar");
-    const e: EscrowUvkStatement = {
-      purpose: "escrow-uvk", userId: uuid(obj, "userId"), identityKey: b64(obj, "identityKey", 32), recoveryFp, issuedAt,
-      key: b64(obj, "key", 32),
-    };
-    reEncoded = escrowTemplate(v, purposeLiteral, e.userId, toB64(e.identityKey), e.recoveryFp, e.issuedAt, toB64(e.key));
+    // The old form carries no `email` key at all, so a version-2 statement reads back exactly as it was built.
+    const e: EscrowUvkStatement = { purpose: "escrow-uvk", userId, identityKey, recoveryFp, issuedAt, key: b64(obj, "key", 32), ...(email !== null ? { email } : {}) };
+    reEncoded =
+      emailText !== null
+        ? escrowV3Template(v, purposeLiteral, e.userId, emailText, toB64(e.identityKey), e.recoveryFp, e.issuedAt, toB64(e.key))
+        : escrowTemplate(v, purposeLiteral, e.userId, toB64(e.identityKey), e.recoveryFp, e.issuedAt, toB64(e.key));
     st = e;
   }
   const re = ascii(reEncoded);
   if (re.length !== statement.length || !re.every((b, i) => b === statement[i])) refuse("non_canonical", "not the canonical encoding");
 
-  if (v !== 2) refuse("bad_statement", `statement version ${v}`);
+  // Each template has its own version: 3 for the escrow statement that names its address, 2 for every other.
+  if (v !== (escrowV3 ? 3 : 2)) refuse("bad_statement", `statement version ${v}`);
   if (purposeLiteral !== PURPOSE_LITERAL[purposeCode]) refuse("bad_statement", "purpose literal does not match the purpose code");
   if (st.purpose === "vault-grant" && st.from === st.to) refuse("bad_statement", "grant from == to");
   return st;

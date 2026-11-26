@@ -33,6 +33,11 @@ data class CsvImportView(
     val retryable: Boolean,
     /** The import landed: what to do with the file now. */
     val done: String?,
+    /**
+     * The import stopped and what was not sent is kept on this device and sent later (a copy kept at rest): [error] then
+     * says so, it is not a failure, and no Retry is offered. Drawn in the plain colour, never as an error.
+     */
+    val kept: Boolean = false,
 )
 
 data class ImportBucketView(
@@ -53,6 +58,12 @@ internal class CsvSession(val parsed: CsvImport.Parsed, val rowOrdinals: Map<Int
     var error: String? = null
     var retryable = true
     var done = false
+
+    /** [CsvImportView.kept]. */
+    var kept = false
+
+    /** Done, but the list does not hold all of its items yet (the last pull got no answer): they show after the next sync. */
+    var listedLater = false
 }
 
 internal fun csvImportView(s: CsvSession, vaultName: (String) -> String, choices: List<VaultChoiceView>): CsvImportView {
@@ -90,7 +101,12 @@ internal fun csvImportView(s: CsvSession, vaultName: (String) -> String, choices
         busy = s.busy,
         error = s.error,
         retryable = s.retryable,
-        done = if (s.done) ImportCopy.done(report?.imported ?: 0, vaultName(s.vaultId)) else null,
+        done = when {
+            !s.done -> null
+            s.listedLater -> io.silencelen.andvari.core.app.content.ContentCopy.importDoneListedLater(report?.imported ?: 0, vaultName(s.vaultId))
+            else -> ImportCopy.done(report?.imported ?: 0, vaultName(s.vaultId))
+        },
+        kept = s.kept,
     )
 }
 

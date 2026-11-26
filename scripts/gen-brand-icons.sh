@@ -1,51 +1,67 @@
 #!/usr/bin/env bash
-# andvari brand icons — regenerate EVERY tile icon in the fleet from the one source SVG.
+# andvari brand icons: render every icon in the tree from the sources under assets/brand/.
 #
-# H138 (audit 2026-09-13): 0.26.3 shipped the mark in two geometries. The tile icons (web
-# favicon, desktop .ico/.png, extension icon16-128) drew a 14-unit inset stave at stroke 1.8
-# (ratio 0.129) while BrandSigil, the extension popup/options headers and the Android launcher
-# drew the 18-unit wordmark stave at the same stroke (ratio 0.100) — so the same product's rune
-# was ~29 % bolder and shorter on the browser tab than in the popup header two centimetres away.
-# The owner picked ONE geometry: the wordmark. assets/brand/andvari-mark.svg is now the source
-# and this script is the only sanctioned way to produce a derivative of it.
+# Why one script: the mark once shipped in two geometries at the same time. The browser tab's icon
+# was drawn from one set of numbers and the extension's header from another, so the same product's
+# rune looked bolder and shorter on the tab than in the popup beside it. Since then every rendered
+# icon comes from the sources under assets/brand/ through this script, and no rendered icon is ever
+# edited by hand.
 #
-# Rendering is done with rsvg-convert (librsvg) and ImageMagick's convert, both of which are
-# what produced the 0.26.3 set on this host; Pillow is not required. Run from anywhere.
+# Which source at which size (assets/brand/BRAND.md, "The icon"):
+#   16, 24, 32 px   andvari-mark-16.svg, -24.svg, -32.svg: the small tile redrawn on the pixel grid
+#   48, 64 px       andvari-mark.svg: the small tile (flat rune on flat hardwood, corners rounded)
+#   128 px and up   andvari-mark-gilded.svg: the gilded rune on polished hardwood, full bleed where
+#                   the platform rounds or masks the icon itself, and clipped here to rounded
+#                   corners (24 of 108) where the platform shows the picture as it is
+# Five of the large pictures carry a light noise on their gradient (one draw per pixel, +-1.4
+# levels, a fixed seed, so a re-render is identical), which keeps the dark radial gradient from
+# showing 8-bit bands.
 #
-#   ./scripts/gen-brand-icons.sh          # rewrite every derivative in the tree
-#   ./scripts/gen-brand-icons.sh --check  # render to a temp dir and DIFF against the tree; the
-#                                         # release gate runs this, so a source-geometry change
-#                                         # committed without a re-run fails there instead of
-#                                         # shipping a stale tab icon (R49)
+# Tools: rsvg-convert (librsvg), ImageMagick's convert (the .ico), and Python 3 with the Pillow
+# library (the noise and the pixel comparison). They are tools of this script; no app needs them.
+#
+#   scripts/gen-brand-icons.sh          # rewrite every rendered icon in the tree
+#   scripts/gen-brand-icons.sh --check  # render into a temporary folder and compare the decoded
+#                                       # pixels (alpha included, no tolerance) with the committed
+#                                       # files, every frame of the .ico included; the release gate
+#                                       # runs this, so a source changed without a re-render, or an
+#                                       # icon edited by hand, fails there instead of shipping
 #
 # Outputs (all tracked; commit whatever this changes):
-#   web/public/favicon.svg                     verbatim copy of the source (served at /favicon.svg)
-#   web/public/apple-touch-icon.png            180  iOS home screen
-#   web/public/icon-192.png  icon-512.png      manifest.webmanifest "any" icons (H136)
-#   web/public/icon-512-maskable.png           manifest "maskable" icon — full bleed, rune inside
-#                                              the 80 % safe circle so Android's mask cannot clip it
-#   extension/icons/icon{16,32,48,128}.png     MV3 action + store listing
-#   app-desktop/icons/andvari.svg              verbatim copy of the source (provenance next to the
-#                                              rasters jpackage consumes)
-#   app-desktop/icons/andvari.ico              16/24/32/48/64/128/256 — windows.iconFile
-#   app-desktop/icons/andvari.png              512 — linux.iconFile
-#   app-desktop/src/main/resources/andvari.png 256 — the running window/taskbar icon
+#   file                                         px    source               noise
+#   web/public/favicon.svg                       -     andvari-mark.svg, copied verbatim
+#   web/public/apple-touch-icon.png              180   gilded, full bleed   yes  (iOS rounds it)
+#   web/public/icon-192.png                      192   gilded, rounded      no
+#   web/public/icon-512.png                      512   gilded, rounded      yes
+#   web/public/icon-512-maskable.png             512   gilded, full bleed   yes  (Android masks it;
+#                                                      the rune stays inside the maskable safe circle)
+#   extension/icons/icon16.png, icon32.png       16/32 andvari-mark-16/-32  no
+#   extension/icons/icon48.png                   48    andvari-mark.svg     no
+#   extension/icons/icon128.png                  128   gilded, rounded      no
+#   app-desktop/icons/andvari.svg                -     andvari-mark.svg, copied verbatim
+#   app-desktop/icons/andvari.png                512   gilded, rounded      yes  (linux.iconFile)
+#   app-desktop/src/main/resources/andvari.png   256   gilded, rounded      no   (the window icon)
+#   app-desktop/icons/andvari.ico                16/24/32 pixel-fitted tiles, 48/64 andvari-mark.svg,
+#                                                128/256 gilded rounded; no noise (windows.iconFile)
+#   app-ios/Andvari/Assets.xcassets/AppIcon.appiconset/icon-1024.png
+#                                                1024  gilded, full bleed   yes  (RGB, no alpha:
+#                                                      the App Store refuses an icon with alpha)
 #
-# NOT generated: app-android/src/main/res/drawable/ic_launcher_foreground.xml. The adaptive icon
-# is a vector drawable that already carries this exact geometry by hand (and must, to scale into
-# the 108dp safe zone with no raster step) — it is the sibling that was right all along. If the
-# source geometry ever changes, change that file in the same commit; the web brand-assets test
-# fails when the two disagree.
+# NOT rendered here: the Android adaptive icon (app-android/src/main/res/drawable/ic_launcher_*.xml).
+# Those are vector drawables that carry the rune's geometry as numbers, so they scale into the
+# launcher's safe zone with no raster step; web/src/ui/brand-assets.test.ts compares them with the
+# sources. Nothing for the stores is rendered here either.
+#
+# The temporary folder this makes goes when a run ends well. A run that fails leaves it and names
+# it, so the renders of a failing comparison can be looked at.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC="$REPO_DIR/assets/brand/andvari-mark.svg"
+BRAND="$REPO_DIR/assets/brand"
+TILE="$BRAND/andvari-mark.svg"
+GILDED="$BRAND/andvari-mark-gilded.svg"
 cd "$REPO_DIR"
 
-# R49: --check renders everything into a scratch tree and compares, instead of writing. The test
-# suite could only assert that each tile EXISTS and is non-empty (a raster's bytes are not
-# derivable in JS), so the one failure this whole file exists to prevent — the source geometry
-# changes and nobody re-runs the script — shipped green. Here the renderer IS the oracle.
 CHECK=0
 case "${1:-}" in
   --check) CHECK=1; shift ;;
@@ -53,90 +69,202 @@ case "${1:-}" in
   *) echo "unknown arg: ${1}; usage: $0 [--check]" >&2; exit 2 ;;
 esac
 
-for tool in rsvg-convert convert; do
-  command -v "$tool" >/dev/null || { echo "missing $tool (apt install librsvg2-bin imagemagick)" >&2; exit 1; }
+for tool in rsvg-convert convert python3; do
+  command -v "$tool" >/dev/null || {
+    echo "missing $tool: this script needs rsvg-convert, ImageMagick's convert, and Python 3 with Pillow" >&2
+    echo "(Debian/Ubuntu: apt install librsvg2-bin imagemagick python3-pil)" >&2
+    exit 1
+  }
 done
-[ -f "$SRC" ] || { echo "missing source $SRC" >&2; exit 1; }
+python3 -I -c 'import PIL' 2>/dev/null || {
+  echo "missing the Pillow library for python3 (Debian/Ubuntu: apt install python3-pil)" >&2
+  exit 1
+}
+for f in "$TILE" "$GILDED" "$BRAND"/andvari-mark-{16,24,32}.svg; do
+  [ -f "$f" ] || { echo "missing source $f" >&2; exit 1; }
+done
+
+# The noise and the comparison, in Python with Pillow.
+#   dither FILE   adds the noise in place. A picture with see-through pixels (the rounded icons)
+#                 stays RGBA: the noise goes on R, G and B where alpha is above 0, alpha is never
+#                 touched, and a fully transparent pixel stays as it is. A fully opaque picture
+#                 comes out RGB. Either way one draw per pixel, in row order, whatever its alpha.
+#   compare A B   compares the decoded pixels of A (a fresh render) and B (the committed file) as
+#                 RGBA, frame by frame for an .ico, with no tolerance; prints what differs and
+#                 exits 1 when anything does.
+#   noalpha FILE  exits 1 when FILE has an alpha channel.
+PY='
+import random, sys
+from PIL import Image, ImageChops
+
+def dither(path, amount=1.4, seed=7):
+    src = Image.open(path).convert("RGBA")
+    keep_alpha = src.getchannel("A").getextrema()[0] < 255
+    im = src if keep_alpha else src.convert("RGB")
+    rnd = random.Random(seed)
+    px = im.load()
+    q = lambda v: min(255, max(0, round(v)))
+    for y in range(im.height):
+        for x in range(im.width):
+            n = rnd.uniform(-amount, amount)
+            if keep_alpha:
+                r, g, b, a = px[x, y]
+                if a:
+                    px[x, y] = (q(r + n), q(g + n), q(b + n), a)
+            else:
+                r, g, b = px[x, y]
+                px[x, y] = (q(r + n), q(g + n), q(b + n))
+    im.save(path)
+
+def frames(path):
+    im = Image.open(path)
+    if im.format == "ICO":
+        out = [im.ico.frame(i).convert("RGBA") for i in range(len(im.ico.entry))]
+        return sorted(out, key=lambda f: f.size)
+    return [im.convert("RGBA")]
+
+def compare(fresh, committed):
+    a, b = frames(fresh), frames(committed)
+    if [f.size for f in a] != [f.size for f in b]:
+        print("sizes differ: fresh %s, committed %s" % ([f.size for f in a], [f.size for f in b]))
+        return 1
+    bad = 0
+    for fa, fb in zip(a, b):
+        if fa.tobytes() == fb.tobytes():
+            continue
+        d = ImageChops.difference(fa, fb).split()
+        worst = d[0]
+        for c in d[1:]:
+            worst = ImageChops.lighter(worst, c)
+        h = worst.histogram()
+        n = fa.width * fa.height - h[0]
+        top = max(i for i, c in enumerate(h) if c)
+        print("%dx%d: %d of %d pixels differ, by up to %d levels in a channel"
+              % (fa.width, fa.height, n, fa.width * fa.height, top))
+        bad = 1
+    return bad
+
+cmd, args = sys.argv[1], sys.argv[2:]
+if cmd == "dither":
+    for p in args:
+        dither(p)
+elif cmd == "compare":
+    sys.exit(compare(args[0], args[1]))
+elif cmd == "noalpha":
+    sys.exit(1 if "A" in Image.open(args[0]).getbands() else 0)
+else:
+    sys.exit("unknown command " + cmd)
+'
+py() { python3 -I -c "$PY" "$@"; }
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+trap 'if [ "$?" = 0 ]; then rm -rf "$TMP"; else echo "    this run'"'"'s temporary folder is left for a look: $TMP" >&2; fi' EXIT
+
+# The rounded composition: the gilded master clipped to corners of 24 in 108. It is made here from
+# the master's own text (a clip path before its gradient, everything after the gradient inside the
+# clip), so the master stays the one source of the large icons. Each half of that cut is checked:
+# if the master's layout ever changes, this fails loudly instead of rendering something else.
+gilded_text="$(<"$GILDED")"
+case "$gilded_text" in
+  "<svg "*'viewBox="0 0 108 108"'*"</radialGradient>"*"</svg>") ;;
+  *) echo "$GILDED: expected one <svg> in a 108 box with its gradient first; the rounded icons cannot be cut from it" >&2; exit 1 ;;
+esac
+case "$gilded_text" in
+  *'id="c"'*|*"clip-path"*) echo "$GILDED: already carries a clip; the rounded icons cannot be cut from it" >&2; exit 1 ;;
+esac
+head_part="${gilded_text%%</radialGradient>*}</radialGradient>"
+body_part="${gilded_text#*</radialGradient>}"
+body_part="${body_part%</svg>}"
+svg_open="${head_part%%>*}>"
+gradient="${head_part#*>}"
+ROUNDED="$TMP/andvari-mark-gilded-rounded.svg"
+printf '%s<clipPath id="c"><rect width="108" height="108" rx="24"/></clipPath>%s<g clip-path="url(#c)">%s</g></svg>\n' \
+  "$svg_open" "$gradient" "$body_part" > "$ROUNDED"
+for needle in 'rx="24"' '<path ' 'url(#pg)'; do
+  grep -qF "$needle" "$ROUNDED" || {
+    echo "the rounded composition lost the clip, the rune or the ground; is $GILDED still one gradient, one ground and the rune?" >&2
+    exit 1
+  }
+done
 
 # In --check mode every output is written under $OUT (a mirror of the tree's layout) and compared
-# afterwards; otherwise $OUT is the tree itself and this behaves exactly as before.
+# afterwards; otherwise $OUT is the tree itself.
 OUT="$REPO_DIR"
 if [ "$CHECK" = 1 ]; then
   OUT="$TMP/tree"
-  mkdir -p "$OUT/web/public" "$OUT/extension/icons" "$OUT/app-desktop/icons" "$OUT/app-desktop/src/main/resources"
+  mkdir -p "$OUT/web/public" "$OUT/extension/icons" "$OUT/app-desktop/icons" \
+           "$OUT/app-desktop/src/main/resources" "$OUT/app-ios/Andvari/Assets.xcassets/AppIcon.appiconset"
 fi
 GENERATED=()
+TO_DITHER=()
 
-png() { rsvg-convert -w "$1" -h "$1" "$SRC" -o "$OUT/$2"; GENERATED+=("$2"); }
-copy() { cp "$SRC" "$OUT/$1"; GENERATED+=("$1"); }
+# render SOURCE PX PATH [dither]
+render() {
+  rsvg-convert -w "$2" -h "$2" "$1" -o "$OUT/$3"
+  GENERATED+=("$3")
+  [ "${4:-}" = dither ] && TO_DITHER+=("$OUT/$3")
+  return 0
+}
+copy() { cp "$1" "$OUT/$2"; GENERATED+=("$2"); }
+# the source for a small size: the pixel-fitted tile at 16, 24, 32; the small tile at 48, 64
+small_src() { case "$1" in 16|24|32) echo "$BRAND/andvari-mark-$1.svg" ;; *) echo "$TILE" ;; esac; }
 
 echo "==> web"
-copy web/public/favicon.svg
-png 180 web/public/apple-touch-icon.png
-png 192 web/public/icon-192.png
-png 512 web/public/icon-512.png
-
-# Maskable: Android may crop the icon to anything from a circle to a squircle, keeping only the
-# central 80 %. The tile's own rounded corners would be eaten, so the maskable variant is the rune
-# alone (the <rect> stripped — no geometry is re-typed here, the mark still comes from the source)
-# rendered at 60 % and centred on a full-bleed field of the app dark.
-grep -v '<rect' "$SRC" > "$TMP/mark-only.svg"
-# R52: the strip is LINE-oriented and silent. It works only because the source happens to put the
-# rect on its own line and the paths on theirs; reformat the SVG to one line, or add a second
-# background element, and `grep -v` either takes the mark away with the tile or leaves the tile in
-# — and the script still exits 0, so web/public/icon-512-maskable.png becomes a plain dark square
-# (or a clipped one) that every existing test accepts because it is a non-empty PNG. Assert both
-# halves of what the strip is supposed to have done, and fail loudly rather than composite junk.
-grep -q 'M12 3v18' "$TMP/mark-only.svg" || { echo "maskable strip removed the mark itself — is the source still one element per line?" >&2; exit 1; }
-grep -q '<rect' "$TMP/mark-only.svg" && { echo "maskable strip left the background tile in — the mask would clip its corners" >&2; exit 1; }
-rsvg-convert -w 308 -h 308 "$TMP/mark-only.svg" -o "$TMP/mark-only.png"
-convert -size 512x512 xc:'#14120E' "$TMP/mark-only.png" -gravity center -composite \
-        -depth 8 -define png:color-type=6 "$OUT/web/public/icon-512-maskable.png"
-MASKABLE="web/public/icon-512-maskable.png"
-GENERATED+=("$MASKABLE")
+copy "$TILE" web/public/favicon.svg
+render "$GILDED" 180 web/public/apple-touch-icon.png dither
+render "$ROUNDED" 192 web/public/icon-192.png
+render "$ROUNDED" 512 web/public/icon-512.png dither
+render "$GILDED" 512 web/public/icon-512-maskable.png dither
 
 echo "==> extension"
-for s in 16 32 48 128; do png "$s" "extension/icons/icon${s}.png"; done
+for s in 16 32 48; do render "$(small_src "$s")" "$s" "extension/icons/icon${s}.png"; done
+render "$ROUNDED" 128 extension/icons/icon128.png
 
 echo "==> desktop"
-copy app-desktop/icons/andvari.svg
-png 512 app-desktop/icons/andvari.png
-png 256 app-desktop/src/main/resources/andvari.png
-for s in 16 24 32 48 64 128 256; do rsvg-convert -w "$s" -h "$s" "$SRC" -o "$TMP/ico-$s.png"; done
-# 256 stays PNG-compressed inside the .ico (Vista+ convention, and what 0.26.3 shipped);
-# the smaller frames are plain BMP so pre-Vista shells and jpackage's own reader agree.
-convert "$TMP/ico-16.png" "$TMP/ico-24.png" "$TMP/ico-32.png" "$TMP/ico-48.png" \
-        "$TMP/ico-64.png" "$TMP/ico-128.png" "$TMP/ico-256.png" "$OUT/app-desktop/icons/andvari.ico"
+copy "$TILE" app-desktop/icons/andvari.svg
+render "$ROUNDED" 512 app-desktop/icons/andvari.png dither
+render "$ROUNDED" 256 app-desktop/src/main/resources/andvari.png
+ico_frames=()
+for s in 16 24 32 48 64 128 256; do
+  if [ "$s" -ge 128 ]; then src="$ROUNDED"; else src="$(small_src "$s")"; fi
+  rsvg-convert -w "$s" -h "$s" "$src" -o "$TMP/ico-$s.png"
+  ico_frames+=("$TMP/ico-$s.png")
+done
+convert "${ico_frames[@]}" "$OUT/app-desktop/icons/andvari.ico"
 GENERATED+=("app-desktop/icons/andvari.ico")
+
+echo "==> iPhone"
+IOS_ICON="app-ios/Andvari/Assets.xcassets/AppIcon.appiconset/icon-1024.png"
+render "$GILDED" 1024 "$IOS_ICON" dither
+
+py dither "${TO_DITHER[@]}"
+py noalpha "$OUT/$IOS_ICON" || { echo "$IOS_ICON came out with an alpha channel; the App Store refuses it" >&2; exit 1; }
 
 if [ "$CHECK" = 0 ]; then
   echo "==> done; git status will show what moved"
   exit 0
 fi
 
-# --- --check: compare the freshly rendered tree against the committed one -------------------
-# Byte-compare everything EXCEPT the maskable PNG: ImageMagick stamps a creation date into it, so
-# its bytes differ on every run even when every pixel is identical. That one is compared by pixels
-# (`compare -metric AE` must be 0), which is the property that actually matters.
+# --- --check: compare the fresh renders with the committed files, by decoded pixels -----------
+# Pixels, not bytes: another PNG encoder (or another version of this one) writes other bytes for
+# the same picture, and that must not fail the check; a single changed pixel must.
 stale=()
 for f in "${GENERATED[@]}"; do
   [ -f "$REPO_DIR/$f" ] || { stale+=("$f (missing from the tree)"); continue; }
-  if [ "$f" = "${MASKABLE:-}" ]; then
-    diff_px="$(convert "$OUT/$f" "$REPO_DIR/$f" -metric AE -compare -format '%[distortion]' info: 2>/dev/null || echo fail)"
-    [ "$diff_px" = "0" ] && continue
-    stale+=("$f (pixels differ from a fresh render)")
-  else
-    cmp -s "$OUT/$f" "$REPO_DIR/$f" || stale+=("$f")
-  fi
+  case "$f" in
+    *.svg) cmp -s "$OUT/$f" "$REPO_DIR/$f" || stale+=("$f (not a verbatim copy of its source)") ;;
+    *)
+      if ! why="$(py compare "$OUT/$f" "$REPO_DIR/$f")"; then
+        stale+=("$f: ${why//$'\n'/; }")
+      fi
+      ;;
+  esac
 done
 if [ "${#stale[@]}" -gt 0 ]; then
-  echo "    BRAND ICONS STALE — these do not match a fresh render of $SRC:" >&2
+  echo "    BRAND ICONS STALE: these do not match a fresh render of the sources in assets/brand/:" >&2
   printf '      %s\n' "${stale[@]}" >&2
-  echo "    Run scripts/gen-brand-icons.sh and commit what it changes (a hand-edited raster or a" >&2
-  echo "    source-geometry change with no re-run is exactly what this catches)." >&2
+  echo "    Run scripts/gen-brand-icons.sh and commit what it changes (a source changed with no" >&2
+  echo "    re-render, or a rendered icon edited by hand, is what this catches)." >&2
   exit 1
 fi
-echo "==> brand icons match a fresh render of the source" 
+echo "==> every brand icon matches a fresh render of the sources in assets/brand/"

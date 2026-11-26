@@ -13,14 +13,11 @@ Clients MUST sync before snapshotting (offline → proceed with a visible "vault
 last sync <time>" banner). Items from **every vault whose VK is held** are included —
 shared vaults by default with a visible per-vault line and an opt-out toggle (a member
 who can read a vault already holds its ciphertext + VK on-device; export grants no new
-capability — spec 05 R7). Export renders **whenever the vault is unlocked**, on every
-origin including the break-glass twin: an earlier draft of this spec had break-glass web
-sessions SHOULD-hide both entry points, and the 2026-07-15 multi-tenant design (§5.4.2)
-deleted that rule as SHOULD-level advertising — a page that is unlocked already holds the
-decrypted vault, so suppressing the button withholds nothing from an attacker who is
-already inside T6, and origin stopped being a posture signal at that pivot. Clients MUST
-NOT re-introduce an origin-conditional export gate (web's `isExportOriginAllowed` is
-deleted; `web/src/export/plan.ts` records the deletion).
+capability — spec 05 R7). Export renders **whenever the vault is unlocked**: a page that is
+unlocked already holds the decrypted vault, so suppressing the button withholds nothing from an
+attacker who is already inside T6. Clients MUST NOT introduce an origin-conditional export gate.
+Copying items **out** of a frozen or failed shared vault, and exporting it, stay allowed (spec 02
+§10.4): that is the way out of a vault whose history no longer checks out.
 
 ## 1. CSV (plaintext, lossy — the migration escape hatch)
 
@@ -35,7 +32,7 @@ Writer rules (both impls, byte-identical output — vector-pinned):
 - A field is quoted **iff** it contains `,` `"` CR or LF; `"` escapes as `""`.
   Fields are never trimmed or otherwise altered — with one exception:
 - **CR-normalization**: inside field *values*, CRLF and lone CR are normalized to LF
-  before writing (the spec 06 §4.3 parser does this on read; normalizing on write
+  before writing (the spec 06 §4 parser, step 3, does this on read; normalizing on write
   makes round-trips exact by construction).
 - Login items only, in vault order then `updatedAt` order (pinned so output is
   deterministic). `url` = `login.uris[0]` (may be empty), `note` = `notes`,
@@ -225,36 +222,71 @@ file. Filename: `andvari-backup-YYYY-MM-DD.andvari`; Android uses SAF
 extension). Clients record `lastExportAt` locally (never server-side) and surface
 "Last backup: N days ago" in Settings.
 
-## 3. Restore (stage 2 — normative now so stage-1 files restore forever)
+## 3. Restore (normative)
 
-Restore is **total-loss disaster recovery** (server + PBS + B2 all gone). It lives
-in Settings, plainly labeled: *"Only for rebuilding after total server loss — if
-your server is alive, your data syncs by itself."* Sync (spec 03) covers lost
-devices; PBS covers server loss; a restore on a living vault duplicates everything.
+A restore rebuilds vaults from a backup into an account that already exists. It serves three cases:
+**total-loss disaster recovery** (the server and its backups are gone); **moving to another
+instance** (accounts never move between instances, so a person makes a new account there and
+restores into it); and **the onboarding-and-trust cut-over**, which is a clean break (below). In
+Settings it is plainly labeled: *"Only for rebuilding after total server loss or moving to another
+server — if your server is alive, your data syncs by itself."* A restore on a living vault duplicates
+everything. **Not kept yet (2026-11-21):** no app has a restore entry in its Settings yet, so no app
+shows that label; the one restore is `andvari-cli restore` (Implementations, below).
 
-- Preflight: after open, show the **authenticated** `exportedAt`, per-vault item
-  counts, attachment manifest incl. named skips — the ImportPanel preview
-  discipline — before touching the vault.
-- Targeting: per source-vault choice (default: the personal vault; a recreated
-  shared vault may be chosen where the user has writer+). Restored items mint
-  **fresh itemIds once** at plan time; `mutationId = itemId`; batches of ≤200;
-  resume from the **first unacknowledged batch** on retry, never a full-plan replay
-  (the spec 03 §5 dedup window is only guaranteed for 1000 mutations).
-- Attachments: docs' `attachments[]` are **rewritten at plan time** — attachments
-  not in the file ⇒ ref stripped + reported; attachments present ⇒ fresh
-  `attachmentId` + `fileKey` minted once, ref rewritten via copy (preserving unknown
-  fields on the ref), blob uploaded before the item put (spec 02 §6 order). On a
-  plan retry, `400 attachment_id_taken` counts as **success** (the plan pinned
-  fileKey + plaintext, so any stored copy under that id decrypts; ids are fresh
-  UUIDs). Without this rewrite every such put comes back `rejected`
-  (`unknown_attachment` / `attachment_mismatch`, spec 03 §5) and is dropped.
-- Exported `updatedAt` / `origin` / `userId` are informational (preview only);
-  restored items get fresh server revisions and timestamps; client-observed times
-  inside docs (`passwordHistory[].retiredAt`) survive verbatim.
-- Until client restore ships, **`tools/backup-cli`** (offline, no HTTP — same
-  discipline as recovery-cli) is the reader of record: `verify` (open + check every
-  section), `dump` (items JSON to stdout), `extract` (attachments to a directory).
-  The backup drill (ROADMAP) uses it.
+- Preflight: after open, show the **authenticated** `exportedAt`, per-vault item counts, the
+  attachment manifest incl. named skips, and what a backup cannot carry (attachments over the 64 MiB
+  total, `attachmentsOverCap`, to re-attach by hand; server TOTP sign-in, which is re-enrolled; item
+  version history and trash, which are server-side) — the ImportPanel preview discipline — before
+  touching the vault.
+- **Quota first.** The new instance's default quotas (spec 03 §14.4: 100 MiB, 5,000 items, 50 owned
+  shared vaults) can refuse a large restore. The preview sizes it, and the operator raises that
+  account's limits first (`andvari admin quota`, or `PUT /admin/accounts/{id}/quota`).
+- Targeting: per source-vault choice. The personal vault's items go into the account's personal vault
+  (the one its genesis names, spec 01 §5.4). A **shared** vault is recreated as a new shared vault the
+  restoring account owns: the client signs a fresh `genesis` for it (spec 02 §10, spec 03 §10.3) and
+  posts its items there; no log, membership or key of the old vault is carried, and members are
+  re-added afterwards through links (spec 03 §15). Shared-vault creation is limited to 10 an hour
+  (`vault_create`), so a restore **paces itself on `429` with `Retry-After`**. The preview skips shared
+  vaults unless the person chooses them, and says that restoring a shared vault someone else owns
+  would duplicate it; when a family moves instances, only each shared vault's owner restores it.
+- Restored items mint **fresh itemIds once** at plan time; `mutationId = itemId`; batches of ≤200;
+  resume from the **first unacknowledged batch** on retry, never a full-plan replay (the spec 03 §5
+  dedup window is only guaranteed for 1000 mutations). A recreated vault's id is minted once at plan
+  time too, so a retried `genesis` is the byte-identical frame the server answers `200` (spec 03 §10.3).
+- Attachments: docs' `attachments[]` are **rewritten at plan time** — attachments not in the file ⇒
+  ref stripped + reported; attachments present ⇒ fresh `attachmentId` + `fileKey` minted once, ref
+  rewritten via copy (preserving unknown fields on the ref), blob uploaded before the item put (spec
+  02 §6 order). On a plan retry, `400 attachment_id_taken` counts as **success** (the plan pinned
+  fileKey + plaintext, so any stored copy under that id decrypts; ids are fresh UUIDs). Without this
+  rewrite every such put comes back `rejected` (`unknown_attachment` / `attachment_mismatch`, spec 03
+  §5) and is dropped.
+- A doc's `logHead` (spec 02 §3) names the old vault's log and is dropped at plan time; a writer puts
+  the new vault's head in when it next writes.
+- Exported `updatedAt` / `origin` / `userId` are informational (preview only); restored items get
+  fresh server revisions and timestamps; client-observed times inside docs
+  (`passwordHistory[].retiredAt`) survive verbatim.
+- **Implementations.** `andvari-cli restore --backup <file> --account <email> [--vaults personal]`
+  implements this section headlessly (it is the cut-over tool); clients' own restore follows the same
+  rules. **`tools/backup-cli`** (offline, no HTTP — same discipline as recovery-cli) is the reader of
+  record: `verify` (open + check every section), `dump` (items JSON to stdout), `extract`
+  (attachments to a directory). The backup drill uses it.
+
+### 3.1 The cut-over (clean break)
+
+The onboarding-and-trust release reads, migrates and tolerates **no** pre-cut-over format: a new
+server creates a fresh baseline schema and refuses to start on an old database (spec 02 §5), and the
+first launch of a new-format build on a platform that upgrades in place (desktop, the extensions)
+deletes every pre-cut-over local store once, keyed by a format marker, before anything else runs: the
+offline cache, saved sessions and keychain or keystore items, device-local trust records, the
+personal-wrap cache, quick-unlock keys, and the extension's IndexedDB records. Android installs under
+a new application id and iOS as a new app under a new bundle id: each starts empty, and the new iPhone
+app cannot read or clear what the old one stored. The `.andvari`
+backup format of §2 is **not** part of that break: it carries item documents, not trust records, and a
+file written before the cut-over restores into a new account under this section. The owner's
+cut-over runbook (drain the old devices, back up and `backup-cli verify`, set up the new instance,
+enrol the operator and the everyday account, raise the quota, `andvari-cli restore`, link the other
+devices, keep one old device and the old server as the rollback for a week) is
+`docs/design/2026-11-15-onboarding-trust.md` §14.1.
 
 ## 4. Vectors (`test-vectors/export.json`)
 

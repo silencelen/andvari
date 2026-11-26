@@ -16,10 +16,15 @@ class InProcessOverlaysTest {
         listOf(File(relative), File("app-android/$relative")).firstOrNull { it.isFile }
             ?: error("could not locate $relative from ${File(".").absolutePath}")
 
-    /** THE BUG, fixed: an overlay's own finish() is the last stop before the process ON_STOP. */
+    /**
+     * THE BUG, fixed: an overlay's own finish() is the last stop before the process ON_STOP. Now
+     * the exemption holds only when an autofill window opened the vault in this run (FillWindowLeavingTest).
+     */
     @Test
     fun anOverlayClosingIsNotLeavingTheApp() {
         InProcessOverlays.noteStarted(isOverlay = false)
+        InProcessOverlays.noteStarted(isOverlay = true)
+        InProcessOverlays.noteVaultOpenedByFillWindow() // the fill unlock opened the vault
         InProcessOverlays.noteStopped(isOverlay = true)
         assertTrue(InProcessOverlays.lastStopWasOverlay(), "the ON_STOP this stop causes must be skipped")
     }

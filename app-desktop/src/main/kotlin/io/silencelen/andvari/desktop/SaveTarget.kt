@@ -20,7 +20,9 @@ object SaveTarget {
     const val MAX_NAME_CHARS = 200
     private const val FALLBACK = "attachment"
     private const val RESERVED = "/\\:*?\"<>|"
-    private val DEVICE_NAMES = Regex("^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\\..*)?$", RegexOption.IGNORE_CASE)
+    // Note N3: Windows also takes the superscript digits, CONIN$/CONOUT$/CLOCK$, and spaces before the dot
+    // (`nul .txt`) as device names.
+    private val DEVICE_NAMES = Regex("^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\\$|conout\\$|clock\\$) *(\\..*)?$", RegexOption.IGNORE_CASE)
 
     /** A bare file name safe to pre-fill: the name every app shows ([AttachmentRules.safeFileName]: the last part of a
      *  path, nothing that does not show as itself, bidirectional overrides included; round-10 review 1), then

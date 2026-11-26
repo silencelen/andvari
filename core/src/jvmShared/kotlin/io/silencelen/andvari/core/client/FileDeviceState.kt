@@ -15,7 +15,12 @@ class FileDeviceState(dir: File) : DeviceState by JsonDeviceState(JvmDeviceState
 private class JvmDeviceStateFile(private val dir: File) : DeviceStateFile {
     private val file get() = File(dir, JsonDeviceState.FILE_NAME)
 
-    override fun read(): String? = runCatching { file.readText() }.getOrNull()
+    /** Null only when there is no file. A file that is there and cannot be read throws, so nothing is written over it. */
+    override fun read(): String? {
+        val f = file
+        if (!f.exists()) return null
+        return f.readText()
+    }
 
     override fun replace(text: String) {
         dir.mkdirs()

@@ -1,11 +1,15 @@
 # andvari — self-host container image (design 2026-07-15 §8).
 #
 # One image = server shadowJar + built web assets + recovery-cli as a subcommand:
-#   docker run ... ghcr.io/silencelen/andvari:<ver>                    # runs the server
-#   docker run --rm --network none --log-driver none ghcr.io/silencelen/andvari:<ver> \
-#       recovery-cli keygen                                            # escrow ceremony
-#   (--log-driver none: keygen prints the org recovery seed, and docker copies an attached
-#   container's stdout to its log driver; deploy/bringup.sh runs it the same way)
+#   the server: deploy/docker-compose.yml runs ghcr.io/silencelen/andvari-server:<ver> on ./data
+#   docker run --rm --network none --log-driver none ghcr.io/silencelen/andvari-server:<ver> \
+#       recovery-cli keygen                                            # operator recovery key
+#   (--log-driver none: keygen prints the recovery seed, and docker copies an attached
+#   container's stdout to its log driver)
+#   docker run --rm --log-driver none -v "$PWD/data:/data" ghcr.io/silencelen/andvari-server:<ver> \
+#       setup --env-file /data/andvari.env --origin https://vault.example.org   # then: mv data/andvari.env .
+#   docker run --rm -v "$PWD/data:/data" -v "$PWD/andvari.env:/andvari.env:ro" ghcr.io/silencelen/andvari-server:<ver> \
+#       admin status --env-file /andvari.env                                # host commands
 #
 # Multi-arch (amd64/arm64) friendly: the two build stages are pinned to
 # $BUILDPLATFORM (jars and vite output are architecture-independent), so a
@@ -74,7 +78,7 @@ COPY spec/test-vectors/ spec/test-vectors/
 # fallback. A from-source build has the whole checkout on hand; this image copies only the
 # modules it needs, so these files must be named explicitly.
 COPY docs/self-hosting.md docs/self-hosting.md
-COPY deploy/docker-compose.yml deploy/docker-compose.caddy.yml deploy/andvari.env.template deploy/bringup.sh deploy/
+COPY deploy/docker-compose.yml deploy/docker-compose.caddy.yml deploy/andvari.env.template deploy/
 RUN sed -i -e '/":app-android"/d' -e '/":app-desktop"/d' \
            -e '/":tools:vector-gen"/d' -e '/":tools:backup-cli"/d' \
            -e '/":tools:update-signer"/d' settings.gradle.kts \
@@ -86,7 +90,7 @@ RUN sed -i -e '/":app-android"/d' -e '/":app-desktop"/d' \
 FROM eclipse-temurin:17-jre-jammy@sha256:475d8e96b4b2bfe08999e5e854755c773af1581acdf959a4545d88f0696a2339
 LABEL org.opencontainers.image.source="https://github.com/silencelen/andvari" \
       org.opencontainers.image.description="andvari — zero-knowledge household password manager (server + web UI + offline recovery-cli)" \
-      org.opencontainers.image.licenses="UNLICENSED"
+      org.opencontainers.image.licenses="AGPL-3.0-or-later AND GPL-3.0-or-later"
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -g 10001 andvari && useradd -u 10001 -g andvari -M -d /opt/andvari -s /usr/sbin/nologin andvari \

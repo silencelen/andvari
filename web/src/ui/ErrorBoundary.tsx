@@ -35,7 +35,7 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, { failed: 
             <h1>{RENDER_FAILED_HEADING}</h1>
           </div>
           <div className="msg err" role="alert" style={{ display: "block" }}>{RENDER_FAILED_MESSAGE}</div>
-          <button onClick={() => window.location.reload()}>Reload</button>
+          <button className="primary" onClick={() => window.location.reload()}>Reload</button>
         </div>
       </div>
     );

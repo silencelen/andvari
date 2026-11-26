@@ -1,0 +1,2141 @@
+{
+  "_about": [
+    "Encodings of design 2026-11-15-onboarding-trust \u00a72.2 and \u00a72.3 that every client and the server must apply the same way.",
+    "Hand-authored from the independent oracle in tools/vector-gen/oracle (Node WebCrypto and @noble; no andvari code). Regenerate with `npm run generate` there; `npm run check` fails on any difference.",
+    "emailNorm: `input` (the address as typed) -> expect.verdict ok with expect.emailNorm, or expect.verdict invalid_email with no emailNorm key (on the wire, 400 invalid_email). Steps in the order of spec 01 \u00a75.5 and design \u00a72.3: strip space, tab, CR and LF (and nothing else) from both ends; lowercase ASCII A-Z only; then refuse anything that, after the strip, is shorter than 3 or longer than 254 octets, holds a byte outside 0x21-0x7E, or is not one @ between two non-empty parts (VR-6); then the address must be local@domain, `local` 1 to 64 characters of a-z, 0-9 and !#$%&'*+/=?^_`{|}~- with single dots between non-empty parts (a dot-atom), and `domain` a host under the origin type's host grammar (two or more labels of 1-63 characters [a-z0-9]([a-z0-9-]*[a-z0-9])?, no trailing dot, at most 253 characters, a last label neither all digits nor 0x plus hex digits). Every refusal is the one verdict invalid_email; no row depends on which check refuses first.",
+    "platform: the closed enum of \u00a72.3; `valid` says whether `value` is a member, compared exactly.",
+    "powLeadingZeroBits: the count for a 32-byte digest, from the most significant bit of byte 0. powInput: the string that is hashed, SHA-256(\"andvari/v2|signup-pow|\" + emailNorm + \"|\" + utcDate + \"|\" + nonce), with the nonce in decimal without leading zeros.",
+    "name: `name` is the candidate value of the \u00a72.2 `name` type (unpadded base64url text); `textHex` is the decoded bytes where the text decodes. `valid` is the whole verdict of the type: canonical base64url, 1..64 bytes, valid UTF-8, none of the listed code points, no U+0020 at either end, no normalisation.",
+    "origin: `valid` says whether `origin` is in the \u00a72.2 grammar: labels of 1-63 characters, a host of at most 253, a last label that is neither all digits nor 0x plus hex digits, never the scheme's default port (443 for https, 80 for http), xn-- labels taken as plain labels (VR-5). Inside a statement a refused origin is non_canonical. The same strings are refused by OriginCanon, the Trust Gate and `andvari setup`. The extension grades these rows too (\u00a717).",
+    "Changed on 2026-11-15, fourth batch, with the dot-atom and domain rule of spec 01 \u00a75.5: emailNorm gained rows 36 onward (dot-atom local parts, domains under the origin host grammar, and the forms a mail library would rewrite to another mailbox: angle brackets, comments, quotes, display names, groups, two addresses). One existing expectation changed: row 5, input a@b, was ok and is now invalid_email (a one-label domain); its `why` says so. No other existing row changed. Core, the web twin, the CLI and the server grade every emailNorm row. Design \u00a717 names only the origin rows of this file for the extension; an extension twin that computes emailNorm itself grades every emailNorm row too."
+  ],
+  "emailNorm": [
+    {
+      "why": "already normal",
+      "input": "alice@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "alice@example.com"
+      }
+    },
+    {
+      "why": "ASCII A-Z are lowercased, in the local part too",
+      "input": "Alice@Example.COM",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "alice@example.com"
+      }
+    },
+    {
+      "why": "spaces stripped from both ends",
+      "input": "  alice@example.com  ",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "alice@example.com"
+      }
+    },
+    {
+      "why": "tab, CR and LF stripped from both ends",
+      "input": "\talice@example.com\r\n",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "alice@example.com"
+      }
+    },
+    {
+      "why": "a mix of the four white-space characters, then lowercasing",
+      "input": " \t\r\nAlice@Example.com\n\r\t ",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "alice@example.com"
+      }
+    },
+    {
+      "why": "a one-label domain: 3 octets, one @, two non-empty parts, but the domain must be two or more labels under the origin host grammar (spec 01 \u00a75.5; this row was ok before that rule)",
+      "input": "a@b",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "printable ASCII punctuation is left alone",
+      "input": "user+tag@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "user+tag@example.com"
+      }
+    },
+    {
+      "why": "the lowest and the highest allowed bytes, 0x21 and 0x7E",
+      "input": "a!~b@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "a!~b@example.com"
+      }
+    },
+    {
+      "why": "exactly 254 octets",
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccc",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccc"
+      }
+    },
+    {
+      "why": "254 octets once the white space at both ends is stripped: the length is taken after the strip",
+      "input": "  AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccc\r\n",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccc"
+      }
+    },
+    {
+      "why": "255 octets",
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.cccc",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "empty",
+      "input": "",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "only white space",
+      "input": "   ",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "no @",
+      "input": "alice",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "both parts empty",
+      "input": "@",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "empty local part",
+      "input": "@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "empty domain part",
+      "input": "alice@",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "two @",
+      "input": "alice@@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "two @",
+      "input": "a@b@c",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "a space inside the local part: after the strip every byte must be 0x21-0x7E (VR-6)",
+      "input": "alice smith@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "a space inside the domain part",
+      "input": "alice@exam ple.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "non-ASCII in the local part (U+00E4)",
+      "input": "\u00e4lice@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "non-ASCII in the domain: no IDN conversion is applied",
+      "input": "alice@ex\u00e4mple.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "KELVIN SIGN U+212A: refused, never case-folded to k",
+      "input": "alice@\u212aelvin.example",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "LATIN CAPITAL LETTER I WITH DOT ABOVE U+0130: refused, no locale lowercasing",
+      "input": "\u0130stanbul@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "FULLWIDTH COMMERCIAL AT U+FF20 is not an @",
+      "input": "alice\uff20example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "NUL inside",
+      "input": "ali\u0000ce@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "a tab inside is a control character (only the ends are stripped)",
+      "input": "ali\tce@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "a line feed inside",
+      "input": "alice@exam\nple.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "U+001F inside",
+      "input": "ali\u001fce@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "DEL U+007F is a control character",
+      "input": "ali\u007fce@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "a leading vertical tab is not one of the four stripped characters, and is a control character",
+      "input": "\u000balice@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "a trailing form feed is not stripped",
+      "input": "alice@example.com\f",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "a leading NO-BREAK SPACE is not ASCII white space",
+      "input": "\u00a0alice@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "a trailing IDEOGRAPHIC SPACE is not ASCII white space",
+      "input": "alice@example.com\u3000",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "a leading byte-order mark",
+      "input": "\ufeffalice@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a plain address",
+      "input": "user@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "user@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): white space at both ends stripped, then A-Z lowercased in both parts",
+      "input": "  User@Example.COM \t",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "user@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): one dot between two non-empty parts of the local part",
+      "input": "first.last@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "first.last@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a plus tag, and a domain of four labels",
+      "input": "a+tag@sub.example.co.uk",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "a+tag@sub.example.co.uk"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): an apostrophe is in the dot-atom set",
+      "input": "o'brien@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "o'brien@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): underscore and hyphen in the local part; a hyphen inside a domain label",
+      "input": "x_y-z@ex-ample.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "x_y-z@ex-ample.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): every punctuation character of the dot-atom set at once",
+      "input": "!#$%&'*+/=?^_`{|}~-@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "!#$%&'*+/=?^_`{|}~-@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a local part of 64 characters, the most allowed",
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the punctuation character ! (U+0021) alone as the local part",
+      "input": "!@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "!@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the punctuation character # (U+0023) alone as the local part",
+      "input": "#@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "#@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the punctuation character $ (U+0024) alone as the local part",
+      "input": "$@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "$@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the punctuation character % (U+0025) alone as the local part",
+      "input": "%@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "%@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the punctuation character & (U+0026) alone as the local part",
+      "input": "&@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "&@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the punctuation character ' (U+0027) alone as the local part",
+      "input": "'@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "'@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the punctuation character * (U+002A) alone as the local part",
+      "input": "*@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "*@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the punctuation character + (U+002B) alone as the local part",
+      "input": "+@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "+@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the punctuation character / (U+002F) alone as the local part",
+      "input": "/@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "/@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the punctuation character = (U+003D) alone as the local part",
+      "input": "=@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "=@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the punctuation character ? (U+003F) alone as the local part",
+      "input": "?@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "?@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the punctuation character ^ (U+005E) alone as the local part",
+      "input": "^@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "^@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the punctuation character _ (U+005F) alone as the local part",
+      "input": "_@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "_@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the punctuation character ` (U+0060) alone as the local part",
+      "input": "`@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "`@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the punctuation character { (U+007B) alone as the local part",
+      "input": "{@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "{@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the punctuation character | (U+007C) alone as the local part",
+      "input": "|@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "|@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the punctuation character } (U+007D) alone as the local part",
+      "input": "}@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "}@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the punctuation character ~ (U+007E) alone as the local part",
+      "input": "~@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "~@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the punctuation character - (U+002D) alone as the local part",
+      "input": "-@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "-@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a local part of digits only",
+      "input": "0123456789@example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "0123456789@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): upper case in a dotted local part and in the domain, lowercased first",
+      "input": "First.Last@Example.Com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "first.last@example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the shortest address now: 5 octets, a one-character local part at two one-character labels",
+      "input": "a@b.c",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "a@b.c"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a domain label of 63 characters, the most the host grammar allows",
+      "input": "user@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "user@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): an xn-- label is an ordinary label: taken as it is, never decoded",
+      "input": "user@xn--bcher-kva.example",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "user@xn--bcher-kva.example"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a label of digits is allowed anywhere but last",
+      "input": "user@123.example.com",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "user@123.example.com"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a last label with a digit that is not all digits",
+      "input": "user@example.c0m",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "user@example.c0m"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a hyphen inside a label",
+      "input": "user@a-b.example",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "user@a-b.example"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a domain of 252 characters behind a one-character local part: 254 octets in all, accepted",
+      "input": "a@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.cccc",
+      "expect": {
+        "verdict": "ok",
+        "emailNorm": "a@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.cccc"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a domain of 253 characters (the most the origin host grammar allows) behind a one-character local part is 255 octets: the 254-octet limit refuses it, so no address can carry a 253-character domain",
+      "input": "a@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccc",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a display name glued to an angle-bracketed address (no space, lower case, one @: only the dot-atom rule refuses it)",
+      "input": "x<user@example.com>",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): an address in angle brackets",
+      "input": "<user@example.com>",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a comment after the domain",
+      "input": "user@example.com(x)",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a comment before the local part",
+      "input": "(x)user@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a comment inside the local part",
+      "input": "user(x)@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a quoted local part",
+      "input": "\"user\"@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a quoted local part holding a dot-atom",
+      "input": "\"a.b\"@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a quote inside the local part",
+      "input": "a\"b@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a display-name form without a space",
+      "input": "alice<alice@example.com>",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a quoted display name",
+      "input": "\"alice\"<alice@example.com>",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a display name with a space (refused by the byte range already)",
+      "input": "Alice <alice@example.com>",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a group: a name, a colon, a member, a semicolon",
+      "input": "team:user@example.com;",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): an empty group (no @ at all)",
+      "input": "team:;",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): two addresses joined by a comma",
+      "input": "user@example.com,other@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): two addresses joined by a semicolon",
+      "input": "user@example.com;other@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a trailing dot in the local part",
+      "input": "user.@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): two dots in a row in the local part",
+      "input": "us..er@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a leading dot in the local part",
+      "input": ".user@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a local part that is a dot alone",
+      "input": ".@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a local part of 65 characters, one over the limit",
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a one-label domain",
+      "input": "user@example",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): localhost is one label: the origin type allows it only as plain http, never as an address domain",
+      "input": "user@localhost",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a domain label that starts with a hyphen",
+      "input": "user@-example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a domain label that ends with a hyphen",
+      "input": "user@example-.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a last label that ends with a hyphen",
+      "input": "user@example.com-",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): an empty label inside the domain",
+      "input": "user@example..com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): an empty first label",
+      "input": "user@.example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a trailing dot on the domain (the host grammar has no trailing dot)",
+      "input": "user@example.com.",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a domain label of 64 characters, one over the host grammar's 63",
+      "input": "user@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): an underscore in a domain label",
+      "input": "user@ex_ample.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a port after the domain",
+      "input": "user@example.com:443",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a last label of digits only (the host grammar reads it as an IPv4 address)",
+      "input": "user@example.123",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a dotted IPv4 address as the domain",
+      "input": "user@1.2.3.4",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the loopback address: the origin type allows it only as plain http, never as an address domain",
+      "input": "user@127.0.0.1",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a last label of 0x and hex digits",
+      "input": "user@example.0x1f",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a last label that is exactly 0x",
+      "input": "user@example.0x",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): an IPv4 address literal in brackets",
+      "input": "user@[192.168.0.1]",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): an IPv6 address literal",
+      "input": "user@[ipv6:2001:db8::1]",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a backslash in the local part",
+      "input": "a\\b@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the special ( (U+0028) inside the local part: not in the dot-atom set",
+      "input": "a(b@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the special ) (U+0029) inside the local part: not in the dot-atom set",
+      "input": "a)b@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the special , (U+002C) inside the local part: not in the dot-atom set",
+      "input": "a,b@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the special : (U+003A) inside the local part: not in the dot-atom set",
+      "input": "a:b@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the special ; (U+003B) inside the local part: not in the dot-atom set",
+      "input": "a;b@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the special < (U+003C) inside the local part: not in the dot-atom set",
+      "input": "a<b@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the special > (U+003E) inside the local part: not in the dot-atom set",
+      "input": "a>b@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the special [ (U+005B) inside the local part: not in the dot-atom set",
+      "input": "a[b@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): the special ] (U+005D) inside the local part: not in the dot-atom set",
+      "input": "a]b@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a non-ASCII letter in the domain",
+      "input": "user@exam\u00e4ple.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): an upper-case non-ASCII letter (U+00C4) in the local part: refused, never lowercased",
+      "input": "us\u00c4er@example.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a trailing NO-BREAK SPACE is not stripped",
+      "input": "user@example.com\u00a0",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): CR LF then a NO-BREAK SPACE at the end: the strip stops at the no-break space, which stays",
+      "input": "user@example.com\r\n\u00a0",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a space inside the domain",
+      "input": "user@exa mple.com",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    },
+    {
+      "why": "dot-atom rule (spec 01 \u00a75.5): a trailing vertical tab: ASCII white space in some libraries, but not one of the four stripped",
+      "input": "user@example.com\u000b",
+      "expect": {
+        "verdict": "invalid_email"
+      }
+    }
+  ],
+  "platform": [
+    {
+      "value": "android",
+      "valid": true
+    },
+    {
+      "value": "ios",
+      "valid": true
+    },
+    {
+      "value": "windows",
+      "valid": true
+    },
+    {
+      "value": "macos",
+      "valid": true
+    },
+    {
+      "value": "linux",
+      "valid": true
+    },
+    {
+      "value": "web",
+      "valid": true
+    },
+    {
+      "value": "cli",
+      "valid": true
+    },
+    {
+      "value": "extension",
+      "valid": true
+    },
+    {
+      "value": "Android",
+      "valid": false
+    },
+    {
+      "value": "iOS",
+      "valid": false
+    },
+    {
+      "value": "IOS",
+      "valid": false
+    },
+    {
+      "value": "Windows",
+      "valid": false
+    },
+    {
+      "value": "mac",
+      "valid": false
+    },
+    {
+      "value": "osx",
+      "valid": false
+    },
+    {
+      "value": "win",
+      "valid": false
+    },
+    {
+      "value": "desktop",
+      "valid": false
+    },
+    {
+      "value": "chrome",
+      "valid": false
+    },
+    {
+      "value": "safari",
+      "valid": false
+    },
+    {
+      "value": "ipados",
+      "valid": false
+    },
+    {
+      "value": "",
+      "valid": false
+    },
+    {
+      "value": "web ",
+      "valid": false
+    },
+    {
+      "value": " web",
+      "valid": false
+    },
+    {
+      "value": "cli\n",
+      "valid": false
+    }
+  ],
+  "powLeadingZeroBits": [
+    {
+      "why": "top bit of byte 0 set",
+      "digestHex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "leadingZeroBits": 0
+    },
+    {
+      "why": "only the top bit of byte 0 set in that byte",
+      "digestHex": "80ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "leadingZeroBits": 0
+    },
+    {
+      "why": "one zero bit",
+      "digestHex": "7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "leadingZeroBits": 1
+    },
+    {
+      "why": "one zero bit",
+      "digestHex": "40ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "leadingZeroBits": 1
+    },
+    {
+      "why": "two zero bits",
+      "digestHex": "3fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "leadingZeroBits": 2
+    },
+    {
+      "why": "seven zero bits, then the lowest bit of byte 0",
+      "digestHex": "01ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "leadingZeroBits": 7
+    },
+    {
+      "why": "byte 0 is zero, the top bit of byte 1 is set",
+      "digestHex": "0080ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "leadingZeroBits": 8
+    },
+    {
+      "why": "byte 0 is zero",
+      "digestHex": "00ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "leadingZeroBits": 8
+    },
+    {
+      "why": "nine",
+      "digestHex": "007fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "leadingZeroBits": 9
+    },
+    {
+      "why": "fifteen",
+      "digestHex": "0001ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "leadingZeroBits": 15
+    },
+    {
+      "why": "two zero bytes",
+      "digestHex": "000080ffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "leadingZeroBits": 16
+    },
+    {
+      "why": "two zero bytes and a zero high nibble",
+      "digestHex": "00000fffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "leadingZeroBits": 20
+    },
+    {
+      "why": "nineteen",
+      "digestHex": "000010ffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "leadingZeroBits": 19
+    },
+    {
+      "why": "twenty",
+      "digestHex": "000008ffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "leadingZeroBits": 20
+    },
+    {
+      "why": "twenty-one",
+      "digestHex": "000007ffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "leadingZeroBits": 21
+    },
+    {
+      "why": "a least-significant-bit-first count of byte 0 would say 0; a little-endian word count would say more",
+      "digestHex": "0100000000000000000000000000000000000000000000000000000000000000",
+      "leadingZeroBits": 7
+    },
+    {
+      "why": "bits are counted from the most significant end of each byte: f0 has none, not four",
+      "digestHex": "0000f00000000000000000000000000000000000000000000000000000000000",
+      "leadingZeroBits": 16
+    },
+    {
+      "why": "nine zero bytes, then 0x01",
+      "digestHex": "0000000000000000000100000000000000000000000000000000000000000000",
+      "leadingZeroBits": 79
+    },
+    {
+      "why": "an all-zero digest",
+      "digestHex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "leadingZeroBits": 256
+    }
+  ],
+  "powInput": [
+    {
+      "why": "nonce 0 is written as the single digit 0",
+      "emailNorm": "alice@example.com",
+      "utcDate": "2026-11-15",
+      "nonce": 0,
+      "inputUtf8": "andvari/v2|signup-pow|alice@example.com|2026-11-15|0",
+      "digestHex": "1e043023c0f0d3366711d85eacac636b75e2b2202615c71ad8ffcdab96f335ef",
+      "leadingZeroBits": 3
+    },
+    {
+      "why": "the smallest nonce reaching 8 bits",
+      "emailNorm": "alice@example.com",
+      "utcDate": "2026-11-15",
+      "nonce": 19,
+      "inputUtf8": "andvari/v2|signup-pow|alice@example.com|2026-11-15|19",
+      "digestHex": "00110cc9e57f558b25db2c04c5d86dea8e355b59772f873ba00b058f65a6a982",
+      "leadingZeroBits": 11
+    },
+    {
+      "why": "the smallest nonce reaching 20 bits",
+      "emailNorm": "alice@example.com",
+      "utcDate": "2026-11-15",
+      "nonce": 506139,
+      "inputUtf8": "andvari/v2|signup-pow|alice@example.com|2026-11-15|506139",
+      "digestHex": "00000dca8e5dc9a475b55802b4b31ad67aa3f9b37f11e5fc57100e3a151214b7",
+      "leadingZeroBits": 20
+    },
+    {
+      "why": "the largest nonce, 2^53 - 1, in plain decimal",
+      "emailNorm": "alice@example.com",
+      "utcDate": "2026-11-15",
+      "nonce": 9007199254740991,
+      "inputUtf8": "andvari/v2|signup-pow|alice@example.com|2026-11-15|9007199254740991",
+      "digestHex": "86f5a00fc94e275b9d2522da173391085456e67ef39a92f63a7e7c427d0e0939",
+      "leadingZeroBits": 0
+    },
+    {
+      "why": "the same nonce on another date gives another digest",
+      "emailNorm": "alice@example.com",
+      "utcDate": "2026-11-14",
+      "nonce": 19,
+      "inputUtf8": "andvari/v2|signup-pow|alice@example.com|2026-11-14|19",
+      "digestHex": "4575df2b371eeb1081b6240344b462daeb6bb05e4db081ec34030f6a740d349a",
+      "leadingZeroBits": 1
+    }
+  ],
+  "name": [
+    {
+      "why": "plain ASCII",
+      "name": "QWxpY2U",
+      "textHex": "416c696365",
+      "valid": true
+    },
+    {
+      "why": "one byte, the minimum",
+      "name": "QQ",
+      "textHex": "41",
+      "valid": true
+    },
+    {
+      "why": "64 bytes, the maximum",
+      "name": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQ",
+      "textHex": "61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+      "valid": true
+    },
+    {
+      "why": "a space inside",
+      "name": "QWxpY2UgQg",
+      "textHex": "416c6963652042",
+      "valid": true
+    },
+    {
+      "why": "a two-byte character",
+      "name": "Wm_Dqw",
+      "textHex": "5a6fc3ab",
+      "valid": true
+    },
+    {
+      "why": "three-byte characters",
+      "name": "5p2O5bCP6b6N",
+      "textHex": "e69d8ee5b08fe9be8d",
+      "valid": true
+    },
+    {
+      "why": "a four-byte character",
+      "name": "8J-YgA",
+      "textHex": "f09f9880",
+      "valid": true
+    },
+    {
+      "why": "sixteen four-byte characters: exactly 64 bytes",
+      "name": "8J-YgPCfmIDwn5iA8J-YgPCfmIDwn5iA8J-YgPCfmIDwn5iA8J-YgPCfmIDwn5iA8J-YgPCfmIDwn5iA8J-YgA",
+      "textHex": "f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880",
+      "valid": true
+    },
+    {
+      "why": "e-acute precomposed (U+00E9)",
+      "name": "w6k",
+      "textHex": "c3a9",
+      "valid": true
+    },
+    {
+      "why": "e + COMBINING ACUTE ACCENT: kept as written, no normalisation, so a different name from the row above",
+      "name": "ZcyB",
+      "textHex": "65cc81",
+      "valid": true
+    },
+    {
+      "why": "a leading NO-BREAK SPACE U+00A0 is not U+0020 and is not on the list",
+      "name": "wqBBbGljZQ",
+      "textHex": "c2a0416c696365",
+      "valid": true
+    },
+    {
+      "why": "U+007E, the last code point before the U+007F-U+009F range",
+      "name": "fg",
+      "textHex": "7e",
+      "valid": true
+    },
+    {
+      "why": "U+00A0 inside: the first code point after U+009F",
+      "name": "QcKgQg",
+      "textHex": "41c2a042",
+      "valid": true
+    },
+    {
+      "why": "U+00AC inside: the code point before U+00AD",
+      "name": "QcKsQg",
+      "textHex": "41c2ac42",
+      "valid": true
+    },
+    {
+      "why": "U+00AE inside: the code point after U+00AD",
+      "name": "QcKuQg",
+      "textHex": "41c2ae42",
+      "valid": true
+    },
+    {
+      "why": "U+061B inside: the code point before U+061C",
+      "name": "QdibQg",
+      "textHex": "41d89b42",
+      "valid": true
+    },
+    {
+      "why": "U+061D inside: the code point after U+061C",
+      "name": "QdidQg",
+      "textHex": "41d89d42",
+      "valid": true
+    },
+    {
+      "why": "U+180D inside: the code point before U+180E",
+      "name": "QeGgjUI",
+      "textHex": "41e1a08d42",
+      "valid": true
+    },
+    {
+      "why": "U+180F inside: the code point after U+180E",
+      "name": "QeGgj0I",
+      "textHex": "41e1a08f42",
+      "valid": true
+    },
+    {
+      "why": "U+200A inside: the code point before U+200B",
+      "name": "QeKAikI",
+      "textHex": "41e2808a42",
+      "valid": true
+    },
+    {
+      "why": "U+2010 inside: the code point after U+200F",
+      "name": "QeKAkEI",
+      "textHex": "41e2809042",
+      "valid": true
+    },
+    {
+      "why": "U+2027 inside: the code point before U+2028",
+      "name": "QeKAp0I",
+      "textHex": "41e280a742",
+      "valid": true
+    },
+    {
+      "why": "U+202F inside: the code point after U+202E",
+      "name": "QeKAr0I",
+      "textHex": "41e280af42",
+      "valid": true
+    },
+    {
+      "why": "U+205F inside: the code point before U+2060",
+      "name": "QeKBn0I",
+      "textHex": "41e2819f42",
+      "valid": true
+    },
+    {
+      "why": "U+2065 inside: the gap between U+2064 and U+2066: not on the list",
+      "name": "QeKBpUI",
+      "textHex": "41e281a542",
+      "valid": true
+    },
+    {
+      "why": "U+2070 inside: the code point after U+206F",
+      "name": "QeKBsEI",
+      "textHex": "41e281b042",
+      "valid": true
+    },
+    {
+      "why": "U+FEFC inside: just below U+FEFF",
+      "name": "Qe-7vEI",
+      "textHex": "41efbbbc42",
+      "valid": true
+    },
+    {
+      "why": "U+FF01 inside: just above U+FEFF",
+      "name": "Qe-8gUI",
+      "textHex": "41efbc8142",
+      "valid": true
+    },
+    {
+      "why": "U+FFFC inside: the code point after U+FFFB",
+      "name": "Qe-_vEI",
+      "textHex": "41efbfbc42",
+      "valid": true
+    },
+    {
+      "why": "U+FFFD inside: REPLACEMENT CHARACTER, genuinely present in the text: allowed",
+      "name": "Qe-_vUI",
+      "textHex": "41efbfbd42",
+      "valid": true
+    },
+    {
+      "why": "U+0000 inside: first of U+0000-U+001F",
+      "name": "QQBC",
+      "textHex": "410042",
+      "valid": false
+    },
+    {
+      "why": "U+0009 inside: tab",
+      "name": "QQlC",
+      "textHex": "410942",
+      "valid": false
+    },
+    {
+      "why": "U+000A inside: line feed",
+      "name": "QQpC",
+      "textHex": "410a42",
+      "valid": false
+    },
+    {
+      "why": "U+001F inside: last of U+0000-U+001F",
+      "name": "QR9C",
+      "textHex": "411f42",
+      "valid": false
+    },
+    {
+      "why": "U+007F inside: first of U+007F-U+009F",
+      "name": "QX9C",
+      "textHex": "417f42",
+      "valid": false
+    },
+    {
+      "why": "U+0080 inside: inside U+007F-U+009F",
+      "name": "QcKAQg",
+      "textHex": "41c28042",
+      "valid": false
+    },
+    {
+      "why": "U+009F inside: last of U+007F-U+009F",
+      "name": "QcKfQg",
+      "textHex": "41c29f42",
+      "valid": false
+    },
+    {
+      "why": "U+00AD inside: SOFT HYPHEN",
+      "name": "QcKtQg",
+      "textHex": "41c2ad42",
+      "valid": false
+    },
+    {
+      "why": "U+061C inside: ARABIC LETTER MARK",
+      "name": "QdicQg",
+      "textHex": "41d89c42",
+      "valid": false
+    },
+    {
+      "why": "U+180E inside: MONGOLIAN VOWEL SEPARATOR",
+      "name": "QeGgjkI",
+      "textHex": "41e1a08e42",
+      "valid": false
+    },
+    {
+      "why": "U+200B inside: first of U+200B-U+200F (ZERO WIDTH SPACE)",
+      "name": "QeKAi0I",
+      "textHex": "41e2808b42",
+      "valid": false
+    },
+    {
+      "why": "U+200D inside: inside U+200B-U+200F (ZERO WIDTH JOINER)",
+      "name": "QeKAjUI",
+      "textHex": "41e2808d42",
+      "valid": false
+    },
+    {
+      "why": "U+200F inside: last of U+200B-U+200F",
+      "name": "QeKAj0I",
+      "textHex": "41e2808f42",
+      "valid": false
+    },
+    {
+      "why": "U+2028 inside: first of U+2028-U+202E (LINE SEPARATOR)",
+      "name": "QeKAqEI",
+      "textHex": "41e280a842",
+      "valid": false
+    },
+    {
+      "why": "U+202A inside: inside U+2028-U+202E",
+      "name": "QeKAqkI",
+      "textHex": "41e280aa42",
+      "valid": false
+    },
+    {
+      "why": "U+202E inside: last of U+2028-U+202E (RIGHT-TO-LEFT OVERRIDE)",
+      "name": "QeKArkI",
+      "textHex": "41e280ae42",
+      "valid": false
+    },
+    {
+      "why": "U+2060 inside: first of U+2060-U+2064 (WORD JOINER)",
+      "name": "QeKBoEI",
+      "textHex": "41e281a042",
+      "valid": false
+    },
+    {
+      "why": "U+2064 inside: last of U+2060-U+2064",
+      "name": "QeKBpEI",
+      "textHex": "41e281a442",
+      "valid": false
+    },
+    {
+      "why": "U+2066 inside: first of U+2066-U+206F",
+      "name": "QeKBpkI",
+      "textHex": "41e281a642",
+      "valid": false
+    },
+    {
+      "why": "U+2069 inside: inside U+2066-U+206F",
+      "name": "QeKBqUI",
+      "textHex": "41e281a942",
+      "valid": false
+    },
+    {
+      "why": "U+206F inside: last of U+2066-U+206F",
+      "name": "QeKBr0I",
+      "textHex": "41e281af42",
+      "valid": false
+    },
+    {
+      "why": "U+FEFF inside: ZERO WIDTH NO-BREAK SPACE (byte-order mark)",
+      "name": "Qe-7v0I",
+      "textHex": "41efbbbf42",
+      "valid": false
+    },
+    {
+      "why": "U+FFF9 inside: first of U+FFF9-U+FFFB",
+      "name": "Qe-_uUI",
+      "textHex": "41efbfb942",
+      "valid": false
+    },
+    {
+      "why": "U+FFFA inside: inside U+FFF9-U+FFFB",
+      "name": "Qe-_ukI",
+      "textHex": "41efbfba42",
+      "valid": false
+    },
+    {
+      "why": "U+FFFB inside: last of U+FFF9-U+FFFB",
+      "name": "Qe-_u0I",
+      "textHex": "41efbfbb42",
+      "valid": false
+    },
+    {
+      "why": "an emoji sequence joined with ZERO WIDTH JOINER: refused, U+200D is on the list",
+      "name": "8J-RqOKAjfCfkanigI3wn5Gn",
+      "textHex": "f09f91a8e2808df09f91a9e2808df09f91a7",
+      "valid": false
+    },
+    {
+      "why": "a leading byte-order mark is a listed code point, not something to strip",
+      "name": "77u_QWxpY2U",
+      "textHex": "efbbbf416c696365",
+      "valid": false
+    },
+    {
+      "why": "a leading U+0020",
+      "name": "IEFsaWNl",
+      "textHex": "20416c696365",
+      "valid": false
+    },
+    {
+      "why": "a trailing U+0020",
+      "name": "QWxpY2Ug",
+      "textHex": "416c69636520",
+      "valid": false
+    },
+    {
+      "why": "a single U+0020 is both leading and trailing",
+      "name": "IA",
+      "textHex": "20",
+      "valid": false
+    },
+    {
+      "why": "empty: decoded length 0",
+      "name": "",
+      "textHex": "",
+      "valid": false
+    },
+    {
+      "why": "65 bytes",
+      "name": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE",
+      "textHex": "6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161",
+      "valid": false
+    },
+    {
+      "why": "65 bytes: sixteen four-byte characters and one more byte",
+      "name": "8J-YgPCfmIDwn5iA8J-YgPCfmIDwn5iA8J-YgPCfmIDwn5iA8J-YgPCfmIDwn5iA8J-YgPCfmIDwn5iA8J-YgGE",
+      "textHex": "f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f9880f09f988061",
+      "valid": false
+    },
+    {
+      "why": "not UTF-8: an overlong encoding of U+0000",
+      "name": "wIA",
+      "textHex": "c080",
+      "valid": false
+    },
+    {
+      "why": "not UTF-8: a three-byte overlong",
+      "name": "4ICA",
+      "textHex": "e08080",
+      "valid": false
+    },
+    {
+      "why": "not UTF-8: a surrogate (U+D800) encoded directly",
+      "name": "7aCA",
+      "textHex": "eda080",
+      "valid": false
+    },
+    {
+      "why": "not UTF-8: above U+10FFFF",
+      "name": "9JCAgA",
+      "textHex": "f4908080",
+      "valid": false
+    },
+    {
+      "why": "not UTF-8: a lone continuation byte",
+      "name": "gA",
+      "textHex": "80",
+      "valid": false
+    },
+    {
+      "why": "not UTF-8: a truncated two-byte sequence",
+      "name": "QcM",
+      "textHex": "41c3",
+      "valid": false
+    },
+    {
+      "why": "not UTF-8: the byte 0xff",
+      "name": "Qf9C",
+      "textHex": "41ff42",
+      "valid": false
+    },
+    {
+      "why": "padded base64url",
+      "name": "QWxpY2U=",
+      "valid": false
+    },
+    {
+      "why": "padded base64url",
+      "name": "QQ==",
+      "valid": false
+    },
+    {
+      "why": "non-canonical: the last character carries stray bits (it decodes to \"A\", which encodes as \"QQ\")",
+      "name": "QR",
+      "valid": false
+    },
+    {
+      "why": "the standard alphabet: \"+\" where base64url has \"-\" (\"~~~\" is \"fn5-\")",
+      "name": "fn5+",
+      "valid": false
+    },
+    {
+      "why": "the standard alphabet: \"/\"",
+      "name": "fn5/",
+      "valid": false
+    },
+    {
+      "why": "a space inside the base64url text",
+      "name": "QWxp Y2U",
+      "valid": false
+    },
+    {
+      "why": "an impossible length (5 characters)",
+      "name": "QWxpY",
+      "valid": false
+    },
+    {
+      "why": "the base64url text itself may contain \"-\" (\"fn5-\")",
+      "name": "fn5-",
+      "textHex": "7e7e7e",
+      "valid": true
+    }
+  ],
+  "origin": [
+    {
+      "why": "https with a two-label domain name",
+      "origin": "https://example.com",
+      "valid": true
+    },
+    {
+      "why": "the public instance",
+      "origin": "https://vault.andvaripass.com",
+      "valid": true
+    },
+    {
+      "why": "two one-character labels",
+      "origin": "https://a.b",
+      "valid": true
+    },
+    {
+      "why": "a hyphen inside a label",
+      "origin": "https://my-server.example.org",
+      "valid": true
+    },
+    {
+      "why": "a label may start with a digit",
+      "origin": "https://1example.com",
+      "valid": true
+    },
+    {
+      "why": "an all-digit label in a name that is not an IP literal",
+      "origin": "https://123.example.com",
+      "valid": true
+    },
+    {
+      "why": "many labels",
+      "origin": "https://sub.sub2.sub3.example.co.uk",
+      "valid": true
+    },
+    {
+      "why": "an internationalised name in A-label form",
+      "origin": "https://xn--bcher-kva.example",
+      "valid": true
+    },
+    {
+      "why": "a port",
+      "origin": "https://example.com:8443",
+      "valid": true
+    },
+    {
+      "why": "the lowest port",
+      "origin": "https://example.com:1",
+      "valid": true
+    },
+    {
+      "why": "the highest port",
+      "origin": "https://example.com:65535",
+      "valid": true
+    },
+    {
+      "why": "port 80 is not the default port of https",
+      "origin": "https://example.com:80",
+      "valid": true
+    },
+    {
+      "why": "a port that starts with 443",
+      "origin": "https://example.com:4430",
+      "valid": true
+    },
+    {
+      "why": "a port that ends with 443",
+      "origin": "https://example.com:10443",
+      "valid": true
+    },
+    {
+      "why": "a label of 63 characters, the longest allowed",
+      "origin": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example",
+      "valid": true
+    },
+    {
+      "why": "a host of 253 characters, the longest allowed",
+      "origin": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "valid": true
+    },
+    {
+      "why": "an xn-- label is an ordinary label: it is never decoded or checked as punycode",
+      "origin": "https://xn--a.example",
+      "valid": true
+    },
+    {
+      "why": "another xn-- label no punycode decoder would accept",
+      "origin": "https://xn--zzzzzzzzzz.example",
+      "valid": true
+    },
+    {
+      "why": "hyphens in the third and fourth position of a label that is not xn--",
+      "origin": "https://ab--cd.example",
+      "valid": true
+    },
+    {
+      "why": "a last label that starts with a digit but is not all digits",
+      "origin": "https://example.1a",
+      "valid": true
+    },
+    {
+      "why": "a last label that starts with 0x but is not hex digits after it",
+      "origin": "https://example.0xzz",
+      "valid": true
+    },
+    {
+      "why": "development: plain http to localhost",
+      "origin": "http://localhost",
+      "valid": true
+    },
+    {
+      "why": "443 is not the default port of http, so it is allowed there",
+      "origin": "http://localhost:443",
+      "valid": true
+    },
+    {
+      "why": "443 after http://127.0.0.1",
+      "origin": "http://127.0.0.1:443",
+      "valid": true
+    },
+    {
+      "why": "development: localhost with a port",
+      "origin": "http://localhost:8080",
+      "valid": true
+    },
+    {
+      "why": "development: plain http to 127.0.0.1",
+      "origin": "http://127.0.0.1",
+      "valid": true
+    },
+    {
+      "why": "development: 127.0.0.1 with a port",
+      "origin": "http://127.0.0.1:8080",
+      "valid": true
+    },
+    {
+      "why": "empty",
+      "origin": "",
+      "valid": false
+    },
+    {
+      "why": "no host",
+      "origin": "https://",
+      "valid": false
+    },
+    {
+      "why": "no host before the port",
+      "origin": "https://:8443",
+      "valid": false
+    },
+    {
+      "why": "no scheme",
+      "origin": "example.com",
+      "valid": false
+    },
+    {
+      "why": "no scheme",
+      "origin": "//example.com",
+      "valid": false
+    },
+    {
+      "why": "one slash",
+      "origin": "https:/example.com",
+      "valid": false
+    },
+    {
+      "why": "no slashes",
+      "origin": "https:example.com",
+      "valid": false
+    },
+    {
+      "why": "another scheme",
+      "origin": "ftp://example.com",
+      "valid": false
+    },
+    {
+      "why": "another scheme",
+      "origin": "wss://example.com",
+      "valid": false
+    },
+    {
+      "why": "uppercase scheme",
+      "origin": "HTTPS://example.com",
+      "valid": false
+    },
+    {
+      "why": "uppercase in the scheme",
+      "origin": "Https://example.com",
+      "valid": false
+    },
+    {
+      "why": "uppercase in the host",
+      "origin": "https://Example.com",
+      "valid": false
+    },
+    {
+      "why": "uppercase host",
+      "origin": "https://EXAMPLE.COM",
+      "valid": false
+    },
+    {
+      "why": "a single-label host under https",
+      "origin": "https://localhost",
+      "valid": false
+    },
+    {
+      "why": "a single-label host",
+      "origin": "https://intranet",
+      "valid": false
+    },
+    {
+      "why": "a trailing dot",
+      "origin": "https://example.com.",
+      "valid": false
+    },
+    {
+      "why": "an empty label",
+      "origin": "https://example..com",
+      "valid": false
+    },
+    {
+      "why": "a leading dot",
+      "origin": "https://.example.com",
+      "valid": false
+    },
+    {
+      "why": "a label starting with a hyphen",
+      "origin": "https://-example.com",
+      "valid": false
+    },
+    {
+      "why": "a label ending with a hyphen",
+      "origin": "https://example-.com",
+      "valid": false
+    },
+    {
+      "why": "an underscore",
+      "origin": "https://exa_mple.com",
+      "valid": false
+    },
+    {
+      "why": "a space inside",
+      "origin": "https://exa mple.com",
+      "valid": false
+    },
+    {
+      "why": "a wildcard",
+      "origin": "https://*.example.com",
+      "valid": false
+    },
+    {
+      "why": "an internationalised name in U-label form (U+00FC)",
+      "origin": "https://b\u00fccher.example",
+      "valid": false
+    },
+    {
+      "why": "a label of 64 characters",
+      "origin": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example",
+      "valid": false
+    },
+    {
+      "why": "a host of 254 characters, every label within 63",
+      "origin": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "valid": false
+    },
+    {
+      "why": "the last label is all digits: URL parsers read such a host as an IPv4 address",
+      "origin": "https://1.2.3",
+      "valid": false
+    },
+    {
+      "why": "the last label is all digits, though no octet range fits",
+      "origin": "https://999.1.1.1",
+      "valid": false
+    },
+    {
+      "why": "a name whose last label is all digits",
+      "origin": "https://example.123",
+      "valid": false
+    },
+    {
+      "why": "the last label is 0x followed only by hex digits",
+      "origin": "https://example.0x1f",
+      "valid": false
+    },
+    {
+      "why": "the last label is exactly 0x, with no hex digit after it: URL parsers read it as 0",
+      "origin": "https://example.0x",
+      "valid": false
+    },
+    {
+      "why": "a hexadecimal first part and an all-digit last label",
+      "origin": "https://0x7f.0.0.1",
+      "valid": false
+    },
+    {
+      "why": "an IPv4 literal",
+      "origin": "https://192.168.1.10",
+      "valid": false
+    },
+    {
+      "why": "an IPv4 literal under https",
+      "origin": "https://127.0.0.1",
+      "valid": false
+    },
+    {
+      "why": "an IPv4 literal with a port",
+      "origin": "https://10.0.0.1:8443",
+      "valid": false
+    },
+    {
+      "why": "an IPv6 literal",
+      "origin": "https://[::1]",
+      "valid": false
+    },
+    {
+      "why": "an IPv6 literal with a port",
+      "origin": "https://[2001:db8::1]:8443",
+      "valid": false
+    },
+    {
+      "why": "port 443 is the default port of https and is never written",
+      "origin": "https://example.com:443",
+      "valid": false
+    },
+    {
+      "why": "port 0",
+      "origin": "https://example.com:0",
+      "valid": false
+    },
+    {
+      "why": "a port above 65535",
+      "origin": "https://example.com:65536",
+      "valid": false
+    },
+    {
+      "why": "a port above 65535",
+      "origin": "https://example.com:99999",
+      "valid": false
+    },
+    {
+      "why": "a port with a leading zero",
+      "origin": "https://example.com:08443",
+      "valid": false
+    },
+    {
+      "why": "an empty port",
+      "origin": "https://example.com:",
+      "valid": false
+    },
+    {
+      "why": "a port that is not a number",
+      "origin": "https://example.com:abc",
+      "valid": false
+    },
+    {
+      "why": "a signed port",
+      "origin": "https://example.com:+80",
+      "valid": false
+    },
+    {
+      "why": "two ports",
+      "origin": "https://example.com:8443:1",
+      "valid": false
+    },
+    {
+      "why": "a path (the bare slash)",
+      "origin": "https://example.com/",
+      "valid": false
+    },
+    {
+      "why": "a path",
+      "origin": "https://example.com/vault",
+      "valid": false
+    },
+    {
+      "why": "a path after the port",
+      "origin": "https://example.com:8443/",
+      "valid": false
+    },
+    {
+      "why": "a query",
+      "origin": "https://example.com?x=1",
+      "valid": false
+    },
+    {
+      "why": "a fragment",
+      "origin": "https://example.com#x",
+      "valid": false
+    },
+    {
+      "why": "a fragment after the port",
+      "origin": "https://example.com:8443#x",
+      "valid": false
+    },
+    {
+      "why": "userinfo",
+      "origin": "https://user@example.com",
+      "valid": false
+    },
+    {
+      "why": "userinfo with a password",
+      "origin": "https://user:pw@example.com",
+      "valid": false
+    },
+    {
+      "why": "a leading space",
+      "origin": " https://example.com",
+      "valid": false
+    },
+    {
+      "why": "a trailing space",
+      "origin": "https://example.com ",
+      "valid": false
+    },
+    {
+      "why": "a trailing line feed",
+      "origin": "https://example.com\n",
+      "valid": false
+    },
+    {
+      "why": "plain http to a domain name",
+      "origin": "http://example.com",
+      "valid": false
+    },
+    {
+      "why": "plain http to a LAN address",
+      "origin": "http://192.168.1.10",
+      "valid": false
+    },
+    {
+      "why": "plain http to another loopback address",
+      "origin": "http://127.0.0.2",
+      "valid": false
+    },
+    {
+      "why": "plain http to 0.0.0.0",
+      "origin": "http://0.0.0.0",
+      "valid": false
+    },
+    {
+      "why": "plain http to the IPv6 loopback",
+      "origin": "http://[::1]",
+      "valid": false
+    },
+    {
+      "why": "plain http to another name",
+      "origin": "http://localhost.localdomain",
+      "valid": false
+    },
+    {
+      "why": "localhost with a trailing dot",
+      "origin": "http://localhost.",
+      "valid": false
+    },
+    {
+      "why": "uppercase localhost",
+      "origin": "http://LOCALHOST",
+      "valid": false
+    },
+    {
+      "why": "localhost with a path",
+      "origin": "http://localhost/",
+      "valid": false
+    },
+    {
+      "why": "port 80 is the default port of http and is never written (VR-5)",
+      "origin": "http://localhost:80",
+      "valid": false
+    },
+    {
+      "why": "port 80 after http://127.0.0.1",
+      "origin": "http://127.0.0.1:80",
+      "valid": false
+    },
+    {
+      "why": "localhost with port 0",
+      "origin": "http://localhost:0",
+      "valid": false
+    },
+    {
+      "why": "localhost with a leading zero in the port",
+      "origin": "http://localhost:08080",
+      "valid": false
+    },
+    {
+      "why": "127.0.0.1 with a port above 65535",
+      "origin": "http://127.0.0.1:65536",
+      "valid": false
+    }
+  ]
+}

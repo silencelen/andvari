@@ -51,7 +51,6 @@ const grant = (vaultId: string, over: Partial<WireGrant> = {}): WireGrant => ({
   role: "owner",
   wrappedVk: "wv",
   rev: 3,
-  sealedVk: null,
   ...over,
 });
 
@@ -175,10 +174,10 @@ describe("idbcache: VaultCache contract (core VaultCacheContractTest twin)", () 
     expect((await c.envelopes()).find((x) => x.itemId === "t")).toEqual(tombstone);
   });
 
-  it("grants and vaults upsert + list (incl. sealedVk and lifecycle wire fields verbatim)", async () => {
+  it("grants and vaults upsert + list (incl. signedGrant and lifecycle wire fields verbatim)", async () => {
     const c = await open();
     await c.upsertGrant(grant("v1"));
-    await c.upsertGrant(grant("v2", { role: "writer", wrappedVk: "", rev: 4, sealedVk: "sealed" }));
+    await c.upsertGrant(grant("v2", { role: "writer", wrappedVk: "", rev: 4, signedGrant: "signed" }));
     const fullVault: WireVault = {
       ...vaultRow("v1"),
       pendingTransfer: { toUserId: "u2", offerId: "o1", proof: "pf", expiresAt: 99, seq: 2 },
@@ -188,7 +187,7 @@ describe("idbcache: VaultCache contract (core VaultCacheContractTest twin)", () 
     };
     await c.upsertVault(fullVault);
     expect((await c.grants()).length).toBe(2);
-    expect((await c.grants()).find((x) => x.vaultId === "v2")!.sealedVk).toBe("sealed");
+    expect((await c.grants()).find((x) => x.vaultId === "v2")!.signedGrant).toBe("signed");
     expect((await c.vaults()).find((x) => x.vaultId === "v1")).toEqual(fullVault); // WireVault verbatim (§B.2)
   });
 
@@ -803,5 +802,30 @@ describe("idbcache: NullCache (opt-out / unsupported / demoted path)", () => {
     expect(await n.cursor()).toBe(0);
     await n.wipe();
     n.close();
+  });
+});
+
+describe("the wraps kept pending beside the copy keep the day each was first kept (spec 01 §7)", () => {
+  const P: KdfParams = { v: 1, alg: "argon2id13", ops: 3, memBytes: 67_108_864 } as KdfParams;
+  const w1 = { kdfSalt: "c2FsdDE", kdfParams: P, wrappedUvk: "d3JhcDE" };
+  const w2 = { kdfSalt: "c2FsdDI", kdfParams: P, wrappedUvk: "d3JhcDI" };
+
+  it("a new wrap is stamped when it is written; written again, it keeps its first day; a row without one reads without one", async () => {
+    const c = await openVaultCache("u");
+    const before = Date.now();
+    expect(await c.setPendingWraps([w1])).toBe(true);
+    const [first] = await c.pendingWraps();
+    expect(first).toMatchObject(w1);
+    expect(first!.at).toBeGreaterThanOrEqual(before);
+    expect(first!.at).toBeLessThanOrEqual(Date.now());
+    // The list rewritten with a second change: the first keeps its day.
+    expect(await c.setPendingWraps([w1, w2])).toBe(true);
+    const both = await c.pendingWraps();
+    expect(both[0]!.at).toBe(first!.at);
+    expect(both[1]!.at).toBeGreaterThanOrEqual(first!.at!);
+    // A day the caller names is kept as named.
+    expect(await c.setPendingWraps([{ ...w2, at: 1234 }])).toBe(true);
+    expect((await c.pendingWraps())[0]!.at).toBe(1234);
+    c.close();
   });
 });

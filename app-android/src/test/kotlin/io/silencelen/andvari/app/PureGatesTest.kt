@@ -145,90 +145,11 @@ class PureGatesTest {
         assertEquals(1, clampAutoLockSeconds(1))
     }
 
-    // ---- §F.1 enroll submit gate ----
+    // The §F.1 enroll submit gate (enrollReady) went with the old EnrollForm: the new path's
+    // sign-up and its recovery choice are pinned by trust/AccountJourneyTest.
 
-    private val serverFp = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" // 64 hex
-    private val shortFp = "0123456789abcdef0123456789abcdef" // 128-bit short form (first 32 of serverFp)
-    private val strong = "correct horse battery staple 9!"
-
-    @Test
-    fun waivedEnrollNeedsTheNoBackstopAcknowledgment() {
-        fun ready(ack: Boolean) = enrollReady(
-            EnrollPosture.Waived, "inv", "a@example.org", strong, strong, "", false, ack, false, null, serverFp,
-        )
-        assertFalse(ready(ack = false))
-        assertTrue(ready(ack = true))
-    }
-
-    @Test
-    fun requiredAffirmNeedsTheAffirmationTheInPersonCodeAndTheFullFingerprint() {
-        fun ready(affirmed: Boolean, linkRfp: String?, inPersonOk: Boolean = true) = enrollReady(
-            EnrollPosture.RequiredAffirm, "inv", "a@example.org", strong, strong, "", false, false, affirmed, linkRfp, serverFp, inPersonOk,
-        )
-        assertFalse(ready(affirmed = false, linkRfp = serverFp))
-        assertFalse(ready(affirmed = true, linkRfp = null))
-        assertFalse(ready(affirmed = true, linkRfp = ""))
-        // Security review 2026-10, A5: the rfp is a machine value compared at FULL length; the 32-hex human
-        // form (what this leg used to accept) no longer passes, and the in-person code is required.
-        assertFalse(ready(affirmed = true, linkRfp = shortFp))
-        assertFalse(ready(affirmed = true, linkRfp = serverFp, inPersonOk = false))
-        assertTrue(ready(affirmed = true, linkRfp = serverFp))
-    }
-
-    @Test
-    fun requiredTypedNeedsTheTypedSheetFingerprintAndItsCheckbox() {
-        fun ready(typed: String, fpOk: Boolean) = enrollReady(
-            EnrollPosture.RequiredTyped, "inv", "a@example.org", strong, strong, typed, fpOk, true, true, null, serverFp,
-        )
-        assertFalse(ready(typed = "", fpOk = false))
-        assertFalse(ready(typed = shortFp, fpOk = false)) // matched but not attested
-        assertFalse(ready(typed = "f".repeat(32), fpOk = true)) // attested but wrong
-        assertFalse(ready(typed = shortFp.take(16), fpOk = true)) // old 16-hex prefix no longer matches
-        assertTrue(ready(typed = shortFp, fpOk = true))
-    }
-
-    @Test
-    fun everyEnrollPostureStillRefusesABlankInviteOrAWeakOrMismatchedPassword() {
-        // A5: the affirm leg's rfp is the FULL fingerprint and it needs the typed in-person code.
-        for (posture in EnrollPosture.entries) {
-            val ok = enrollReady(posture, "inv", "a@example.org", strong, strong, shortFp, true, true, true, serverFp, serverFp, true)
-            assertTrue(ok, "$posture should be ready with every leg satisfied")
-            assertFalse(enrollReady(posture, "", "a@example.org", strong, strong, shortFp, true, true, true, serverFp, serverFp, true), "$posture: blank invite")
-            assertFalse(enrollReady(posture, "inv", "", strong, strong, shortFp, true, true, true, serverFp, serverFp, true), "$posture: blank email")
-            assertFalse(enrollReady(posture, "inv", "a@example.org", "short", "short", shortFp, true, true, true, serverFp, serverFp, true), "$posture: below the F60 floor")
-            assertFalse(enrollReady(posture, "inv", "a@example.org", strong, strong + "x", shortFp, true, true, true, serverFp, serverFp, true), "$posture: confirm mismatch")
-        }
-    }
-
-    // ---- [U22] card expiry: the live warning and the save gate must never disagree ----
-
-    @Test
-    fun expiryBlocksExactlyWhenAHalfCannotBeRead() {
-        assertFalse(cardExpiryBlocked("", "")) // both blank — every card field is optional
-        assertFalse(cardExpiryBlocked("7", "27"))
-        assertFalse(cardExpiryBlocked("07", "2027"))
-        assertFalse(cardExpiryBlocked("07/27", "")) // L7 parse-assist: combined in the month box
-        assertTrue(cardExpiryBlocked("13", "2027")) // month out of range
-        assertTrue(cardExpiryBlocked("07", "20xx")) // year unreadable
-        assertTrue(cardExpiryBlocked("07/27", "2027")) // combined AND a typed year — which wins?
-    }
-
-    @Test
-    fun theParseAssistAndTheBlockGateAgreeOnEveryShape() {
-        val shapes = listOf(
-            "" to "", "7" to "27", "07" to "2027", "07/27" to "", "07/2027" to "",
-            "13" to "2027", "07" to "20xx", "07/27" to "2027", "" to "2027", "07" to "",
-        )
-        for ((m, y) in shapes) {
-            val assisted = cardExpiryAssist(m, y)
-            // Assist only ever fires for a month box that can't be read on its own with a blank
-            // year — and whenever it fires, the save must NOT be blocked by the month.
-            if (assisted != null) {
-                assertTrue(y.isBlank(), "assist fired with a typed year for ($m, $y)")
-                assertFalse(cardExpiryBlocked(m, y), "assist fired but the gate still blocks ($m, $y)")
-            }
-        }
-    }
+    // The old editor's card-expiry gate (cardExpiryBlocked / cardExpiryAssist) went with the old editor;
+    // the new editor hands the expiry to the content, which checks it.
 
     // ---- ux-error--5: which biometric outcomes speak ----
 
@@ -251,13 +172,12 @@ class PureGatesTest {
     @Test
     fun onlyTheNewestCopyClearsTheClipboard() {
         // The first copy's timer must NOT wipe a window the second copy just disclosed, even
-        // though the value it checks for is identical.
-        assertTrue(shouldClearClipboard(scheduledGeneration = 2, currentGeneration = 2, clipboardNow = "s3cret", copiedValue = "s3cret"))
-        assertFalse(shouldClearClipboard(scheduledGeneration = 1, currentGeneration = 2, clipboardNow = "s3cret", copiedValue = "s3cret"))
-        // A null read = ownership unverifiable, NEVER "still ours" — clearing would wipe whatever
-        // the user copied from another app.
-        assertFalse(shouldClearClipboard(scheduledGeneration = 2, currentGeneration = 2, clipboardNow = null, copiedValue = "s3cret"))
-        assertFalse(shouldClearClipboard(scheduledGeneration = 2, currentGeneration = 2, clipboardNow = "something else", copiedValue = "s3cret"))
+        // though the value it checks for is identical. (The rest of the rule: ClipboardClearTest.)
+        assertEquals(ClipboardClear.Act.CLEAR, ClipboardClear.decide(2, 2, inFront = true, recordedTimestamp = 7, clipTimestamp = 7, valueStillThere = true))
+        assertEquals(ClipboardClear.Act.KEEP, ClipboardClear.decide(1, 2, inFront = true, recordedTimestamp = 7, clipTimestamp = 7, valueStillThere = true))
+        assertEquals(ClipboardClear.Act.KEEP, ClipboardClear.decide(1, 2, inFront = false, recordedTimestamp = 7, clipTimestamp = null, valueStillThere = null))
+        // In front, something the person copied since is left alone.
+        assertEquals(ClipboardClear.Act.KEEP, ClipboardClear.decide(2, 2, inFront = true, recordedTimestamp = 7, clipTimestamp = 9, valueStillThere = false))
     }
 
     // ---- a11yand-07: the IME action a field actually declares ----

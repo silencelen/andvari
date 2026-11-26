@@ -2,11 +2,11 @@ import { beforeAll, describe, expect, it } from "vitest";
 import type { AccountKeys } from "../api/types";
 import { adIdkey, adUvk } from "../crypto/ad";
 import { fromB64, toB64 } from "../crypto/bytes";
-import { seal } from "../crypto/envelope";
+import { open, seal } from "../crypto/envelope";
 import { EscrowOpenError, fingerprint, openEscrow, sealUvkV1 } from "../crypto/escrow";
 import { masterKey, wrapKey, type KdfParams } from "../crypto/keys";
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
-import { identityFingerprint } from "../crypto/sharedgrant";
+import { identityFingerprint } from "../crypto/fingerprint";
 import { initSodium } from "../crypto/sodium";
 import { Account, IdentityMismatchError } from "./account";
 import { loadSelfIdentityPub, recordSelfIdentityPub } from "./selfidentity";
@@ -32,7 +32,7 @@ describe("escrow v2 migration + backstop", () => {
     await initSodium();
   });
 
-  it("a new enrolment seals escrow v2", async () => {
+  it("a new enrolment seals the version-3 copy, naming its address (spec 04 §3)", async () => {
     const org = boxKeypairFromSeed(randomBytes(32));
     const fp = await fingerprint(org.publicKey);
     const r = await Account.enroll({ inviteToken: "inv", email: "a@x.com", displayName: "a", password: PASSWORD, kdfParams: KDF, recoveryPublicKey: org.publicKey, recoveryFingerprint: fp });
@@ -41,14 +41,17 @@ describe("escrow v2 migration + backstop", () => {
       expectedIdentityFpPrefix: (await identityFingerprint(r.account.identityPub)).slice(0, 32),
       identityCheck: { encryptedIdentitySeedB64: r.request.encryptedIdentitySeed, identityPubB64: r.request.identityPub },
     });
-    expect(opened.format).toBe("v2");
+    expect([opened.format, opened.email]).toEqual(["v3", "a@x.com"]);
     expect(opened.anchored).toBe(true);
+    // An enrolment address with no emailNorm seals nothing.
+    await expect(Account.enroll({ inviteToken: "inv", email: "not an address", displayName: "a", password: PASSWORD, kdfParams: KDF, recoveryPublicKey: org.publicKey, recoveryFingerprint: fp })).rejects.toThrow(/not an emailNorm/);
   });
 
-  it("a v1 member re-seals to v2 and stays recoverable, and the retained v1 blob still recovers", async () => {
+  it("a v1 blob recovers only through the identity check, and the recovered member unlocks with the same identity", async () => {
     const org = boxKeypairFromSeed(randomBytes(32));
     const fp = await fingerprint(org.publicKey);
     const { r } = await legacyMember(org.publicKey);
+    const uvk = open(await wrapKey(masterKey(PASSWORD, fromB64(r.request.kdfSalt), KDF)), fromB64(r.request.wrappedUvk), adUvk(r.request.userId));
     const userId = r.request.userId;
     const anchor = (await identityFingerprint(r.account.identityPub)).slice(0, 32);
     const identityCheck = { encryptedIdentitySeedB64: r.request.encryptedIdentitySeed, identityPubB64: r.request.identityPub };
@@ -56,29 +59,23 @@ describe("escrow v2 migration + backstop", () => {
     // A v1 blob is recoverable ONLY through the identity check (Q3): one naming this account but holding
     // some other key is refused.
     const wrongKeyV1 = await openEscrow({
-      recoveryKeypair: org, sealed: (await sealUvkV1(org.publicKey, userId, new Uint8Array(32))), expectedUserId: userId,
+      recoveryKeypair: org, sealed: (await sealUvkV1(org.publicKey, userId, new Uint8Array(32).fill(7))), expectedUserId: userId,
       expectedIdentityFpPrefix: anchor, identityCheck,
     }).catch((e) => e);
     // (a v1 blob carrying the WRONG key cannot pass the identity check)
     expect(wrongKeyV1).toBeInstanceOf(EscrowOpenError);
     expect((wrongKeyV1 as EscrowOpenError).verdict).toBe("identity_check_failed");
 
-    // The member migrates: resealEscrowFor seals v2 under the confirmed fingerprint.
-    const { sealed } = await r.account.resealEscrowFor(toB64(org.publicKey), fp);
-    const v2 = await openEscrow({ recoveryKeypair: org, sealed: fromB64(sealed), expectedUserId: userId, expectedIdentityFpPrefix: anchor, identityCheck });
-    expect(v2.format).toBe("v2");
-    expect(v2.identityKey).toEqual(r.account.identityPub);
-
-    // The legacy v1 blob for the SAME uvk (what the server retains) recovers as v1_legacy.
-    const v1 = await sealUvkV1(org.publicKey, userId, v2.uvk);
+    // A v1 blob for the account's own uvk recovers as v1_legacy.
+    const v1 = await sealUvkV1(org.publicKey, userId, uvk);
     const legacy = await openEscrow({ recoveryKeypair: org, sealed: v1, expectedUserId: userId, expectedIdentityFpPrefix: anchor, identityCheck });
     expect(legacy.format).toBe("v1_legacy");
-    expect(legacy.uvk).toEqual(v2.uvk);
+    expect(legacy.uvk).toEqual(uvk);
 
     // Round trip: recover (temp-password re-wrap) and unlock — same identity, accepted by the pinned device.
     const salt = randomBytes(16);
     const mk = masterKey("temp password", salt, KDF);
-    const wrappedUvk = toB64(seal(await wrapKey(mk), v2.uvk, adUvk(userId)));
+    const wrappedUvk = toB64(seal(await wrapKey(mk), legacy.uvk, adUvk(userId)));
     const keys: AccountKeys = {
       kdfSalt: toB64(salt), kdfParams: KDF, wrappedUvk, encryptedIdentitySeed: r.request.encryptedIdentitySeed,
       identityPub: r.request.identityPub, escrowFingerprint: fp,

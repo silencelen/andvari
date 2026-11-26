@@ -2,37 +2,26 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiClient } from "./client";
 
 /**
- * Security review 2026-10 (server F4, client half): POST /account/totp/setup takes an optional
- * `{ currentAuthKey }` — the password proof a FIRST enrollment needs outside the server's
- * fresh-login window (spec 03 §2). The bare call keeps its no-body wire shape.
+ * The two-factor card's confirm step on the REST client. Setting two-step sign-in up is not on this client any more: it
+ * is WireApi.totpSetup, always with the password proof (vault/twostep-setup.test.ts).
  */
-const jsonResp = (body: unknown): Response =>
-  ({ ok: true, status: 200, statusText: "200", json: async () => body, text: async () => JSON.stringify(body) }) as unknown as Response;
-
-function stub(): { bodies: (string | undefined)[] } {
-  const bodies: (string | undefined)[] = [];
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (_url: string | URL, init?: RequestInit) => {
-      bodies.push(init?.body as string | undefined);
-      return jsonResp({ secretBase32: "S", otpauthUri: "otpauth://totp/x" });
-    }),
-  );
-  return { bodies };
-}
-
-describe("ApiClient.totpSetup — the first-enrollment password proof", () => {
+describe("ApiClient two-factor routes", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("sends currentAuthKey when given one", async () => {
-    const { bodies } = stub();
-    await new ApiClient("http://server", { accessToken: "a", refreshToken: "r" }).totpSetup("AUTHKEY");
-    expect(JSON.parse(bodies[0]!)).toEqual({ currentAuthKey: "AUTHKEY" });
+  it("confirm resolves on the server's plain-text ok (the old client parsed it as JSON and threw after a success)", async () => {
+    const bodies: (string | undefined)[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string | URL, init?: RequestInit) => {
+        bodies.push(init?.body as string | undefined);
+        return new Response("ok", { status: 200, headers: { "Content-Type": "text/plain" } });
+      }),
+    );
+    await expect(new ApiClient("http://server", { accessToken: "a", refreshToken: "r" }).totpConfirm("123456")).resolves.toBeUndefined();
+    expect(JSON.parse(bodies[0]!)).toEqual({ code: "123456" });
   });
 
-  it("keeps the fielded no-body shape without one", async () => {
-    const { bodies } = stub();
-    await new ApiClient("http://server", { accessToken: "a", refreshToken: "r" }).totpSetup();
-    expect(bodies[0]).toBeUndefined();
+  it("offers no setup without the proof", () => {
+    expect("totpSetup" in ApiClient.prototype).toBe(false);
   });
 });

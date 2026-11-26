@@ -1,22 +1,24 @@
 import { adAccountState, adIdkey, adItem, adUsage, adUvk, adVaultMeta, adVk, adVkPersonal } from "../crypto/ad";
 import { type AccountStateDoc, decodeAccountState, encodeAccountState } from "./accountstate";
 import { usageKey } from "../crypto/usagekey";
-import { ctEquals, fromB64, fromUtf8, toB64, toHexLower, utf8 } from "../crypto/bytes";
-import { open, seal, structuralRefusal } from "../crypto/envelope";
-import { fingerprint as recoveryFingerprint, sealUvkV2 } from "../crypto/escrow";
+import type { OpenedAccount } from "./accountopen";
+import { ctEquals, fromB64, fromUtf8, toB64, utf8 } from "../crypto/bytes";
+import { open, openKey, seal, structuralRefusal } from "../crypto/envelope";
+import { allZero } from "../crypto/keyfloor";
+import { fingerprint as recoveryFingerprint, sealUvkV3 } from "../crypto/escrow";
 import { assertServerKdfParams, authKey as deriveAuthKey, masterKey, wrapKey as deriveWrapKey, type KdfParams } from "../crypto/keys";
-import { lifecycleKey } from "../crypto/lifecycleproof";
 import { generate as generateMemberRecovery, openUvk as openMemberRecoveryUvk } from "../crypto/member-recovery";
-import { boxKeypairFromSeed, randomBytes, sha256Sync, signKeypairFromSeed } from "../crypto/provider";
-import { identityFingerprint, openSharedGrant, sealSharedGrant, shortIdentityFingerprint } from "../crypto/sharedgrant";
-import { buildGrantFrame, decideLegacyGrant, type GrantOutcome, type GrantPin, type GrantVerdict, LEGACY_IN_WINDOW, type LegacyGrantMode, openSignedGrant, sealGrantFrame } from "../crypto/signedgrant";
-import type { Contact } from "./accountstate";
+import { boxKeypairFromSeed, randomBytes, signKeypairFromSeed } from "../crypto/provider";
+import { identityFingerprint, shortIdentityFingerprint } from "../crypto/fingerprint";
 import { CryptoError } from "../crypto/sodium";
+import { emailNorm, plainTextOf } from "../crypto/trust/grammar";
 import { itemDocProblem, vaultMetaName } from "./itemdoc-shape";
+import { type ItemLogHead, stampLogHead } from "./itemhead";
 import type { SealProvenance } from "./itemhome";
+import { type SessionKeys, SessionWrap } from "./sessionwrap";
+import { VAULT_KEY_NOT_VERIFIED } from "../ui/copy";
 import type {
   AccountKeys,
-  CreateVaultRequest,
   EscrowUpload,
   ItemDoc,
   ItemVersion,
@@ -30,18 +32,12 @@ import type {
 } from "../api/types";
 
 /**
- * Where the personal vault came from (security review 2026-10, root cause A §4.3, §8.5; A5b). Core twin:
- * `Account.PersonalStatus`. "unreadable-cached": a junk served wrap, the device's valid cached wrap kept in
- * force (L-1). "changed": a served wrap that opens names another vault than the device's; the device keeps
- * its own until the human confirms (M-2, L-2).
+ * Where the personal vault came from (security review 2026-10, root cause A §4.3). Design §5.3: it is the genesis
+ * vault, in force only when its served wrap opened at unlock. "confirmed": the wrap opened. "absent": none was served.
+ * "unreadable": one was served and did not open (an anomaly). Nothing designates, proposes or re-designates a personal
+ * vault, and no cached wrap stands in for a served one (design §15's web row).
  */
-/**
- * Where the personal vault came from (core `Account.PersonalStatus` twin). "proposed" (security review 2026-10, branch
- * A9, M-2): a served wrap OPENS but nothing on this device vouches for it — no cached wrap, and the account state carries
- * no designation, or one for another vault — so nothing is in force (no default destination) until the human confirms
- * it or re-designates; the server keeps every wrap the account ever minted and chooses which to serve.
- */
-export type PersonalStatus = "confirmed" | "withheld" | "absent" | "unreadable" | "unreadable-cached" | "changed" | "proposed";
+export type PersonalStatus = "confirmed" | "absent" | "unreadable";
 
 /** A6b carry-forward (A1b): the reauth could not be checked because this session unlocked with a salt the account no
  *  longer has (a password change or a KDF upgrade since). Core twin `ReauthStaleSessionException` /
@@ -126,73 +122,6 @@ export const VAULT_KEYS_DAMAGED =
  * password", so living outside that type is what makes the collapse structurally impossible rather
  * than merely un-coded-for today. TERMINAL, never retryable: the same blob fails identically forever.
  */
-/**
- * A grant row carries OUR UVK wrap (`wrappedVk`) and it does not open — structurally broken or an
- * AEAD tag failure (security review 2026-10, root cause A §3.1; spec 01 §4 extended to VK wraps).
- * The UVK already proved itself at unlock, so this is a damaged or substituted row: the vault shows
- * as "key unreadable — tell your admin" and the seal on the same row is NEVER tried instead (a seal
- * is crypto_box_seal to our public key, which the server can mint). Core twin:
- * `VaultGrantKeyUnreadableException`.
- */
-export class VaultGrantKeyUnreadableError extends Error {
-  constructor(
-    readonly vaultId: string,
-    reason: string,
-  ) {
-    super(`vault key for ${vaultId} is unreadable (${reason})`);
-    this.name = "VaultGrantKeyUnreadableError";
-  }
-}
-
-/**
- * INV-WRITE-KEY (security review 2026-10, root cause A §5.1, §8.2; branch A6; core `VaultKeyNotVerifiedException`
- * twin): this vault's key came ONLY from a v1 `sealedVk` (server-mintable) and nobody vouched for it yet — no
- * verified v2 grant, no pre-upgrade evidence, no human "Accept". Readable; nothing is ever sealed under it. Not a
- * CryptoError, so no save ladder can read it as "wrong master password".
- */
-export class VaultKeyNotVerifiedError extends Error {
-  constructor(readonly vaultId: string) {
-    super("This shared vault isn't verified on this device yet, so it is read-only. Review it under Shared vaults first.");
-    this.name = "VaultKeyNotVerifiedError";
-  }
-}
-
-/** How this device vouched for a v1-only key (§8.2): pre-upgrade evidence, or the human's Accept. */
-export type LegacyVouchKind = "frozen" | "confirmed";
-
-/** A vouch is bound to the KEY it was given for: `tag` = lowercase hex SHA-256 of that vault key (A6 review HIGH-1). */
-export interface LegacyVouch {
-  tag: string;
-  kind: LegacyVouchKind;
-}
-
-/** The tag a legacy-key vouch is bound to: lowercase hex SHA-256 of the vault key. */
-export function legacyTagOf(vk: Uint8Array): string {
-  return toHexLower(sha256Sync(vk));
-}
-
-/** Where a held vault key came from (root cause A §3.1 precedence; core `Account.KeySource`). */
-export type KeySource = "personal-wrap" | "uvk-wrap" | "signed-grant" | "legacy-seal";
-
-/** §1.6: a v2 grant from a sender not pinned (or not current) here. Not adopted; `fromUserId` is unverified. */
-export interface PendingGrant {
-  vaultId: string;
-  fromUserId: string;
-  grantIdB64: string;
-}
-
-class GrantPendingSignal extends Error {
-  constructor(readonly pending: PendingGrant) {
-    super("grant pending verification");
-  }
-}
-
-class GrantRefusedSignal extends Error {
-  constructor(readonly verdict: GrantVerdict) {
-    super(`grant refused: ${verdict}`);
-  }
-}
-
 export class VaultKeyDamagedError extends Error {
   constructor(detail: string, cause?: unknown) {
     super(VAULT_KEYS_DAMAGED);
@@ -200,6 +129,19 @@ export class VaultKeyDamagedError extends Error {
     /** Debug detail only — the SENTENCE is `message`; surfaces render that, never this. */
     (this as { detail?: string }).detail = detail;
     if (cause !== undefined) (this as { cause?: unknown }).cause = cause;
+  }
+}
+
+/**
+ * INV-WRITE-KEY (security review 2026-10, root cause A §5.1; core `VaultKeyNotVerifiedException` twin): nothing is
+ * sealed under this vault's key, because the verified log does not let this account write to it (design §3.9: not
+ * a member of a verified log, or a reader). Not a CryptoError, so no save ladder can read it as "wrong master
+ * password".
+ */
+export class VaultKeyNotVerifiedError extends Error {
+  constructor(readonly vaultId: string) {
+    super(VAULT_KEY_NOT_VERIFIED);
+    this.name = "VaultKeyNotVerifiedError";
   }
 }
 
@@ -238,49 +180,32 @@ export class Account {
   /** vaultId → role from the latest grant seen (spec 03 §10: role changes re-deliver the grant). */
   private readonly vaultRoles = new Map<string, string>();
 
-  /**
-   * Vaults whose VK arrived by MEMBER grant (`sealedVk`) rather than wrapped under our own
-   * UVK — see {@link keyArrivedByMemberGrant}. In-memory only, like the keys it annotates;
-   * the store rebuilds it by replaying the cached grant rows on every hydrate, so it cannot
-   * go stale across a reload. Kotlin twin: `Account.memberGrantedVaults`.
-   */
-  private readonly memberGrantedVaults = new Set<string>();
+  /** Spec 01 §7: the wrap this session keeps (the salt, cost and wrapped UVK the password opened or this tab sealed),
+   *  against which every re-authentication is proven on this device. None held: no reauth passes (fail closed). */
+  private sessionWrapValue: SessionWrap = new SessionWrap(null);
 
-  /** A6b review LOW-3: the `kdfSalt` of the AccountKeys this session unlocked (or enrolled) with; null = unknown, and
-   *  then no reauth passes on this session (fail closed; a re-lock after a password change resets it). */
-  private sessionKdfSalt: string | null = null;
-
-  /** Root cause A §3.1: vaults whose row carried a seal that opened to a DIFFERENT key than the one
-   *  we hold from our own UVK wrap ("vault key mismatch"; ours was kept). Core: `vkMismatchVaults`. */
+  /** Root cause A §3.1: vaults whose served row carried a wrap of ours that opened to a DIFFERENT key than the one
+   *  held ("vault key mismatch"; the held key was kept). Core: `vkMismatchVaults`. */
   private readonly vkMismatchVaults = new Set<string>();
 
-  /** Vaults whose UVK wrap is present but does not open ("key unreadable — tell your admin"). */
-  private readonly unreadableKeyVaults = new Set<string>();
-
-  /** Root cause A (branch A6): where each held key came from, recorded when it is adopted. */
-  private readonly keySources = new Map<string, KeySource>();
-  /** For keys from a verified v2 grant: the sender the VERIFIED statement names. */
-  private readonly signedGrantFrom = new Map<string, string>();
-  /** v1-only keys this device vouches for (§8.2), each bound to the key it was given for (HIGH-1). */
-  private readonly legacyVouches = new Map<string, LegacyVouch>();
   /**
-   * Per-vault held-key memory (security review 2026-10, root cause A, branch A7; core `heldKeyTags` twin; closes
-   * R15(g) on a device that held the vault): vaultId → SHA-256 (hex) of the FIRST key this device adopted for it, by
-   * any rule. No step of root cause A re-keys a vault (§8.7), so a later different key is vk_mismatch through
-   * {@link vouchGate}, like a vouch. Persisted by the store beside the vouches; dropped with the vault. It vouches for
-   * nothing: it never lifts a legacy key's read-only state and never makes a seal key acceptable on its own.
+   * Shared vaults governed by a signed vault log (design §3): their keys are installed and removed only by the log
+   * store's adoption (§3.6), and their roles come from the verified log, never from a served row.
    */
-  private readonly heldKeyTags = new Map<string, string>();
-  /** §1.6 pending invitations by vaultId. */
-  private readonly pendingGrantsByVault = new Map<string, PendingGrant>();
-  /** §1.4 anomaly verdicts by vaultId (nothing adopted). */
-  private readonly grantAnomaliesByVault = new Map<string, GrantVerdict>();
-
+  private readonly logGoverned = new Set<string>();
+  private logRoles: ((vaultId: string) => string | null) | null = null;
+  private logWrites: ((vaultId: string) => boolean) | null = null;
   /**
-   * Pins as the grant verifier sees them (§1.4 step 7). The store wires this to the account-state contacts,
-   * reporting a pin as current only when it may skip verification on this device (A5 review L-3). Default: no one.
+   * Beside each key of a log-governed vault: the number of the log's `add` entry under which this session adopted it
+   * (NaN for a key that is never a working key: one opened only to seal a held copy). Absent for a key put in the ring
+   * without one (only test fixtures do).
    */
-  grantPins: (userId: string) => GrantPin | null = () => null;
+  private readonly keyAdds = new Map<string, number>();
+  /**
+   * The number of the `add` entry through which the vault's verified log names this account now: null where the log
+   * does not name it (removed, deleted, or nothing verified). Attached by the store with the shared-vault layer.
+   */
+  private logMember: ((vaultId: string) => number | null | undefined) | null = null;
 
   /** itemId → highest formatVersion this session decrypted or sealed it at. Reseals take
    *  max(docFloor, this): the server enforces per-item monotonic fv, so an edit must never
@@ -309,8 +234,8 @@ export class Account {
 
   /**
    * The personal vault (security review 2026-10, root cause A §4): named by `AccountKeys.personalWrap`
-   * (only this user's UVK can mint it, {@link applyPersonalWrap}), a wrap this device cached, or minted from
-   * the human's CONFIRMED answer (never an automatic pick: A5 review H-1, A5b). "" = no personal vault: no default destination, no usage ledger.
+   * (only this user's UVK can mint it, {@link applyPersonalWrap}), the wrap enrolment minted, or the opened session's
+   * genesis vault (design §5.3). "" = no personal vault: no default destination, no usage ledger.
    * NEVER set from a server `type` label or `role`. Core twin: `Account.personalVaultId`.
    */
   get personalVaultId(): string {
@@ -405,8 +330,9 @@ export class Account {
         if (computedFp !== fp) throw new CryptoError("recovery public key does not match its fingerprint");
         // Escrow v2 (security review 2026-10, root cause A §2.1): signed with the joint key, binding
         // this account's userId and identity key and the FULL org fingerprint (core Account.enroll parity).
-        const sealed = await sealUvkV2({
-          recoveryPub: params.recoveryPublicKey, verifiedRecoveryFp: fp, userId, identityPub: identity.publicKey, signer: signing, uvk, issuedAt: Date.now(),
+        // Spec 04 §3: every seal is version 3, naming the address this enrolment sends; one with no emailNorm seals nothing.
+        const sealed = await sealUvkV3({
+          recoveryPub: params.recoveryPublicKey, verifiedRecoveryFp: fp, userId, emailNorm: emailNorm(params.email) ?? "", identityPub: identity.publicKey, signer: signing, uvk, issuedAt: Date.now(),
         });
         escrow = { sealed: toB64(sealed), fingerprint: fp };
       }
@@ -438,9 +364,7 @@ export class Account {
       const account = new Account(userId, uvk, identity.privateKey, identity.publicKey, signing.publicKey, signing.privateKey, personalVaultId, vaultKeys);
       account.vaultRoles.set(personalVaultId, "owner");
       account.personalStatusValue = "confirmed";
-      account.personalWrapValue = request.personalWrap!;
-      account.personalWrapMintedHere = true; // A9 (M-2): the registering device designates it at its first sync
-      account.sessionKdfSalt = request.kdfSalt; // A6b review LOW-3
+      account.sessionWrapValue = new SessionWrap({ kdfSalt: request.kdfSalt, kdfParams: request.kdfParams, wrappedUvk: request.wrappedUvk }); // the wrap enrolment sealed
       account.uvkWrappedVaults.add(personalVaultId);
       signingForCleanup = null; // owned by the returned Account now
       return { request, account, recoverySecret: recovery.recoverySecret };
@@ -573,13 +497,17 @@ export class Account {
       } catch {
         throw new CryptoError("wrong master password");
       }
+      // Core Account.unlock twin: a wrap that opens to zeros is damaged keys, never a lock and never a wrong password.
+      if (allZero(uvk)) throw new VaultKeyDamagedError("wrappedUvk opened to a key of zeros");
     } finally {
       wrapKey.fill(0);
     }
     // Password path validates the password by the wrappedUvk open above; from here the work is
     // identical to the recovery (UVK-in-hand) path — one shared tail, so the identity-pubkey
     // hard-fail can never diverge between them (core Account.unlock parity).
-    return Account.unlockFromUvk(userId, uvk, keys, selfIdentityPub);
+    const account = Account.unlockFromUvk(userId, uvk, keys, selfIdentityPub);
+    account.sessionWrapValue = new SessionWrap({ kdfSalt: keys.kdfSalt, kdfParams: keys.kdfParams, wrappedUvk: keys.wrappedUvk }); // the wrap the password opened
+    return account;
   }
 
   /**
@@ -611,6 +539,8 @@ export class Account {
     const seedRefusal = structuralRefusal(seedEnvelope);
     if (seedRefusal !== null) throw new VaultKeyDamagedError(`encryptedIdentitySeed: ${seedRefusal}`);
     const identitySeed = open(uvk, seedEnvelope, adIdkey(userId));
+    // Core unlockFromUvk twin: a seed of zeros is damaged keys, on every unlock and on recovery, never a lock.
+    if (allZero(identitySeed)) throw new VaultKeyDamagedError("encryptedIdentitySeed opened to a seed of zeros");
     // ZEROIZATION (audit H80): the seed's only job is to derive the keypairs the Account holds —
     // a compromise of the seed IS a compromise of the identity key, so it gets the MK's care. Both
     // the X25519 identity and the joint Ed25519 signing key (root cause A §1.1) come from it here.
@@ -646,284 +576,78 @@ export class Account {
     const account = new Account(userId, uvk, identity.privateKey, identity.publicKey, signing.publicKey, signing.privateKey, "", new Map());
     // Root cause A §4.3: the personal vault comes from the UVK-authenticated wrap and nothing else.
     account.applyPersonalWrap(keys.personalWrap ?? null);
-    account.sessionKdfSalt = keys.kdfSalt || null; // A6b review LOW-3: the salt this session unlocked with
     return account;
   }
 
   /**
-   * Apply a grant from sync (spec 01 §6). The role update is UNCONDITIONAL — a role
-   * change re-delivers the grant while the VK is already held, and MUST still take
-   * effect; the key-open is attempted only when the VK is missing, by {@link openGrantVk}'s
-   * canonical-key precedence (security review 2026-10, root cause A §3.1).
+   * The session this browser opened on the post-cut-over flow (vault/accountopen.ts ran every unlock check:
+   * seed, served identity key, genesis against the pinned instance, own identity record, personal wrap in
+   * force). Takes ownership of [opened]'s keys. The personal vault is the genesis vault, and only when its wrap
+   * opened; otherwise there is none (an anomaly the vault shows). [wrap] is the wrap the unlock opened or sealed (spec
+   * 01 §7: every re-authentication is proven against it); null keeps none, and then no re-authentication passes.
+   */
+  static fromOpened(opened: OpenedAccount, wrap: SessionKeys | null): Account {
+    const vaultKeys = new Map<string, Uint8Array>();
+    const pv = opened.personalVaultId;
+    if (pv !== null && opened.personalVk !== null) vaultKeys.set(pv, opened.personalVk);
+    const account = new Account(
+      opened.userId,
+      opened.uvk,
+      opened.identity.privateKey,
+      opened.identity.publicKey,
+      opened.signing.publicKey,
+      opened.signing.privateKey,
+      pv ?? "",
+      vaultKeys,
+    );
+    if (pv !== null && opened.personalVk !== null) {
+      account.personalStatusValue = "confirmed";
+      account.uvkWrappedVaults.add(pv);
+      account.vaultRoles.set(pv, "owner");
+    }
+    account.sessionWrapValue = new SessionWrap(wrap);
+    return account;
+  }
+
+  /** The wrap this session keeps (spec 01 §7), shared with the Settings flows of the same session. */
+  get sessionWrap(): SessionWrap {
+    return this.sessionWrapValue;
+  }
+
+  /**
+   * Apply the personal vault's grant row from sync or the cache (spec 03 §10). The personal key came from the
+   * UVK-authenticated personal wrap at unlock (design §5.3), and a shared vault's key comes only from its verified log
+   * (design §3.6), so no row installs a key here. The row carries the role, and this account's own UVK wrap of the
+   * personal vault, which is opened only to compare: a wrap that opens to ANOTHER key raises the "vault key
+   * mismatch" notice and the held key stands. A wrap that does not open changes nothing. Nothing else on the row is
+   * read: no v2 grant, no v1 seal.
    *
-   * Throws {@link VaultGrantKeyUnreadableError} when the row carries our UVK wrap and it does not
-   * open: the vault stays keyless (no seal fallback) and {@link keyUnreadable} says so.
+   * Throws a CryptoError for any other row: another vault, another account's row, or no personal key held.
    */
   addGrant(grant: WireGrant) {
+    const held = this.personalVaultId ? this.vaultKeys.get(this.personalVaultId) : undefined;
+    if (!held || grant.vaultId !== this.personalVaultId || grant.userId !== this.userId) {
+      throw new CryptoError(`a grant row for ${grant.vaultId} is not this account's personal vault: its key comes only from its log`);
+    }
     if (grant.role) this.vaultRoles.set(grant.vaultId, grant.role);
-    const held = this.vaultKeys.get(grant.vaultId);
-    if (held) {
-      // A key held ONLY from a v1 seal is confirmed by a verified v2 grant carrying the SAME key (the owner's
-      // re-issue, §8.2 step 3). A v2 grant never silently REPLACES a held key (A6 review MED-2): a different key is
-      // the vk_mismatch anomaly, and the held key and its source stay (an unvouched one stays read-only). A field
-      // that is present but fails §1.4 in any way is an anomaly too (LOW-2).
-      if (this.keySources.get(grant.vaultId) === "legacy-seal" && grant.signedGrant) {
-        const o = this.openSigned(grant, null);
-        if (o.verdict === "adopt") {
-          // Round 3 MEDIUM-B: promotion goes through the vouch gate too — a held key that contradicts this device's
-          // vouch is never promoted, even when a verified grant carries that same key.
-          if (ctEquals(o.vk, held) && this.vouchGate(grant.vaultId, held) !== "mismatch") {
-            this.keySources.set(grant.vaultId, "signed-grant");
-            this.recordHeldKey(grant.vaultId, held, "signed-grant"); // LOW-1: now a trusted key
-            this.signedGrantFrom.set(grant.vaultId, o.from);
-            this.pendingGrantsByVault.delete(grant.vaultId);
-            this.grantAnomaliesByVault.delete(grant.vaultId);
-          } else {
-            this.grantAnomaliesByVault.set(grant.vaultId, "vk_mismatch");
-            // A1b (keyprecedence.json; core parity): the mismatch also raises the "vault key mismatch" notice.
-            this.vkMismatchVaults.add(grant.vaultId);
-          }
-          return;
-        }
-        if (o.verdict === "pending_invitation") this.pendingGrantsByVault.set(grant.vaultId, { vaultId: grant.vaultId, fromUserId: o.from, grantIdB64: o.grantIdB64 });
-        else {
-          this.grantAnomaliesByVault.set(grant.vaultId, o.verdict);
-          return;
-        }
-      }
-      // Already held: the row cannot change our key, but a re-delivered row that now carries a
-      // DIFFERENT key is still worth surfacing.
-      if (this.rowCarriesOtherKey(grant, held)) this.vkMismatchVaults.add(grant.vaultId);
-      return;
-    }
-    let opened: { vk: Uint8Array; source: KeySource; sealMismatch: boolean; from?: string; anomaly?: GrantVerdict };
+    const fromWrap = this.ownWrapOrNull(grant);
+    if (fromWrap !== null && !ctEquals(fromWrap, held)) this.vkMismatchVaults.add(grant.vaultId);
+    fromWrap?.fill(0);
+  }
+
+  /** The key this account's own UVK wrap on the row (`wrappedVk`) opens to, or null when it is absent or does not open. */
+  private ownWrapOrNull(grant: WireGrant): Uint8Array | null {
+    if (!grant.wrappedVk) return null;
     try {
-      opened = this.openGrantVk(grant);
-    } catch (e) {
-      if (e instanceof VaultGrantKeyUnreadableError) this.unreadableKeyVaults.add(grant.vaultId);
-      if (e instanceof GrantPendingSignal) {
-        // §1.6: not adopted, and no fallback to the v1 seal on the same row.
-        this.pendingGrantsByVault.set(grant.vaultId, e.pending);
-        this.grantAnomaliesByVault.delete(grant.vaultId);
-        return;
-      }
-      if (e instanceof GrantRefusedSignal) {
-        this.grantAnomaliesByVault.set(grant.vaultId, e.verdict);
-        this.pendingGrantsByVault.delete(grant.vaultId);
-        return;
-      }
-      throw e;
-    }
-    const viaSeal = opened.source === "legacy-seal" || opened.source === "signed-grant";
-    this.recordHeldKey(grant.vaultId, opened.vk, opened.source);
-    this.vaultKeys.set(grant.vaultId, opened.vk);
-    this.keySources.set(grant.vaultId, opened.source);
-    if (opened.from) this.signedGrantFrom.set(grant.vaultId, opened.from);
-    this.pendingGrantsByVault.delete(grant.vaultId);
-    if (opened.anomaly) this.grantAnomaliesByVault.set(grant.vaultId, opened.anomaly);
-    else this.grantAnomaliesByVault.delete(grant.vaultId);
-    this.unreadableKeyVaults.delete(grant.vaultId);
-    if (opened.sealMismatch) this.vkMismatchVaults.add(grant.vaultId);
-    if (opened.source === "uvk-wrap" && grant.userId === this.userId) this.uvkWrappedVaults.add(grant.vaultId);
-    // Provenance of the KEY, recorded at the one moment it is knowable (audit H64), and never
-    // re-stamped by a later re-delivery (the early return above). This bit is LOAD-BEARING (A6b
-    // review MEDIUM-1): the store persists it, it joins the account state's add-only `memberReceived`,
-    // and a vault it marks needs the explicit "its owner transferred it to me" acknowledgement before
-    // this account may claim ownership. So it is set only from AUTHENTICATED provenance (security
-    // review 2026-10, branch A9, L-2; core twin): the key was actually ADOPTED through a v1 seal or a
-    // verified v2 grant, or the row is not an owner row AND no UVK wrap of ours opened. Never from the
-    // row's SHAPE: a seal the server attaches beside our own UVK wrap (junk, ignored above) or a
-    // relabelled role would otherwise become durable evidence against the genuine creator.
-    const ownUvkWrapOpened = opened.source === "personal-wrap" || (opened.source === "uvk-wrap" && grant.userId === this.userId);
-    if (viaSeal || !!opened.from || (grant.role !== "owner" && !ownUvkWrapOpened)) this.memberGrantedVaults.add(grant.vaultId);
-  }
-
-  /** Run §1.4 on the row's v2 grant; `heldVk` only when held from our OWN wrap. */
-  private openSigned(grant: WireGrant, heldVk: Uint8Array | null): GrantOutcome {
-    let sealed: Uint8Array;
-    try {
-      sealed = fromB64(grant.signedGrant ?? "");
-    } catch {
-      return { verdict: "unopenable", anomaly: false };
-    }
-    return openSignedGrant({
-      myUserId: this.userId, myIdentityPub: this.identityPub, myIdentityPriv: this.identityPriv, rowVaultId: grant.vaultId,
-      sealed, pinFor: this.grantPins, heldVk,
-    });
-  }
-
-  /**
-   * Canonical-key precedence (security review 2026-10, root cause A §3.1) — core `openGrantVk` twin.
-   * The VK comes from the FIRST of: (1) the personal wrap (§4, applied at unlock, so a row for that vault
-   * is only compared against it); (2) our own UVK wrap
-   * `wrappedVk` (owner wrap, post-transfer new-owner wrap, member self-wrap §3.2); (3) a v2 signed
-   * grant (§1.4, not yet built); (4) a v1 `sealedVk`, legacy only. A seal is never preferred over a
-   * UVK wrap: when the wrap opens, a seal on the same row is opened only to compare (same → silent,
-   * different → `sealMismatch`, unopenable → ignored). A wrap that is present but does not open
-   * throws {@link VaultGrantKeyUnreadableError} and the seal is never tried.
-   */
-  private openGrantVk(grant: WireGrant): { vk: Uint8Array; source: KeySource; sealMismatch: boolean; from?: string; anomaly?: GrantVerdict } {
-    if (grant.wrappedVk) {
-      let vk: Uint8Array;
-      try {
-        const envelope = fromB64(grant.wrappedVk);
-        const refusal = structuralRefusal(envelope);
-        if (refusal !== null) throw new VaultGrantKeyUnreadableError(grant.vaultId, refusal);
-        vk = open(this.uvk, envelope, adVk(grant.vaultId, this.userId));
-      } catch (e) {
-        if (e instanceof VaultGrantKeyUnreadableError) throw e;
-        throw new VaultGrantKeyUnreadableError(grant.vaultId, "wrap does not open");
-      }
-      // A wrap that OPENS under our UVK was minted by one of our own clients: a wrong length is a
-      // buggy writer (core audit F32 parity: CryptoError), still terminal, still no seal fallback.
-      if (vk.length !== 32) throw new CryptoError(`vault key for ${grant.vaultId} is not 32 bytes`);
-      const sealVk = grant.sealedVk ? this.openSealOrNull(grant.vaultId, grant.sealedVk) : null;
-      // A v2 grant beside our wrap is compared too; only a VERIFIED one can disagree with it.
-      // A9 (L-2): a VERIFIED v2 grant beside our wrap that agrees names the pinned sender who granted us the vault:
-      // authenticated member provenance (`from`), unlike the mere presence of a grant field.
-      const signedOutcome = grant.signedGrant ? this.openSigned(grant, vk) : null;
-      const signedDiffers = signedOutcome?.verdict === "vk_mismatch";
-      const from = signedOutcome?.verdict === "adopt" ? signedOutcome.from : undefined;
-      // Rule 2 is canonical (A1) and is USED even against this device's vouch, but flagged (round 3 LOW-F).
-      const gate = this.vouchGate(grant.vaultId, vk) === "mismatch" ? ("vk_mismatch" as GrantVerdict) : undefined;
-      // A6 final review LOW-H: the gate's mismatch also lands in vkMismatchVaults (the "vault key mismatch" notice).
-      return { vk, source: "uvk-wrap", sealMismatch: (sealVk !== null && !ctEquals(sealVk, vk)) || signedDiffers || gate !== undefined, from, anomaly: gate };
-    }
-    // (3) v2 signed grant, verified per root cause A §1.4 against our PIN for the sender it names.
-    if (grant.signedGrant) {
-      // The v1 seal on this row, only if it opens to the key this device VOUCHED for (HIGH-1: a vouch is bound to
-      // its key; a different v1 key for the same vault is not covered).
-      const vouched = this.vouchedSealKey(grant);
-      const o = this.openSigned(grant, null);
-      if (o.verdict === "adopt") {
-        // MED-2 / re-review MEDIUM-A: decided from the device-local vouch TAG, not from whether the server kept
-        // the v1 seal. A verified grant naming a DIFFERENT key than the vouched one is vk_mismatch: keep the vouched
-        // key when the seal still opens to it, otherwise refuse the row with no key. Never adopt it.
-        if (this.vouchGate(grant.vaultId, o.vk) === "mismatch") {
-          // A1b (keyprecedence.json; core parity): sealMismatch, so the "vault key mismatch" notice is raised too.
-          if (vouched) return { vk: vouched, source: "legacy-seal", sealMismatch: true, anomaly: "vk_mismatch" };
-          throw new GrantRefusedSignal("vk_mismatch");
-        }
-        return { vk: o.vk, source: "signed-grant", sealMismatch: false, from: o.from };
-      }
-      if (o.verdict === "pending_invitation") {
-        // Never satisfied by the v1 seal on the same row, EXCEPT for the key this device already vouched for (§8.2
-        // freeze or the human's Accept) whose self-wrap has not reached the row yet.
-        if (vouched) return { vk: vouched, source: "legacy-seal", sealMismatch: false };
-        throw new GrantPendingSignal({ vaultId: grant.vaultId, fromUserId: o.from, grantIdB64: o.grantIdB64 });
-      }
-      // LOW-2: a field that is PRESENT and fails §1.4 in ANY way (anomaly or not) refuses the row: no v1 fallback.
-      throw new GrantRefusedSignal(o.verdict);
-    }
-    // (4) v1 `sealedVk`, compatibility window only: legacy-read-only until vouched for (§8.2). The decision runs
-    // through the graded function (LOW-3): post-window, a key with no pre-upgrade evidence is refused outright.
-    if (grant.sealedVk) {
-      const vk = openSharedGrant(this.identityPub, this.identityPriv, grant.vaultId, fromB64(grant.sealedVk));
-      // Round 3 LOW-E: a seal for another key than this device's vouch is vk_mismatch, not a read-only key waiting
-      // for an "Accept anyway" that would overwrite the vouch.
-      if (this.vouchGate(grant.vaultId, vk) === "mismatch") throw new GrantRefusedSignal("vk_mismatch");
-      if (this.legacyModeFor(grant.vaultId, vk) === "refused") throw new CryptoError(`legacy grant for ${grant.vaultId} refused (compatibility window closed)`);
-      return { vk, source: "legacy-seal", sealMismatch: false };
-    }
-    throw new CryptoError(`grant for ${grant.vaultId} carries no key`);
-  }
-
-  /**
-   * THE vouch gate (A6 re-review round 3: one rule, every key-source path; core `Account.vouchGate` twin). While
-   * this device holds a §8.2 vouch for `vaultId`, a key whose SHA-256 differs from the vouch tag is "mismatch": it
-   * is never adopted writable, never promoted, never self-wrapped, owner-wrapped, signed onward or transferred, and
-   * never offered for "Accept anyway". Only rule 2 (our own UVK wrap, canonical per A1) still USES such a key, and
-   * flags vk_mismatch. Every key-source decision in this class routes through here.
-   */
-  vouchGate(vaultId: string, key: Uint8Array | null | undefined): "no-vouch" | "ok" | "mismatch" {
-    // A7: the held-key tag is the same kind of device-local memory as a vouch, and goes through the same gate.
-    const v = this.legacyVouches.get(vaultId);
-    const h = this.heldKeyTags.get(vaultId);
-    if (!v && !h) return "no-vouch";
-    if (!key) return "mismatch";
-    const t = legacyTagOf(key);
-    if (v && v.tag !== t) return "mismatch";
-    if (h && h !== t) return "mismatch";
-    return "ok";
-  }
-
-  /** Restore a persisted held-key tag (the store's durable record wins over an in-memory one). */
-  rememberHeldKey(vaultId: string, tag: string): void {
-    if (/^[0-9a-f]{64}$/.test(tag)) this.heldKeyTags.set(vaultId, tag);
-  }
-
-  /** The held-key tags to persist. */
-  heldKeyTagsSnapshot(): Map<string, string> {
-    return new Map(this.heldKeyTags);
-  }
-
-  /** Record the tag of a key just adopted for `vaultId` from a TRUSTED source (A7 review LOW-1; core twin): our own
-   *  UVK wrap, a verified v2 grant, a vouched legacy key, or a vault this device created. An unvouched read-only v1
-   *  seal records nothing (its vouch records it then). No-op when a tag is recorded or the key contradicts the gate. */
-  private recordHeldKey(vaultId: string, vk: Uint8Array, source: KeySource): void {
-    const mode = source === "legacy-seal" ? this.legacyModeFor(vaultId, vk) : null;
-    const trusted = source === "uvk-wrap" || source === "signed-grant" || mode === "frozen" || mode === "confirmed";
-    if (!trusted || this.heldKeyTags.has(vaultId) || this.vouchGate(vaultId, vk) === "mismatch") return;
-    this.heldKeyTags.set(vaultId, legacyTagOf(vk));
-  }
-
-  /** True when the key HELD for `vaultId` contradicts this device's vouch for it. */
-  heldKeyContradictsVouch(vaultId: string): boolean {
-    return this.vaultKeys.has(vaultId) && this.vouchGate(vaultId, this.vaultKeys.get(vaultId)) === "mismatch";
-  }
-
-  /** The row's v1 seal key, only when this device holds a §8.2 VOUCH and the gate says it IS the vouched key (a
-   *  held-key tag alone never makes a seal key acceptable). */
-  private vouchedSealKey(grant: WireGrant): Uint8Array | null {
-    if (!grant.sealedVk || !this.legacyVouches.has(grant.vaultId)) return null;
-    const k = this.openSealOrNull(grant.vaultId, grant.sealedVk);
-    return k && this.vouchGate(grant.vaultId, k) === "ok" ? k : null;
-  }
-
-  /**
-   * §8.2 / §8.6 (A6 review LOW-3): the legacy decision for [vk] as a v1-only key of [vaultId], routed through the
-   * graded `decideLegacyGrant`. A vouch counts only for the key it was given for (HIGH-1).
-   */
-  private legacyModeFor(vaultId: string, vk: Uint8Array): LegacyGrantMode {
-    const v = this.legacyVouches.get(vaultId);
-    const matches = !!v && legacyTagOf(vk) === v.tag;
-    return decideLegacyGrant(LEGACY_IN_WINDOW, matches && v!.kind === "frozen", matches && v!.kind === "confirmed");
-  }
-
-  private heldLegacyMode(vaultId: string): LegacyGrantMode | null {
-    const held = this.vaultKeys.get(vaultId);
-    if (!held || this.keySources.get(vaultId) !== "legacy-seal") return null;
-    return this.legacyModeFor(vaultId, held);
-  }
-
-  private openSealOrNull(vaultId: string, sealedVk: string): Uint8Array | null {
-    try {
-      return openSharedGrant(this.identityPub, this.identityPriv, vaultId, fromB64(sealedVk));
+      const envelope = fromB64(grant.wrappedVk);
+      if (structuralRefusal(envelope) !== null) return null;
+      return openKey(this.uvk, envelope, adVk(grant.vaultId, this.userId), "a grant's wrap");
     } catch {
       return null;
     }
   }
 
-  /** A re-delivered row for a vault whose key we hold: does any key it carries differ from it? */
-  private rowCarriesOtherKey(grant: WireGrant, held: Uint8Array): boolean {
-    let fromWrap: Uint8Array | null = null;
-    if (grant.wrappedVk) {
-      try {
-        fromWrap = open(this.uvk, fromB64(grant.wrappedVk), adVk(grant.vaultId, this.userId));
-      } catch {
-        fromWrap = null;
-      }
-    }
-    const fromSeal = grant.sealedVk ? this.openSealOrNull(grant.vaultId, grant.sealedVk) : null;
-    let fromSigned: Uint8Array | null = null;
-    if (grant.signedGrant) {
-      const o = this.openSigned(grant, null);
-      if (o.verdict === "adopt") fromSigned = o.vk;
-    }
-    return [fromWrap, fromSeal, fromSigned].some((k) => k !== null && !ctEquals(k, held));
-  }
-
-  /** True when a row for this vault carried a seal whose key differs from the one we hold (the
+  /** True when a served row for this vault carried a wrap of ours that opened to another key than the one held (the
    *  "vault key mismatch" anomaly, root cause A §3.1). Display only: the held key is canonical. */
   vkMismatch(vaultId: string): boolean {
     return this.vkMismatchVaults.has(vaultId);
@@ -931,130 +655,6 @@ export class Account {
 
   vkMismatchVaultIds(): string[] {
     return [...this.vkMismatchVaults];
-  }
-
-  /** True when this vault's grant carries our UVK wrap and it does not open (no seal fallback). */
-  keyUnreadable(vaultId: string): boolean {
-    return this.unreadableKeyVaults.has(vaultId);
-  }
-
-  keyUnreadableVaultIds(): string[] {
-    return [...this.unreadableKeyVaults];
-  }
-
-  /** Root cause A §3.2: we hold this vault's key and our row has no UVK wrap yet — a candidate for
-   *  {@link buildSelfWrap}. NOT a trust signal: {@link selfWrapAuthorized} is the gate (a verified v2 grant, or a
-   *  v1 key this device froze or the human confirmed). Core twin: `Account.needsSelfWrap`. */
-  needsSelfWrap(grant: WireGrant): boolean {
-    return this.vaultKeys.has(grant.vaultId) && !grant.wrappedVk && (!!grant.sealedVk || !!grant.signedGrant) && grant.role !== "owner" && grant.userId === this.userId;
-  }
-
-  /**
-   * Root cause A §3.2 / §8.2, the ONLY gate on minting a member self-wrap (core `selfWrapAuthorized`): a key from
-   * a v2 grant VERIFIED against our pin for its sender, or a v1 key this device vouched for (freeze or Accept). A
-   * key only an unconfirmed v1 seal vouches for is never wrapped (the A1 trust-laundering bug).
-   */
-  selfWrapAuthorized(vaultId: string): boolean {
-    if (!this.vaultKeys.has(vaultId) || this.heldKeyContradictsVouch(vaultId)) return false;
-    const src = this.keySources.get(vaultId);
-    if (src === "signed-grant") return true;
-    const mode = this.heldLegacyMode(vaultId);
-    return mode === "frozen" || mode === "confirmed";
-  }
-
-  /** Where this vault's held key came from (null when not held). */
-  keySource(vaultId: string): KeySource | null {
-    return this.vaultKeys.has(vaultId) ? (this.keySources.get(vaultId) ?? null) : null;
-  }
-
-  /** INV-WRITE-KEY: a key only an unconfirmed v1 seal vouches for. Readable; never written under. */
-  isLegacyReadOnly(vaultId: string): boolean {
-    return this.heldLegacyMode(vaultId) === "read_only";
-  }
-
-  legacyReadOnlyVaultIds(): string[] {
-    return [...this.vaultKeys.keys()].filter((id) => this.isLegacyReadOnly(id));
-  }
-
-  /** The tag of the key held for `vaultId` (lowercase hex SHA-256), or null when none is held. */
-  legacyKeyTag(vaultId: string): string | null {
-    const k = this.vaultKeys.get(vaultId);
-    return k ? legacyTagOf(k) : null;
-  }
-
-  /**
-   * §8.2: this device vouches for the v1-only key of `vaultId` (freeze evidence: "frozen"; the human's Accept:
-   * "confirmed"), BOUND to the key with tag `tag` (default: the key held now). With no tag and no held key nothing is
-   * recorded: a vouch for "whatever key arrives" is exactly what HIGH-1 forbids.
-   */
-  authorizeLegacyKey(vaultId: string, tag?: string, kind: LegacyVouchKind = "confirmed"): void {
-    const t = tag ?? this.legacyKeyTag(vaultId);
-    if (!t || !/^[0-9a-f]{64}$/.test(t)) return;
-    this.legacyVouches.set(vaultId, { tag: t, kind });
-    // A7 review LOW-1: a vouched key is a trusted key; its tag joins the held-key memory (never overwriting one).
-    if (!this.heldKeyTags.has(vaultId)) this.heldKeyTags.set(vaultId, t);
-  }
-
-  /** The vouch recorded for `vaultId`, for the store to persist. */
-  legacyVouch(vaultId: string): LegacyVouch | null {
-    return this.legacyVouches.get(vaultId) ?? null;
-  }
-
-  /** True when a v2 grant for `vaultId` is waiting on verification (§1.6). */
-  hasPendingGrant(vaultId: string): boolean {
-    return this.pendingGrantsByVault.has(vaultId);
-  }
-
-  /** True when a v2 grant for `vaultId` failed §1.4 (the review card must not offer TOFU over it, LOW-2). */
-  hasGrantAnomaly(vaultId: string): boolean {
-    return this.grantAnomaliesByVault.has(vaultId);
-  }
-
-  /** The sender the VERIFIED v2 grant for `vaultId` names (null unless the key came from one). */
-  signedGrantSender(vaultId: string): string | null {
-    return this.keySources.get(vaultId) === "signed-grant" ? (this.signedGrantFrom.get(vaultId) ?? null) : null;
-  }
-
-  pendingGrants(): PendingGrant[] {
-    return [...this.pendingGrantsByVault.values()];
-  }
-
-  grantAnomalies(): Map<string, GrantVerdict> {
-    return new Map(this.grantAnomaliesByVault);
-  }
-
-  /**
-   * Owner side (root cause A §1.5): grant v2 for `vaultId` to the member `pin` names — `toKey` is the PINNED key and
-   * the frame is sealed to it, never to a key fresh from `/users/lookup`. Refuses a key this account itself holds only
-   * from an unconfirmed v1 seal (signing it would launder it to the member). The signing secret never leaves here.
-   */
-  buildSignedGrant(vaultId: string, pin: Contact): string {
-    if (this.isLegacyReadOnly(vaultId) || this.heldKeyContradictsVouch(vaultId)) throw new VaultKeyNotVerifiedError(vaultId);
-    if (pin.userId === this.userId) throw new CryptoError("a vault grant cannot be addressed to its sender");
-    const pinKey = fromB64(pin.identityPub);
-    const frame = buildGrantFrame(
-      { publicKey: this.signPub, privateKey: this.signSecret },
-      { purpose: "vault-grant", from: this.userId, to: pin.userId, toKey: pinKey, vaultId, grantId: randomBytes(16), issuedAt: Date.now(), vk: this.vk(vaultId) },
-    );
-    return toB64(sealGrantFrame(pinKey, frame));
-  }
-
-  /**
-   * True when this vault's VK reached us through a member grant (`sealedVk`,
-   * `crypto_box_seal` to our identity pubkey) rather than wrapped under our own UVK.
-   *
-   * WHY this is security-relevant and not bookkeeping: a `sealedVk` is ANONYMOUS — anybody
-   * holding our public identity key can mint one, and the VK inside it is by construction a
-   * key at least one other person already has. A `wrappedVk` opens only under our UVK with AD
-   * `andvari/v1|vk|{vaultId}|{userId}`, so it is unforgeable evidence that this client itself
-   * sealed that key for itself (enrollment, shared-vault creation, password-change re-wrap,
-   * transfer accept). "Which vault is mine alone" must rest on the second kind of evidence.
-   *
-   * Since the member self-wrap (root cause A §3.2) a member's row can carry a `wrappedVk` too, so
-   * this also answers true for a row that carries any seal or whose role is not owner (see addGrant).
-   */
-  keyArrivedByMemberGrant(vaultId: string): boolean {
-    return this.memberGrantedVaults.has(vaultId);
   }
 
   /**
@@ -1077,12 +677,9 @@ export class Account {
     return open(await usageKey(this.vk(this.personalVaultId)), fromB64(sealedUsage), adUsage(this.userId));
   }
 
-  /**
-   * The EFFECTIVE role (core `roleFor` twin): the server-declared role, except that a vault whose key is
-   * legacy-read-only (INV-WRITE-KEY) reads as `reader`, so every write path that refuses readers refuses it too.
-   */
+  /** The EFFECTIVE role (core `roleFor` twin): the verified log's for a log-governed vault, else the served row's. */
   roleFor(vaultId: string): string | null {
-    if (this.isLegacyReadOnly(vaultId)) return "reader";
+    if (this.logGoverned.has(vaultId)) return this.logRoles?.(vaultId) ?? null;
     return this.vaultRoles.get(vaultId) ?? null;
   }
 
@@ -1093,66 +690,25 @@ export class Account {
   }
 
   /**
-   * A fresh master-password reauth checked IN THIS BROWSER (A6b, "You own <vault>?"; core `verifyPassword` twin):
-   * true only when `password` derives a wrap key that opens `keys.wrappedUvk` to the UVK this session already holds.
-   * The server serves `keys`, but it cannot make a password it chose pass without a wrap of OUR UVK. MK and the wrap
-   * key are wiped on the way out (audit H80).
+   * THE in-session password proof (spec 01 §7, "the proof runs against the device's own wrap"; security review 2026-10,
+   * branch A9, M-1; core `reauthAuthKey` twin): the login authKey of `password`, derived only after the password opened
+   * the wrap this session keeps ({@link sessionWrap}) to the UVK it holds, under that wrap's own salt and cost. Nothing is
+   * fetched for it and no value a server names goes into it. {@link ReauthFailedError}: the password opens no kept wrap,
+   * found out here. {@link ReauthStaleSessionError}: this session keeps no wrap. {@link KdfPolicyError}: the kept cost
+   * is outside the bounds. Every password-derived upload goes through here or through the Settings flows' `reauth`,
+   * which proves against the same kept wrap; {@link deriveAuthKey} is for sign-in only.
    */
-  /** A6b carry-forward (A1b; core `sessionSaltCurrent`): `keys` carry the salt THIS session unlocked with. After an
-   *  in-session password change or KDF upgrade they do not, and {@link verifyPassword} fails closed. */
-  sessionSaltCurrent(keys: Pick<AccountKeys, "kdfSalt">): boolean {
-    return this.sessionKdfSalt !== null && keys.kdfSalt === this.sessionKdfSalt;
-  }
-
-  /**
-   * THE in-session password proof (security review 2026-10, branch A9, M-1; core `reauthAuthKey` twin): the login
-   * authKey of `password` under `keys`, derived ONLY after (1) the unlock KDF floor/ceiling fence ({@link KdfPolicyError}:
-   * weakened or absurd params the server chose derive nothing) and (2) the check that `keys` carry the salt THIS
-   * session unlocked with ({@link ReauthStaleSessionError}: a replayed older AccountKeys, or a password change / KDF
-   * upgrade since, never gets a second hash of the master password under a salt the server picked). Every
-   * password-derived upload (a reauth, TOTP enrolment, the KDF re-key's current proof, the personal-vault
-   * re-designation, the recovery-capture gate) goes through here; {@link deriveAuthKey} is for sign-in only.
-   */
-  async reauthAuthKey(password: string, keys: Pick<AccountKeys, "kdfSalt" | "kdfParams" | "wrappedUvk">): Promise<string> {
-    assertServerKdfParams(keys.kdfParams);
-    if (!this.sessionSaltCurrent(keys)) throw new ReauthStaleSessionError();
-    // A9 review LOW-1 (core twin): the salt check is only a pre-check; the derivation is PROVED in the same argon2 pass
-    // (the wrap key must open the served wrappedUvk to this session's UVK). A substituted wrap or a wrong password derives
-    // nothing that leaves the browser.
-    const authKey = await this.proveMasterPassword(password, keys);
-    if (authKey === null) throw new ReauthFailedError();
-    return authKey;
-  }
-
-  /** ONE argon2id pass split into the wrap key and the auth key; the wrap key must open `keys.wrappedUvk` to the UVK
-   *  this session holds, and only then is the base64 auth key returned. Null = wrong password, or keys that are not this
-   *  account's. MK, both derived keys and the opened copy are wiped on the way out (audit H80). */
-  private async proveMasterPassword(password: string, keys: Pick<AccountKeys, "kdfSalt" | "kdfParams" | "wrappedUvk">): Promise<string | null> {
-    const mk = masterKey(password, fromB64(keys.kdfSalt), keys.kdfParams);
-    let authKey: Uint8Array;
-    let wrapKey: Uint8Array;
-    try {
-      authKey = await deriveAuthKey(mk);
-      wrapKey = await deriveWrapKey(mk);
-    } finally {
-      mk.fill(0);
-    }
-    try {
-      let opened: Uint8Array;
-      try {
-        opened = open(wrapKey, fromB64(keys.wrappedUvk), adUvk(this.userId));
-      } catch {
-        return null;
-      }
-      try {
-        if (!ctEquals(opened, this.uvk)) return null;
-      } finally {
-        opened.fill(0);
-      }
-      return toB64(authKey);
-    } finally {
-      authKey.fill(0);
-      wrapKey.fill(0);
+  async reauthAuthKey(password: string): Promise<string> {
+    const r = await this.sessionWrapValue.prove(password, this.userId, this.uvk);
+    switch (r.kind) {
+      case "proven":
+        return r.currentAuthKey;
+      case "wrong_password":
+        throw new ReauthFailedError();
+      case "weakened":
+        throw r.error;
+      case "no_wrap":
+        throw new ReauthStaleSessionError();
     }
   }
 
@@ -1163,65 +719,15 @@ export class Account {
     this.signSecret.fill(0);
   }
 
-  async verifyPassword(password: string, keys: AccountKeys): Promise<boolean> {
-    // A6b review LOW-3 (core twin): the KDF floor/ceiling fence unlock applies (throws KdfPolicyError), and only the
-    // salt THIS session unlocked with: a replayed older AccountKeys carries another salt and the OLD password's wrap.
-    assertServerKdfParams(keys.kdfParams);
-    if (this.sessionKdfSalt === null || keys.kdfSalt !== this.sessionKdfSalt) return false;
-    return (await this.proveMasterPassword(password, keys)) !== null; // A9 review: the one proof, shared with reauthAuthKey
-  }
-
-  /** A7 review MEDIUM-1 (core twin): forget this device's key memory for `vaultId` (the §8.2 vouch and the held-key
-   *  tag). Only for a drop the USER initiated here (their own leave or delete); a server-driven drop keeps both. */
-  forgetKeyMemory(vaultId: string): void {
-    this.legacyVouches.delete(vaultId);
-    this.heldKeyTags.delete(vaultId);
-  }
-
-  /** Membership revoked (sync `removedGrants`): forget the VK and the role. */
+  /** Membership revoked (sync `removedGrants`): wipe and forget the VK, and the role. The key is zero-filled
+   *  here, before its map entry goes; the log key ring's own delete found no entry left to wipe. */
   removeVault(vaultId: string) {
+    this.vaultKeys.get(vaultId)?.fill(0);
     this.vaultKeys.delete(vaultId);
+    this.keyAdds.delete(vaultId);
     this.vaultRoles.delete(vaultId);
-    this.memberGrantedVaults.delete(vaultId); // provenance dies with the key it describes (H64)
     this.uvkWrappedVaults.delete(vaultId);
     this.vkMismatchVaults.delete(vaultId);
-    this.unreadableKeyVaults.delete(vaultId);
-    this.keySources.delete(vaultId);
-    this.signedGrantFrom.delete(vaultId);
-    // A7 review MEDIUM-1: the vouch and the held-key tag are NOT dropped here; see forgetKeyMemory.
-    this.pendingGrantsByVault.delete(vaultId);
-    this.grantAnomaliesByVault.delete(vaultId);
-  }
-
-  /**
-   * Seal this vault's VK to a member's identity key (spec 01 §6 member grant). The
-   * caller MUST have verified `memberIdentityPub`'s fingerprint out of band first.
-   * Throws if we do not hold the vault key.
-   */
-  wrapVkForMember(memberIdentityPub: Uint8Array, vaultId: string): string {
-    return toB64(sealSharedGrant(memberIdentityPub, vaultId, this.vk(vaultId)));
-  }
-
-  /**
-   * Build a shared-vault create request (spec 03 §10): fresh vaultId + VK, metaBlob
-   * under VK, and the owner's wrappedVk under the UVK — the same formula as the
-   * personal vault at enrollment. Registers the VK + owner role locally so the vault
-   * is usable immediately; call removeVault(vaultId) if the server rejects the create.
-   */
-  buildCreateSharedVault(name: string): { request: CreateVaultRequest; vaultId: string } {
-    const vaultId = uuidv4();
-    const vk = randomBytes(32);
-    const request: CreateVaultRequest = {
-      vaultId,
-      metaBlob: toB64(seal(vk, utf8(JSON.stringify({ name })), adVaultMeta(vaultId))),
-      wrappedVk: toB64(seal(this.uvk, vk, adVk(vaultId, this.userId))),
-    };
-    this.vaultKeys.set(vaultId, vk);
-    this.heldKeyTags.set(vaultId, legacyTagOf(vk)); // A7: a fresh vault's key is this device's from the first moment
-    this.vaultRoles.set(vaultId, "owner");
-    this.keySources.set(vaultId, "uvk-wrap");
-    this.uvkWrappedVaults.add(vaultId);
-    return { request, vaultId };
   }
 
   /**
@@ -1243,171 +749,29 @@ export class Account {
   /**
    * Root cause A §4.3 (core `Account.applyPersonalWrap` twin): adopt the personal vault from
    * `AccountKeys.personalWrap`, `Envelope(UVK, VK, adVkPersonal(vaultId, userId))`. Absent → "absent"
-   * (no personal vault until the §8.5 migration resolves). Opens → "confirmed", its VK held FIRST.
-   * Does not open → "unreadable" (an anomaly), no personal vault, and no fallback to any label.
-   * Replaces the pre-A5 `setPersonalVault(label candidate)`: a server `type` label or `role` never
-   * reaches this decision any more.
+   * (no personal vault). Opens → "confirmed", its VK held FIRST. Does not open → "unreadable" (an anomaly),
+   * no personal vault, and no fallback to any label. A server `type` label or `role` never reaches this decision.
+   * Design §5.3: decided once. While a personal vault is in force, a later apply (another vault's wrap, junk or none)
+   * changes nothing: there is no notice to confirm a switch with, so there is no switch.
    */
   applyPersonalWrap(wrap: PersonalWrap | null) {
+    if (this.personalStatusValue === "confirmed") return;
     if (!wrap) {
-      if (this.personalStatusValue === "absent" || this.personalStatusValue === "unreadable") {
-        this.personalStatusValue = "absent";
-        this.personalVaultIdValue = "";
-      }
+      this.personalStatusValue = "absent";
+      this.personalVaultIdValue = "";
       return;
     }
-    // A11 (c19): a PROPOSAL stays a proposal on a second apply (a keys refresh, a second pass): only the human resolves it
-    // (acceptPersonalChange after the co-holders were shown, or a reauthed re-designation). Before, nothing was in force
-    // while proposed, so a second apply fell through to the bottom and installed the wrap as "confirmed".
-    if (this.personalStatusValue === "proposed") return;
-    // A9 (M-2 review): "never switch silently" holds HERE, not only in the store's call order. While a wrap is in force
-    // on this device (served, cached or confirmed), a wrap for ANOTHER vault applied later (a keys refresh, a second
-    // pass) is a notice ("changed"), and one that does not open keeps the wrap in force ("unreadable-cached").
-    const inForce = this.personalWrapValue;
-    if (inForce && this.personalVaultIdValue) {
-      if (wrap.vaultId === inForce.vaultId) {
-        if (this.openAndInstallPersonalWrap(wrap)) {
-          this.pendingPersonalChangeValue = null;
-          this.personalStatusValue = "confirmed";
-        } else this.personalStatusValue = "unreadable-cached";
-        return;
-      }
-      const vk = this.openPersonalWrap(wrap);
-      if (!vk) {
-        this.personalStatusValue = "unreadable-cached";
-        return;
-      }
-      this.holdKeyFromPersonalWrap(wrap.vaultId, vk);
-      this.pendingPersonalChangeValue = wrap;
-      this.personalStatusValue = "changed";
-      return;
-    }
-    this.pendingPersonalChangeValue = null;
-    this.proposedAgainstDesignationValue = null;
     if (this.openAndInstallPersonalWrap(wrap)) this.personalStatusValue = "confirmed";
     else {
       this.personalStatusValue = "unreadable";
       this.personalVaultIdValue = "";
-      this.personalWrapValue = null;
     }
   }
-
-  /** The human's CONFIRMED designation (the migration choice, or a reauthed re-designation; A9): the wrap this client
-   *  just minted and the server accepted is in force now, whatever was before. The only path that replaces a wrap in
-   *  force without the "changed" notice, because the human is the one who named the vault. */
-  installDesignatedPersonalWrap(wrap: PersonalWrap): void {
-    if (!this.openAndInstallPersonalWrap(wrap)) throw new Error("the designated personal wrap does not open");
-    this.pendingPersonalChangeValue = null;
-    this.proposedAgainstDesignationValue = null;
-    this.personalStatusValue = "confirmed";
-  }
-
-  /**
-   * A9 (M-2; core `holdPersonalProposal` twin): the served wrap opened ("confirmed") but nothing on this device vouches
-   * for it: no cached wrap, and the account state has no designation, or one for another vault (`designation`). It
-   * becomes a PROPOSAL: nothing is in force (`personalVaultId` empty), {@link pendingPersonalChange} holds the served
-   * wrap, and {@link acceptPersonalChange} (after the co-holders were shown) or a reauthed re-designation resolves it.
-   */
-  holdPersonalProposal(designation: string | null): boolean {
-    const served = this.personalWrapValue;
-    if (!served || this.personalStatusValue !== "confirmed") return false;
-    this.pendingPersonalChangeValue = served;
-    this.proposedAgainstDesignationValue = designation;
-    this.personalWrapValue = null;
-    this.personalVaultIdValue = "";
-    this.personalStatusValue = "proposed";
-    return true;
-  }
-
-  /** While "proposed": the account-state designation the served wrap contradicts (null = none). */
-  get proposedAgainstDesignation(): string | null {
-    return this.proposedAgainstDesignationValue;
-  }
-
-  private proposedAgainstDesignationValue: string | null = null;
-
-  /** A9 (M-2): set by {@link enroll} on the registering device, which designates its minted wrap at its first sync. */
-  personalWrapMintedHere = false;
-
-  /**
-   * The wrap THIS DEVICE cached the last time it authenticated one (UVK-sealed), applied after the served wrap
-   * was judged (A5 review H-1; A5b L-1). Core twin: `applyCachedPersonalWrap`.
-   *  - "absent" (none served): success → "withheld"; a cached blob that does not open → "unreadable";
-   *  - "unreadable" (junk served): success → "unreadable-cached", the cached wrap in force; else no change.
-   *  - A11 (c00): when the account's designation (`designation`, account state) names ANOTHER vault than the cached
-   *    wrap, the cached wrap is held as a PROPOSAL ("proposed", nothing in force, `pendingPersonalChange` = the cached
-   *    wrap, `proposedAgainstDesignation` = the designation), exactly like a served wrap the designation does not name.
-   *    Otherwise withholding or junk would put the cached wrap in force where serving it would not.
-   */
-  applyCachedPersonalWrap(wrap: PersonalWrap, designation: string | null = null) {
-    if ((this.personalStatusValue === "absent" || this.personalStatusValue === "unreadable") && designation !== null && designation !== wrap.vaultId) {
-      const vk = this.openPersonalWrap(wrap);
-      if (!vk) {
-        if (this.personalStatusValue === "absent") this.personalVaultIdValue = "";
-        this.personalStatusValue = "unreadable";
-        return;
-      }
-      this.holdKeyFromPersonalWrap(wrap.vaultId, vk); // our own key (it opened under our UVK), held for reading only
-      this.personalWrapValue = null;
-      this.personalVaultIdValue = "";
-      this.pendingPersonalChangeValue = wrap;
-      this.proposedAgainstDesignationValue = designation;
-      this.personalStatusValue = "proposed";
-      return;
-    }
-    if (this.personalStatusValue === "absent") {
-      if (this.openAndInstallPersonalWrap(wrap)) this.personalStatusValue = "withheld";
-      else {
-        this.personalStatusValue = "unreadable";
-        this.personalVaultIdValue = "";
-      }
-    } else if (this.personalStatusValue === "unreadable") {
-      if (this.openAndInstallPersonalWrap(wrap)) this.personalStatusValue = "unreadable-cached";
-    }
-  }
-
-  /**
-   * A5b M-2 / L-2 (core `holdPersonalChange` twin): the served wrap opened ("confirmed") but this device's
-   * cached wrap names a DIFFERENT vault. If the cached wrap opens, it stays in force and the served one waits
-   * in {@link pendingPersonalChange} ("changed") until the human confirms. False when nothing was held.
-   */
-  holdPersonalChange(cached: PersonalWrap): boolean {
-    const served = this.personalWrapValue;
-    if (!served || this.personalStatusValue !== "confirmed" || cached.vaultId === served.vaultId) return false;
-    if (!this.openAndInstallPersonalWrap(cached)) return false; // mutates only on success
-    this.pendingPersonalChangeValue = served;
-    this.personalStatusValue = "changed";
-    return true;
-  }
-
-  /** The human confirmed a "changed" notice: the served wrap (already authenticated) is now in force. Mints nothing. */
-  acceptPersonalChange(): void {
-    const served = this.pendingPersonalChangeValue;
-    if (!served || (this.personalStatusValue !== "changed" && this.personalStatusValue !== "proposed")) throw new Error("no personal-vault change is pending");
-    if (!this.openAndInstallPersonalWrap(served)) throw new Error("the served personal wrap no longer opens");
-    this.pendingPersonalChangeValue = null;
-    this.proposedAgainstDesignationValue = null;
-    this.personalStatusValue = "confirmed";
-  }
-
-  /** The served wrap waiting for the human while the status is "changed". */
-  get pendingPersonalChange(): PersonalWrap | null {
-    return this.pendingPersonalChangeValue;
-  }
-
-  private pendingPersonalChangeValue: PersonalWrap | null = null;
-
-  /** The wrap that decided the personal vault (served or cached), for the device's local cache. */
-  get personalWrap(): PersonalWrap | null {
-    return this.personalWrapValue;
-  }
-
-  private personalWrapValue: PersonalWrap | null = null;
 
   /** The VK a personal wrap opens to under our UVK with the `vk-personal` AD, or null. */
   private openPersonalWrap(wrap: PersonalWrap): Uint8Array | null {
     try {
-      const vk = open(this.uvk, fromB64(wrap.wrappedVk), adVkPersonal(wrap.vaultId, this.userId));
+      const vk = openKey(this.uvk, fromB64(wrap.wrappedVk), adVkPersonal(wrap.vaultId, this.userId), "the personal wrap");
       return vk.length === 32 ? vk : null;
     } catch {
       return null;
@@ -1419,8 +783,6 @@ export class Account {
     const held = this.vaultKeys.get(vaultId);
     if (held && !ctEquals(held, vk)) this.vkMismatchVaults.add(vaultId);
     this.vaultKeys.set(vaultId, vk);
-    this.keySources.set(vaultId, "personal-wrap");
-    this.unreadableKeyVaults.delete(vaultId);
     this.uvkWrappedVaults.add(vaultId);
   }
 
@@ -1429,23 +791,12 @@ export class Account {
     if (!vk) return false;
     this.holdKeyFromPersonalWrap(wrap.vaultId, vk);
     this.personalVaultIdValue = wrap.vaultId;
-    this.personalWrapValue = wrap;
     return true;
   }
 
-  /** True when this vault's key opened from a UVK wrap of ours (never a seal): re-designation may offer it. */
+  /** True when this vault's key opened from a UVK wrap of ours (never a seal). */
   keyFromOwnUvkWrap(vaultId: string): boolean {
     return this.uvkWrappedVaults.has(vaultId) && this.vaultKeys.has(vaultId);
-  }
-
-  /** Mint the personal wrap for `vaultId` (§4.1), round-trip verified. Refuses a vault whose key did not
-   *  open from our own UVK wrap, so a seal-delivered key is never laundered into "personal". */
-  buildPersonalWrap(vaultId: string): PersonalWrap {
-    if (!this.keyFromOwnUvkWrap(vaultId)) throw new CryptoError(`vault ${vaultId} is not wrapped under this account's key`);
-    const vk = this.vk(vaultId);
-    const wrapped = seal(this.uvk, vk, adVkPersonal(vaultId, this.userId));
-    if (!ctEquals(open(this.uvk, wrapped, adVkPersonal(vaultId, this.userId)), vk)) throw new CryptoError("personal wrap failed round-trip verification");
-    return { vaultId, wrappedVk: toB64(wrapped) };
   }
 
   /** Seal an account-state document (root cause A §4.2) under the UVK, bound to this userId. */
@@ -1462,6 +813,80 @@ export class Account {
 
   hasVault(vaultId: string): boolean {
     return this.vaultKeys.has(vaultId);
+  }
+
+  /**
+   * The key ring the vault log store adopts shared-vault keys into (design §3.6): the same map items are encrypted
+   * with. A key installed here marks its vault as log-governed; a removal drops the key and the role.
+   */
+  logKeyRing(): {
+    get(vaultId: string): Uint8Array | undefined;
+    has(vaultId: string): boolean;
+    set(vaultId: string, vk: Uint8Array, addSeq?: number): void;
+    delete(vaultId: string): void;
+    addOf(vaultId: string): number | undefined;
+  } {
+    return {
+      get: (vaultId) => (this.logGoverned.has(vaultId) ? this.vaultKeys.get(vaultId) : undefined),
+      has: (vaultId) => this.logGoverned.has(vaultId) && this.vaultKeys.has(vaultId),
+      set: (vaultId, vk, addSeq) => {
+        if (vaultId === this.personalVaultId) throw new CryptoError("the personal vault is not log-governed");
+        this.logGoverned.add(vaultId);
+        this.vaultKeys.set(vaultId, vk);
+        if (addSeq === undefined) this.keyAdds.delete(vaultId);
+        else this.keyAdds.set(vaultId, addSeq);
+      },
+      delete: (vaultId) => {
+        if (!this.logGoverned.has(vaultId)) return;
+        this.vaultKeys.get(vaultId)?.fill(0);
+        this.vaultKeys.delete(vaultId);
+        this.vaultRoles.delete(vaultId);
+        this.keyAdds.delete(vaultId);
+      },
+      addOf: (vaultId) => (this.logGoverned.has(vaultId) && this.vaultKeys.has(vaultId) ? this.keyAdds.get(vaultId) : undefined),
+    };
+  }
+
+  /** Attaches the question "through which `add` does the verified log name this account now" ({@link keyWorks}). */
+  attachLogMember(memberAdd: (vaultId: string) => number | null | undefined): void {
+    this.logMember = memberAdd;
+  }
+
+  /**
+   * Whether the key held for [vaultId] may be used now: always for a vault no log governs; for a log-governed one only
+   * while the `add` it was adopted under is the one the verified log names now. A road that moves the log without the
+   * removal's rule running after it (another tab, a chase of an item's head, a read outside a pull) leaves the key in
+   * the ring but working for nothing: the vault is not listed, no item of it is opened or shown, nothing is sealed.
+   */
+  keyWorks(vaultId: string): boolean {
+    if (!this.logGoverned.has(vaultId) || this.logMember === null) return true;
+    if (!this.vaultKeys.has(vaultId)) return false;
+    return this.keyAdds.get(vaultId) === this.logMember(vaultId);
+  }
+
+  /**
+   * The one question asked before any change of [vaultId] leaves this browser (a save, a delete, a restore, a rename,
+   * each step of a move or a copy out, an attachment, an entry of the vault's log): for a shared vault, once the logs
+   * are attached, true only while its key is held and works ({@link keyWorks}). A shared vault whose key this session
+   * never took up (a new start that holds it unopened until a removal is carried out) has none, so nothing of it is
+   * sent. The personal vault, and a store with no logs attached, are not decided by a log.
+   */
+  mayWrite(vaultId: string): boolean {
+    if (this.logMember === null || vaultId === this.personalVaultId) return true;
+    return this.logGoverned.has(vaultId) && this.vaultKeys.has(vaultId) && this.keyWorks(vaultId);
+  }
+
+  /**
+   * Roles of log-governed vaults come from [roleOf] (the verified log's member list), never from the served row;
+   * [writeAllowed] is the log store's write gate (a verified log this account is a member of), asked at every seal.
+   */
+  attachLogRoles(roleOf: (vaultId: string) => string | null, writeAllowed: (vaultId: string) => boolean = () => false): void {
+    this.logRoles = roleOf;
+    this.logWrites = writeAllowed;
+  }
+
+  isLogGoverned(vaultId: string): boolean {
+    return this.logGoverned.has(vaultId);
   }
 
   private vk(vaultId: string): Uint8Array {
@@ -1507,19 +932,30 @@ export class Account {
 
   /** INV-WRITE-KEY as a question: may an item be sealed under `vaultId`'s held key at all? (core `canSealUnder`) */
   canSealUnder(vaultId: string): boolean {
-    return !this.isLegacyReadOnly(vaultId) && !this.heldKeyContradictsVouch(vaultId);
+    // A log-governed vault: only on a verified log this account is a member of, and never as a reader (design §3.9).
+    if (this.logGoverned.has(vaultId)) return (this.logWrites?.(vaultId) ?? false) && this.roleFor(vaultId) !== "reader" && this.keyWorks(vaultId);
+    return true;
   }
 
   /**
    * THE item seal for anything pushed (security review 2026-10, root cause A §5.1 INV-SEAL; branch A1b; core
    * `Account.sealItem` twin): item plaintext is sealed under `VK_v` only for its provenance vault `v`, and never under a
-   * key INV-WRITE-KEY refuses (legacy-read-only, or contradicting this device's vouch / held-key memory). The
+   * key INV-WRITE-KEY refuses (a log-governed vault the verified log does not let this account write to). The
    * formatVersion — also bound into the AD — is max(docFloor, the fv this itemId was last decrypted/sealed at), so
    * callers never thread fv explicitly. The wire fv and the AD fv come from this ONE computation.
    */
   sealItem(provenance: SealProvenance, itemId: string, doc: ItemDoc): ItemUpload {
     if (!this.canSealUnder(provenance.vaultId)) throw new VaultKeyNotVerifiedError(provenance.vaultId); // INV-WRITE-KEY
-    return this.sealUnder(provenance.vaultId, itemId, doc);
+    // Design §3.9: a write to a shared vault carries that vault's verified log head; any other write carries none.
+    const head = this.isLogGoverned(provenance.vaultId) ? this.logHeads(provenance.vaultId) : null;
+    return this.sealUnder(provenance.vaultId, itemId, stampLogHead(doc, head));
+  }
+
+  private logHeads: (vaultId: string) => ItemLogHead | null = () => null;
+
+  /** The verified head of each log-governed vault, which every write to it carries (spec 02 §3 `logHead`). */
+  attachLogHeads(headOf: (vaultId: string) => ItemLogHead | null): void {
+    this.logHeads = headOf;
   }
 
   /**
@@ -1534,7 +970,7 @@ export class Account {
    * A LOCAL re-seal, never pushed: plaintext DECRYPTED from `vaultId` (provenance (a)) sealed again under the same key
    * for this device's own ciphertext-only storage — the holding-area snapshot (store.moveToHolding), a queued write's
    * pre-edit snapshot, and the revert of a refused write. Not a new provenance and not something the household
-   * receives, so INV-WRITE-KEY does not apply: a removed legacy-read-only vault is parked exactly like any other.
+   * receives, so INV-WRITE-KEY does not apply: a removed vault this account could only read is parked like any other.
    */
   resealLocal(vaultId: string, itemId: string, doc: ItemDoc): ItemUpload {
     return this.sealUnder(vaultId, itemId, doc);
@@ -1552,13 +988,28 @@ export class Account {
     return { formatVersion: fv, blob: toB64(blob) };
   }
 
+  /** An item opened under the ring's key; for a log-governed vault only while that key works ({@link keyWorks}). */
   decryptItem(item: WireItem): ItemDoc {
+    if (!this.keyWorks(item.vaultId)) throw new CryptoError(`the key of vault ${item.vaultId} does not work now`);
+    return this.decryptItemWith(item, () => this.vk(item.vaultId));
+  }
+
+  /**
+   * A held vault's item (design §3.8, §3.12), under the key the caller opened from this account's own wrap for it and
+   * checked against the log's commitment; the key is not put in the ring, so nothing is written under it.
+   */
+  decryptHeldItem(item: WireItem, vk: Uint8Array): ItemDoc {
+    return this.decryptItemWith(item, () => vk);
+  }
+
+  /** [vk] is read only after the format gate, so a newer format fails as such before any key is looked up. */
+  private decryptItemWith(item: WireItem, vk: () => Uint8Array): ItemDoc {
     if (!item.blob) throw new CryptoError("item has no blob (tombstone?)");
     // Fail closed on documents from a NEWER format: unknown-field preservation (spec 02 §3)
     // is scoped WITHIN a formatVersion, and editing a v3 doc here would re-seal it silently
     // downgraded. CryptoError rides the existing catch paths ("undecryptable").
     if (item.formatVersion > ITEM_FORMAT_VERSION) throw new CryptoError(`item formatVersion ${item.formatVersion} is newer than this client supports`);
-    const plain = open(this.vk(item.vaultId), fromB64(item.blob), adItem(item.vaultId, item.itemId, item.formatVersion));
+    const plain = open(vk(), fromB64(item.blob), adItem(item.vaultId, item.itemId, item.formatVersion));
     // CONTRACT (spec 02 §3): the parsed doc may carry fields this client version does not
     // know — they MUST survive a rewrite. Never rebuild a decrypted doc field-by-field;
     // edit via spread/structuredClone only, so unknown keys round-trip through encryptItem.
@@ -1628,50 +1079,6 @@ export class Account {
     return meta as Record<string, unknown>;
   }
 
-  // ---- vault lifecycle (spec 03 §11) ----
-
-  /**
-   * The lifecycle key for a vault: `HKDF-SHA-256(VK, "andvari/v1|lifecycle")` — domain-
-   * separated from the AEAD key. Callers mint/verify destructive-op proofs under it; the VK
-   * itself never leaves this class (ZK: proofs are MACs the server can neither mint nor open).
-   */
-  lifecycleKeyFor(vaultId: string): Promise<Uint8Array> {
-    return lifecycleKey(this.vk(vaultId));
-  }
-
-  /**
-   * Transfer accept (spec 03 §11): the new owner re-wraps the VK it ALREADY holds (via its
-   * sealed member grant) under its OWN UVK — identical construction to vault creation
-   * (`seal(UVK, VK, adVk(vaultId, me))`). Round-trip-verified before returning, so a garbage
-   * wrap that would lock the new owner out never gets posted (the "garbage-wrap" break).
-   */
-  buildOwnerWrap(vaultId: string): string {
-    // A transfer accept must not launder a key only an unconfirmed v1 seal vouches for (root cause A §8.2).
-    if (this.isLegacyReadOnly(vaultId) || this.heldKeyContradictsVouch(vaultId)) throw new VaultKeyNotVerifiedError(vaultId);
-    return this.roundTripWrap(vaultId, "owner wrap");
-  }
-
-  /**
-   * Member self-wrap (security review 2026-10, root cause A §3.2): the VK this member already holds,
-   * wrapped under its OWN UVK exactly as {@link buildOwnerWrap} does, round-trip verified, for
-   * `PUT /vaults/{id}/grant/self-wrap`. Once it is on the row every device of this member takes the
-   * key from the wrap and the seal stops being load-bearing. Only for a key whose origin is
-   * authenticated (see needsSelfWrap). Core twin: `Account.buildSelfWrap`.
-   */
-  buildSelfWrap(vaultId: string): string {
-    if (!this.selfWrapAuthorized(vaultId)) throw new VaultKeyNotVerifiedError(vaultId);
-    return this.roundTripWrap(vaultId, "self wrap");
-  }
-
-  private roundTripWrap(vaultId: string, what: string): string {
-    const vk = this.vk(vaultId);
-    const wrapped = seal(this.uvk, vk, adVk(vaultId, this.userId));
-    if (!ctEquals(open(this.uvk, wrapped, adVk(vaultId, this.userId)), vk)) {
-      throw new CryptoError(`${what} failed round-trip verification`);
-    }
-    return toB64(wrapped);
-  }
-
   /**
    * Rename (spec 03 §11 / Q6): read-modify-write the metaBlob under the SAME VK/AD — change
    * ONLY `name`, PRESERVE every unknown field (spec 02 §4), and increment the monotonic
@@ -1679,8 +1086,8 @@ export class Account {
    * stays E2E ciphertext; the server only ever sees an opaque blob.
    */
   buildRenameMeta(vaultId: string, metaBlob: string, newName: string): string {
-    // INV-WRITE-KEY "whatever the path" (A9 LOW): a name is sealed under the VK like an item, so a legacy-read-only key
-    // or one that contradicts this device's vouch is refused here too, through the same {@link canSealUnder}.
+    // INV-WRITE-KEY "whatever the path" (A9 LOW): a name is sealed under the VK like an item, so a vault the verified
+    // log does not let this account write to is refused here too, through the same {@link canSealUnder}.
     if (!this.canSealUnder(vaultId)) throw new VaultKeyNotVerifiedError(vaultId);
     // A11 (q55): a co-member-authored non-object meta is replaced by a clean one (the new name, the counter restarted
     // from 0 like any junk metaV), never spread into the new document and never a crash.
@@ -1705,35 +1112,6 @@ export class Account {
   }
 
   /**
-   * F57: build a fresh escrow blob re-sealing this account's UVK to the current org recovery key
-   * after a re-ceremony (spec 04 §4). SECURITY: `verifiedFingerprint` MUST be the value the user
-   * confirmed against the NEW printed recovery sheet (short-form). We bind the server-fetched
-   * `recoveryPubB64` to that fingerprint and refuse to seal on mismatch, so a hostile server
-   * cannot redirect the UVK escrow to an attacker-held recovery key. The UVK only ever leaves
-   * the client sealed to the verified recovery public key (zero-knowledge).
-   */
-  async resealEscrowFor(recoveryPubB64: string, verifiedFingerprint: string): Promise<{ sealed: string; fingerprint: string }> {
-    const pub = fromB64(recoveryPubB64);
-    if ((await recoveryFingerprint(pub)) !== verifiedFingerprint) {
-      throw new CryptoError("recovery public key does not match the verified fingerprint — refusing to re-seal escrow");
-    }
-    // Escrow v2 (security review 2026-10, root cause A §2.1 / §8.4) — also the v1 → v2 migration seal.
-    // The server keeps the previous blob as `escrow_legacy` until a fleet drill passes on this one.
-    // The joint signing secret never leaves this class: there is deliberately no public
-    // `signStatement` (module-private parity with core's `internal`, A3 review).
-    const sealed = await sealUvkV2({
-      recoveryPub: pub,
-      verifiedRecoveryFp: verifiedFingerprint,
-      userId: this.userId,
-      identityPub: this.identityPub,
-      signer: { publicKey: this.signPub, privateKey: this.signSecret },
-      uvk: this.uvk,
-      issuedAt: Date.now(),
-    });
-    return { sealed: toB64(sealed), fingerprint: verifiedFingerprint };
-  }
-
-  /**
    * Migration/rotation path (design §F.3, client half of `PUT /recovery/self-setup`): add or rotate
    * THIS account's per-member self-service recovery piece over the in-memory UVK. `currentAuthKey` is
    * re-derived from a fresh master-password prompt by the caller and re-verified server-side (like
@@ -1752,11 +1130,14 @@ export class Account {
   }
 }
 
-export function deviceName(): string {
-  if (typeof navigator !== "undefined" && navigator.userAgent) {
-    const ua = navigator.userAgent;
-    const m = ua.match(/(Chrome|Firefox|Safari|Edg)\/[\d.]+/);
-    return `web ${m ? m[0] : "browser"}`;
-  }
-  return "web";
+/**
+ * This browser's name in the account's device list and the new-device email: "Chrome on Linux", not the user agent's
+ * "web Chrome/149.0.0.0" (browser walk, 2026-11-16). Edge and Opera carry "Chrome/" too, so they are looked for first.
+ */
+export function deviceName(ua: string | null = typeof navigator !== "undefined" ? navigator.userAgent : null): string {
+  if (!ua) return "Web browser";
+  const browser = /Edg(e|A|iOS)?\//.test(ua) ? "Edge" : /OPR\/|Opera/.test(ua) ? "Opera" : /Firefox\/|FxiOS\//.test(ua) ? "Firefox" : /Chrome\/|CriOS\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : "Web browser";
+  const os = /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) ? "iPad" : /Android/.test(ua) ? "Android" : /CrOS/.test(ua) ? "ChromeOS" : /Windows/.test(ua) ? "Windows" : /Macintosh|Mac OS X/.test(ua) ? "Mac" : /Linux/.test(ua) ? "Linux" : null;
+  // Spec 03 §0.1 `text` (server 2026-11-16): a name made up here never carries a character the server refuses.
+  return plainTextOf(os ? `${browser} on ${os}` : browser).slice(0, 256) || "Web browser";
 }

@@ -86,6 +86,17 @@
         padding-left: 16px;
         padding-right: 16px;
       }
+      /* Seen rendered: at a phone's width the address field beside Continue cut its own placeholder
+         ("https://your-server.exa"). Narrow, the field takes the whole row and Continue goes under it. */
+      @media (max-width: 480px) {
+        .row {
+          flex-direction: column;
+          align-items: stretch;
+        }
+        .row button {
+          width: 100%;
+        }
+      }
       /* Trust Gate — a distinct plate so it never reads as ordinary form chrome. */
       .trust-gate {
         margin-top: 16px;
@@ -96,6 +107,10 @@
       }
       .trust-gate[hidden] {
         display: none;
+      }
+      /* Rendered run 2026-11-16: the line after the gate (and after the stop) sat on its border. */
+      .trust-gate {
+        margin-bottom: 12px;
       }
       .trust-gate h3 {
         font-family: var(--serif);
@@ -114,7 +129,14 @@
         border-radius: var(--radius);
         padding: 10px 12px;
         margin: 0 0 12px;
-        overflow-wrap: anywhere;
+        /* Breaks at the <wbr>s options.ts puts between the origin's own pieces; inside a piece only when one piece
+           alone is wider than the box. */
+        overflow-wrap: break-word;
+      }
+      /* Seen rendered at phone width: the injection line sat against the address row or the message box
+         above it, as if it belonged to them. */
+      #autofill-status {
+        margin-top: 14px;
       }
       .gate-body {
         margin: 0 0 10px;
@@ -198,10 +220,10 @@
       <header class="options-head">
         <span class="brand"
           ><span class="sigil-sm"
-            ><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
-              <path d="M12 3v18" />
-              <path d="M5.5 8.5l13 6" /></svg></span
-          ><span class="a-mark">and</span>vari</span
+            ><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M4.85 6.768 L19.15 13.368 L19.15 16.232 L4.85 9.632 Z" />
+              <path d="M10.7 2.35 L13.3 3.55 L13.3 21.25 L10.7 20.05 Z" /></svg></span
+          ><svg class="wordmark" role="img" aria-label="andvari" viewBox="0 -740 3017 980"><path data-wordmark="" fill="currentColor"/></svg></span
         >
         <h1>Options</h1>
       </header>
@@ -209,40 +231,30 @@
       <section class="section" aria-labelledby="server-h">
         <h2 id="server-h">Server</h2>
         <p class="lede">
-          andvari works with any andvari server. This browser is currently connected to:
+          andvari works with the public andvari server or your own. This browser is currently connected to:
         </p>
         <code id="origin-now" class="origin-now">…</code>
 
-        <!-- A15 (security review 2026-10): a server chosen before this update is NOT reconnected silently. The old
-             value sat in storage a web page could have written, so it is shown here for the user to review through
-             the Trust Gate (Connect is still the only commit), or to drop. Since the A15 review (F1) the worker signs
-             in nowhere, the default included, until one of the two happens; (F2) the address is offered only when the
-             browser itself reported the update from an older version. When this browser cannot keep a server choice
-             (Firefox "Never remember history") the address came from the old settings, can only be declined here, and
-             the review button is hidden (options.ts sets both texts). Hidden unless the worker reports one. -->
-        <div id="legacy-note" class="trust-gate" role="group" aria-labelledby="legacy-h" hidden>
-          <h3 id="legacy-h">Confirm your server</h3>
-          <p id="legacy-lead" class="gate-body">When andvari updated to this version, this browser was set to use:</p>
-          <code id="legacy-origin" class="gate-origin"></code>
-          <p id="legacy-body" class="gate-body">
-            That setting was kept where a web page could have changed it, so andvari won't use it, or sign in anywhere,
-            until you decide. If it is your own andvari server, review it and connect. If you don't recognize it,
-            choose "Not mine" and andvari uses its default server instead.
-          </p>
+        <!-- Design 2026-11-15 §4.4, §12.3: a forked or damaged server record stops everything; the only way on is
+             "Forget this server". Hidden unless the worker reports one. -->
+        <div id="server-stop" class="trust-gate" role="group" aria-labelledby="server-stop-h" hidden>
+          <h3 id="server-stop-h">This server can't be used</h3>
+          <div id="server-stop-body" class="gate-body"></div>
+          <!-- Design §4.4: at Forget's first click, the captures it would delete unsaved. Text is set by options.ts. -->
+          <p id="server-forget-note" class="caution" role="status" hidden></p>
           <div class="gate-actions">
-            <button id="legacy-forget" class="ghost" type="button">Not mine</button>
-            <button id="legacy-review" class="primary" type="button">Review this address</button>
+            <button id="server-forget" class="primary" type="button">Forget this server</button>
           </div>
         </div>
         <p id="store-note" class="caution" hidden>
           This browser gives andvari no storage of its own in this mode (Firefox does this when it never remembers
-          history), so andvari can't keep a server choice here and stays on the server shown above. Nor can it keep
-          the vault open while idle: the vault locks whenever Firefox pauses andvari, and quick unlock is off.
+          history), so andvari can't keep a server choice here, and signs in nowhere. Nor can it keep the vault open
+          while idle: the vault locks whenever Firefox pauses andvari, and quick unlock is off.
         </p>
 
         <p class="lede">
-          To point it at your own server, enter its address (for example
-          <code>https://andvari.example.com</code>) and continue.
+          To use your own server, enter its address (for example <code>https://andvari.example.com</code>) and
+          continue. andvari checks the server's identity card before you decide.
         </p>
         <div class="row">
           <div class="field">
@@ -256,6 +268,8 @@
         <div id="trust-gate" class="trust-gate" role="group" aria-labelledby="gate-heading" hidden>
           <h3 id="gate-heading"></h3>
           <code id="gate-origin" class="gate-origin"></code>
+          <p id="gate-card" class="gate-body"></p>
+          <p id="gate-operator" class="gate-body"></p>
           <p id="gate-body" class="gate-body"></p>
           <p id="gate-punycode" class="caution" hidden></p>
           <p id="gate-http" class="caution" hidden></p>
@@ -265,7 +279,7 @@
           </div>
         </div>
 
-        <p id="server-msg" class="msg" role="status" hidden></p>
+        <div id="server-msg" class="msg" role="status" hidden></div>
 
         <!-- Card autofill Tier 1 §10: the honest injection state. Autofill stays dormant until the
              broad all-sites permission is held (the Connect gesture above requests it alongside the

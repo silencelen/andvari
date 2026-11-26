@@ -11,11 +11,17 @@
  * External module only (MV3 CSP forbids inline). No key material ever reaches here.
  */
 import { BROAD_ORIGIN_PATTERN, requestServerGrants } from "./grantflow";
-import { clearLiveMsg, setLiveMsg } from "./livemsg";
+import { drawWordmarks } from "./brand";
+import { clearLiveMsg, messageBlocks, renderBlocks, setLiveMsg, setLiveMsgBlocks } from "./livemsg";
 import { send, type Res } from "./messages";
-import { canonicalizeServerUrl, DEFAULT_SERVER_URL, originMatchPattern } from "./serverurl";
+import { canonicalizeServerUrl, ORIGIN_REFUSED, originMatchPattern } from "./serverurl";
 import { readThemePref, setThemePref, type ThemePref } from "./theme";
-import { trustGateView } from "./trustgate";
+import { originBreakPieces, trustGateView } from "./trustgate";
+import { CARD_RECORD_DAMAGED_TITLE, cardRecordDamagedCopy, chooseServerCopy, chooseServerMessage, SERVER_FORK } from "./errors";
+import { PUBLIC_INSTANCE } from "./publicinstance";
+import * as T from "./copy";
+import { fillApproved } from "./errors";
+import { COUNT_UNKNOWN, forgetUnsavedLine, unsavedArmStep } from "./unsavedarm";
 
 const el = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const e = document.getElementById(id);
@@ -38,19 +44,20 @@ const serverMsg = el("server-msg");
 const purgeBtn = el<HTMLButtonElement>("purge");
 const purgeMsg = el("purge-msg");
 const autofillStatus = el("autofill-status");
-const legacyNote = el("legacy-note");
-const legacyOrigin = el("legacy-origin");
-const legacyLead = el("legacy-lead");
-const legacyBody = el("legacy-body");
-const legacyReview = el<HTMLButtonElement>("legacy-review");
-const legacyForget = el<HTMLButtonElement>("legacy-forget");
+const gateCard = el("gate-card");
+const gateOperator = el("gate-operator");
+const serverStop = el("server-stop");
+const serverStopBody = el("server-stop-body");
+const serverStopHeading = el("server-stop-h");
+const serverForget = el<HTMLButtonElement>("server-forget");
+const serverForgetNote = el("server-forget-note");
 const storeNote = el("store-note");
 const themeChoices = el("theme-choices");
 
-/** The canonical origin the Trust Gate is currently offering — set at Continue, read at Connect. The
- *  Connect handler MUST compute its permission pattern from this WITHOUT an intervening await, so the
- *  user gesture is still live when requestServerGrants calls permissions.request. */
+/** The verified card the Trust Gate is offering — set at Continue (after the worker checked the chain), read at
+ *  Connect, which names it by its hash. */
 let pendingCanonical: string | null = null;
+let pendingHash: string | null = null;
 
 /** a11y 2a (livemsg.ts owns the rule): this wrote text into a HIDDEN region and unhid it after —
  *  the inverted order, so the first outcome an SR user got here ("Connected to …", the
@@ -70,53 +77,34 @@ function clearMsg(node: HTMLElement): void {
 async function serverInfoNow(): Promise<Res<"serverInfo"> | null> {
   try {
     const r = await send({ type: "serverInfo" });
-    if (r && typeof r.url === "string" && r.url) return r;
+    if (r && typeof r.url === "string") return r; // "" = no server chosen
   } catch {
     /* the worker did not answer */
   }
   return null;
 }
 
-/** The pending server the notice offers for review, or null. Display only: the ONLY way to adopt it is the Trust Gate. */
-let legacyCandidate: string | null = null;
 
 /** Read + render the current configured origin (raw, exactly as it will be dialed), or why there is none. */
 async function renderCurrent(): Promise<void> {
   const info = await serverInfoNow();
   const block = info?.block ?? null;
-  if (info === null) originNow.textContent = "unknown — andvari isn't answering. Close this page and open it again.";
-  else if (block?.kind === "unsettled") originNow.textContent = "unknown — andvari couldn't load its settings, so it signs in nowhere. Close this page and open it again in a minute.";
-  else if (block?.kind === "confirm") originNow.textContent = "no server yet — andvari signs in nowhere until you confirm your server below, or choose \"Not mine\".";
+  if (info === null) originNow.textContent = T.OPTIONS_SERVER_NOT_ANSWERING;
+  else if (block?.kind === "unsettled") originNow.textContent = T.OPTIONS_SERVER_UNSETTLED;
+  else if (block?.kind === "no_server" || block?.kind === "no_store" || info.url === "") originNow.textContent = T.OPTIONS_NO_SERVER_YET;
   else originNow.textContent = info.url;
-  // prefill so a Firefox first-run just Continues → Connects (never with a server that is not in effect)
-  if (!input.value.trim() && info !== null && block === null) input.value = info.url;
-  // A15: a server chosen before the update is shown, never reconnected: it sat in storage a web page could write.
-  const pending = block?.kind === "confirm" ? block : null;
-  legacyCandidate = pending?.keepable ? pending.origin : null;
-  legacyOrigin.textContent = pending?.origin ?? "";
-  legacyNote.hidden = pending === null;
-  legacyReview.hidden = !pending?.keepable;
-  legacyForget.textContent = `Not mine — use ${new URL(DEFAULT_SERVER_URL).host}`;
-  if (pending && !pending.keepable && info?.trustedStore) {
-    // A16 review R3: the update could not confirm the old setting (nothing attested it), so it is never offered for
-    // connecting; it is read only to keep andvari from signing in to another server in its place. A choice CAN be kept
-    // here: the user enters the address themselves and connects through the gate.
-    legacyLead.textContent = "This browser has a server address saved by an older version of andvari:";
-    legacyBody.textContent =
-      "andvari couldn't confirm this setting when it updated, and a web page could have changed it, so andvari won't use it, or sign in anywhere, until you decide. If it is your own andvari server, enter its address in the server field and connect. If you don't recognize it, choose \"Not mine\" and andvari uses its default server instead.";
-  } else if (pending && !pending.keepable) {
-    // A15 review F1: no trusted store in this mode, so the old setting can only be declined here. It is read only to
-    // keep andvari from signing in to another server in its place.
-    legacyLead.textContent = "This browser has a server address saved by an older version of andvari:";
-    legacyBody.textContent =
-      "andvari can't keep a server choice in this browser mode (Firefox does this when it never remembers history), so it won't sign in anywhere in its place. To keep using it: turn that setting off, restart Firefox, and enter the address below. If you don't recognize it, choose \"Not mine\" and andvari uses its default server instead.";
-  } else if (pending) {
-    legacyLead.textContent = "When andvari updated to this version, this browser was set to use:";
-    legacyBody.textContent =
-      "That setting was kept where a web page could have changed it, so andvari won't use it, or sign in anywhere, until you decide. If it is your own andvari server, review it and connect. If you don't recognize it, choose \"Not mine\" and andvari uses its default server instead.";
-  }
-  // A15: no extension store here (Firefox "Never remember history"): say so before the user tries to connect.
-  storeNote.hidden = info === null || info.trustedStore || pending !== null; // a pending server's note says it all
+  // A fork or a damaged record stops everything (§4.4); "Forget this server" is the only way on.
+  const stop = block?.kind === "fork" || block?.kind === "pin_damaged" ? block : null;
+  serverStop.hidden = stop === null;
+  // Entry 12: a damaged record has its approved title, and its two paragraphs stay two (each set as text).
+  serverStopHeading.textContent = stop?.kind === "pin_damaged" ? CARD_RECORD_DAMAGED_TITLE : T.SERVER_CANT_BE_USED;
+  if (stop?.kind === "pin_damaged") renderBlocks(serverStopBody, messageBlocks(null, cardRecordDamagedCopy(stop.origin)));
+  else serverStopBody.textContent = stop?.kind === "fork" ? `${stop.origin} — ${SERVER_FORK}` : "";
+  // No extension store here (Firefox "Never remember history"): say so before the person tries to connect.
+  storeNote.hidden = info === null || info.trustedStore;
+  // Rendered run 2026-11-16: with no server chosen there is no "server shown above" to remove data for.
+  const danger = purgeBtn.closest("section");
+  if (danger) danger.hidden = info === null || info.url === "";
 }
 
 /** Card autofill Tier 1 §10: the honest injection state — held broad grant = autofill can inject;
@@ -129,7 +117,7 @@ async function renderAutofillStatus(): Promise<void> {
   } catch {
     /* permissions API unavailable — report off */
   }
-  autofillStatus.textContent = `Autofill injection: ${held ? "on" : "off"} (all-sites permission)`;
+  autofillStatus.textContent = held ? T.AUTOFILL_INJECTION_ON : T.AUTOFILL_INJECTION_OFF;
 }
 
 function hideGate(): void {
@@ -142,77 +130,103 @@ function hideGate(): void {
   if (gate.contains(document.activeElement)) input.focus();
   gate.hidden = true;
   pendingCanonical = null;
+  pendingHash = null;
 }
 
-/** Continue → validate the address and render the Trust Gate for it (never auto-connect). */
-function openGate(): void {
+/** Whether the broad (autofill) grant landed at the last Continue — reported after Connect. */
+let autofillGranted = false;
+
+/**
+ * Continue → validate the address against the §2.2 grammar, request the host grants (the gesture: requestServerGrants
+ * is the FIRST async call, so permissions.request still sees it), then ask the worker to fetch and verify the server's
+ * identity card (design 2026-11-15 §4.4) and render the Trust Gate with its card line. Nothing is kept until Connect.
+ */
+async function openGate(): Promise<void> {
   clearMsg(serverMsg);
   const canonical = canonicalizeServerUrl(input.value);
   if (canonical === null) {
     hideGate();
-    setMsg(serverMsg, "err", "Enter a full server address, e.g. https://andvari.example.com (scheme + host only).");
+    setMsg(serverMsg, "err", ORIGIN_REFUSED);
     return;
   }
-  pendingCanonical = canonical;
-  const view = trustGateView(canonical);
-  gateHeading.textContent = view.heading;
-  gateOrigin.textContent = view.origin;
-  gateBody.textContent = view.body;
-  gatePunycode.textContent = view.punycodeCaution ?? "";
-  gatePunycode.hidden = view.punycodeCaution === null;
-  gateHttp.textContent = view.httpCaution ?? "";
-  gateHttp.hidden = view.httpCaution === null;
-  gate.hidden = false;
-  gateCancel.focus(); // Cancel is the default focus (§4.3 — never Connect)
-}
-
-/** Connect → the grant gesture. Requests the per-origin fetch grant + the broad autofill grant in one
- *  gesture, then commits per grantflow's decision. requestServerGrants MUST be the first async call so
- *  permissions.request still sees the gesture (no await before it). */
-async function connect(): Promise<void> {
-  const canonical = pendingCanonical;
-  if (canonical === null) return;
-  gateConnect.disabled = true;
+  continueBtn.disabled = true;
   try {
     const decision = await requestServerGrants(originMatchPattern(canonical));
     if (!decision.commit) {
-      if (decision.reason === "invalid-origin") {
-        setMsg(serverMsg, "err", "This browser can't be granted access to that address (an IPv6-literal host). Use a hostname or an https origin.");
-      } else {
-        setMsg(serverMsg, "info", "Browser access to that server was declined — nothing changed. You stay connected to the current server.");
-      }
+      hideGate();
+      setMsg(serverMsg, "info", T.ACCESS_DECLINED);
       return;
     }
-    // A15: the worker canonicalizes, keeps the choice in its own store and runs the origin-clean switch before it
-    // answers. A choice it cannot keep (no extension store in this browser mode) changes nothing.
-    const r = await send({ type: "setServerUrl", url: canonical });
+    autofillGranted = decision.autofill;
+    const r = await send({ type: "chooseServer", choice: "own", origin: canonical });
     if (!r?.ok) {
-      setMsg(serverMsg, "err", r?.code === "storage" ? STORE_UNAVAILABLE : "Couldn't switch servers. Nothing changed — try again.");
+      hideGate();
+      // Entry 8 names both addresses, from the worker's answer (the card's from the chain it verified), with its title.
+      const m = chooseServerMessage(r, PUBLIC_INSTANCE.origin);
+      setLiveMsgBlocks(serverMsg, "msg err", "status", m.title, m.body);
+      return;
+    }
+    if (!r.gate) {
+      // A server this browser already pinned (or the public instance): no gate, the worker switched to it.
+      hideGate();
+      input.value = r.url ?? canonical;
+      await renderCurrent();
+      setMsg(serverMsg, "ok", fillApproved(T.CONNECTED_TO, r.url ?? canonical));
+      return;
+    }
+    pendingCanonical = r.gate.origin;
+    pendingHash = r.gate.hash;
+    const view = trustGateView(r.gate.origin, r.gate);
+    gateHeading.textContent = view.heading;
+    // Text nodes with a <wbr> between the origin's own pieces: the same characters, broken only at its punctuation.
+    gateOrigin.replaceChildren(...originBreakPieces(view.origin).flatMap((p, i) => (i === 0 ? [p] : [document.createElement("wbr"), p])));
+    gateCard.textContent = view.cardLine;
+    gateOperator.textContent = view.operatorLine;
+    gateOperator.hidden = view.operatorLine === "";
+    gateBody.textContent = view.body;
+    gatePunycode.textContent = view.punycodeCaution ?? "";
+    gatePunycode.hidden = view.punycodeCaution === null;
+    gateHttp.textContent = view.httpCaution ?? "";
+    gateHttp.hidden = view.httpCaution === null;
+    gate.hidden = false;
+    gateCancel.focus(); // Cancel is the default focus (never Connect)
+  } catch {
+    hideGate();
+    setMsg(serverMsg, "err", chooseServerCopy(undefined));
+  } finally {
+    continueBtn.disabled = false;
+    void renderAutofillStatus();
+  }
+}
+
+/** Connect → keep the card the gate showed (the worker pins it and switches). */
+async function connect(): Promise<void> {
+  const canonical = pendingCanonical;
+  const hash = pendingHash;
+  if (canonical === null || hash === null) return;
+  gateConnect.disabled = true;
+  try {
+    const r = await send({ type: "confirmServer", origin: canonical, hash });
+    if (!r?.ok) {
+      setMsg(serverMsg, "err", chooseServerCopy(r?.code));
       return;
     }
     hideGate();
     input.value = canonical;
     await renderCurrent();
-    if (decision.autofill) {
-      setMsg(serverMsg, "ok", `Connected to ${canonical}. Sign in from the toolbar popup.`);
-    } else {
-      // Broad grant declined → the switch still committed; autofill is dormant until it's granted.
-      setMsg(
-        serverMsg,
-        "ok",
-        `Connected to ${canonical}. Autofill on other sites stays off until you allow andvari to access web pages — reopen Options and Connect again to enable it. Sign in from the toolbar popup.`,
-      );
-    }
+    setMsg(
+      serverMsg,
+      "ok",
+      autofillGranted
+        ? fillApproved(T.CONNECTED_TO, canonical)
+        : fillApproved(T.CONNECTED_TO_AUTOFILL_OFF, canonical),
+    );
   } catch {
-    setMsg(serverMsg, "err", "Couldn't switch servers. Nothing changed — try again.");
+    setMsg(serverMsg, "err", chooseServerCopy(undefined));
   } finally {
     gateConnect.disabled = false;
-    void renderAutofillStatus(); // the Connect gesture is where the broad grant can land — re-read it
   }
 }
-
-const STORE_UNAVAILABLE =
-  "This browser gives andvari no storage of its own in this mode (Firefox does this when it never remembers history), so it can't keep a server choice. Nothing changed.";
 
 /** Danger zone: purge THIS browser's stored data for the current origin (§4.2/B2-7 — the only
  *  destructive path). Two-click confirm so it can't fire by accident. */
@@ -221,24 +235,25 @@ async function purge(): Promise<void> {
   clearMsg(purgeMsg);
   const info = await serverInfoNow();
   if (info === null) {
-    setMsg(purgeMsg, "err", "andvari isn't answering, so nothing was removed. Close this page and open it again.");
+    setMsg(purgeMsg, "err", T.PURGE_NOT_ANSWERING);
     return;
   }
   const current = info.url;
   if (!purgeArmed) {
     purgeArmed = true;
-    purgeBtn.textContent = `Remove all data for ${current}? Click again to confirm`;
-    setMsg(purgeMsg, "info", "This removes only this browser's PIN / quick-unlock and cached state for that server. Your vault on the server is untouched.");
+    purgeBtn.textContent = fillApproved(T.PURGE_CONFIRM, current);
+    // The pin and what andvari checks the server against stay.
+    setMsg(purgeMsg, "info", T.PURGE_NOTE);
     return;
   }
   purgeArmed = false;
-  purgeBtn.textContent = "Remove data for this server…";
+  purgeBtn.textContent = T.PURGE_BUTTON;
   try {
     const r = await send({ type: "purgeServerData", origin: current });
-    if (r?.ok) setMsg(purgeMsg, "ok", `Removed this browser's stored data for ${current}.`);
-    else setMsg(purgeMsg, "err", "Couldn't remove the stored data.");
+    if (r?.ok) setMsg(purgeMsg, "ok", fillApproved(T.PURGE_DONE, current));
+    else setMsg(purgeMsg, "err", T.PURGE_FAILED);
   } catch {
-    setMsg(purgeMsg, "err", "Couldn't remove the stored data.");
+    setMsg(purgeMsg, "err", T.PURGE_FAILED);
   }
 }
 
@@ -260,28 +275,54 @@ themeChoices.addEventListener("click", (e) => {
   renderTheme(pref);
 });
 
-continueBtn.addEventListener("click", openGate);
-// A15: "Review this address" opens the ordinary Trust Gate for the pre-update choice — Connect stays the only commit.
-legacyReview.addEventListener("click", () => {
-  if (legacyCandidate === null) return;
-  input.value = legacyCandidate;
-  openGate();
-});
-legacyForget.addEventListener("click", () => {
+continueBtn.addEventListener("click", () => void openGate());
+// §12.3 "Forget this server": the way out of a fork or a damaged record. Design §4.4 (decided on 2026-11-17): it deletes
+// the logins and cards this browser captured on pages and has not saved, so with any waiting, or when the worker does not
+// answer the count, the first click says how many (or that andvari cannot tell) and the second forgets.
+let forgetArmed: number | null = null;
+async function capturesNow(): Promise<number> {
+  try {
+    const s = await send({ type: "status" });
+    return typeof s?.unsavedCaptures === "number" ? s.unsavedCaptures : COUNT_UNKNOWN;
+  } catch {
+    return COUNT_UNKNOWN;
+  }
+}
+function disarmForget(): void {
+  forgetArmed = null;
+  serverForget.textContent = T.FORGET_THIS_SERVER;
+  serverForgetNote.hidden = true;
+  serverForgetNote.textContent = "";
+}
+serverForget.addEventListener("click", () => {
   void (async () => {
+    const now = await capturesNow();
+    const step = unsavedArmStep(forgetArmed, now, false);
+    if (!step.act) {
+      forgetArmed = step.armed;
+      serverForget.textContent = T.FORGET_CONFIRM;
+      serverForgetNote.textContent = forgetUnsavedLine(now) ?? "";
+      serverForgetNote.hidden = serverForgetNote.textContent === "";
+      return;
+    }
+    disarmForget();
     try {
-      await send({ type: "forgetLegacyServer" });
+      await send({ type: "forgetServer" });
     } catch {
       /* the worker did not answer — the notice simply stays */
     }
-    if (legacyNote.contains(document.activeElement)) input.focus();
+    if (serverStop.contains(document.activeElement)) input.focus();
     await renderCurrent();
   })();
+});
+// As the purge's confirm: leaving the button cancels a half-armed Forget.
+serverForget.addEventListener("blur", () => {
+  if (forgetArmed !== null) disarmForget();
 });
 input.addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
     e.preventDefault();
-    openGate();
+    void openGate();
   }
 });
 gateCancel.addEventListener("click", () => {
@@ -294,10 +335,11 @@ purgeBtn.addEventListener("click", () => void purge());
 purgeBtn.addEventListener("blur", () => {
   if (purgeArmed) {
     purgeArmed = false;
-    purgeBtn.textContent = "Remove data for this server…";
+    purgeBtn.textContent = T.PURGE_BUTTON;
   }
 });
 
 renderTheme(readThemePref());
+drawWordmarks(document); // the drawn name in the header (brand.ts)
 void renderCurrent();
 void renderAutofillStatus();

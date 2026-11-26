@@ -1,0 +1,826 @@
+{
+  "_about": [
+    "The one shared reader of an answer: spec 04 \u00a77 step 3, \"Reading an answer\", in the specification as corrected on 2026-11-16 (first written from its text of that day before the corrections). The desktop console and `andvari-cli operator fulfil` share it and read the operator's text with it before the master password is asked; a client uploads exactly the four parts it yields, and nothing is sent and no password is asked for a refusal.",
+    "Generated and graded by the independent oracle in tools/vector-gen/oracle (src/answerreader.mjs), written from the specification text alone: `npm run check` regenerates this file byte for byte and reads every row again. No andvari code was read or run to make it.",
+    "Input: `text` is the operator's text (a paste or a file's text) as a JSON string, and `request` the listed request (requestId, rPub, and email, its emailNorm), the top-level request unless a row has its own. The token andvari-answer:3:<requestId>:<requestKey>:<commitHash>:<sealed> is recovery-v3.json's answers \"alice\" (the same inputs give the same bytes); \"bob\" is its answers \"bob\". Its sealed part is 548 bytes, 731 characters (alice@example.org is 17 octets, E = 23).",
+    "Steps, in order, the first failure deciding: 1 drop U+FEFF when it is the text's first code point, split into lines at CR LF, LF and CR only, remove space and tab (only those) from both ends of each line, drop empty lines; none left is answer_empty. 2 the first line begins with {: answer_is_the_copy when the text (all of it after a dropped U+FEFF, case-sensitive, quotes included) contains \"encryptedIdentitySeed\" or \"identityPub\", otherwise not_an_answer. 3 the lines that begin with andvari-answer: : more than one is not_an_answer; exactly one: lines before it are passed over, and the token is that line and every line after it joined with nothing between, each of which must be base64url characters and \":\" only (a terminal may wrap the head as well as the sealed part), else not_an_answer; none: answer_bare when every line is base64url characters only and they hold at least 100 characters together (bareMinChars), otherwise not_an_answer. 4 exactly six parts at \":\": andvari-answer, 3, a b64_16, a b64_32, a hex64, a non-empty run of base64url characters, else not_an_answer. 5 answer_other_request (expect.tokenRequestId names the id the token carries), then answer_other_request_key (compared as text). 6 the sixth part is canonical unpadded base64url of exactly 525 + E bytes, E the characters of the base64url of the request's address; otherwise, with L its decoded length when canonical and floor(3 * characters / 4) when not, smaller is answer_cut_short, larger answer_too_long, equal not_an_answer. \"Base64url characters\" are A-Z, a-z, 0-9, - and _ (never =).",
+    "readFile: a file's bytes (bytesB64), read as UTF-8: bytes that are not UTF-8 are not_an_answer; otherwise the text is read as above. The oracle decodes with WHATWG's fatal UTF-8 decoder (overlong forms, encoded surrogates and cut sequences refused) and keeps a UTF-8 byte-order mark as U+FEFF, which step 1 drops.",
+    "Changed with the specification's corrections of 2026-11-16: wrapped-at-80 and wrapped-one-before-the-last-colon are now read (a wrapped line may hold a colon); one-word and the-commit-hash-alone are now not_an_answer (a bare answer needs 100 characters); the readFile table is new (a file's bytes). Still pinned as the text says although a client may not expect it: answer-for-a-shorter-address and answer-read-against-a-shorter-address (an answer for another address of another length reads as cut short or too long; the words say both possibilities), and answer-for-an-address-of-the-same-length (the reader cannot tell; the device refuses it)."
+  ],
+  "request": {
+    "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+    "rPub": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+    "email": "alice@example.org"
+  },
+  "requestKeys": {
+    "rPubB64": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+    "otherRPubB64": "cMrbMNvJYWVl4VNSpRInL_QmqBQJgOUunvHjlZehDAY",
+    "otherRequestId": "h7QK7pJ1BOq3-NTF4Q7XFg"
+  },
+  "token": {
+    "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+    "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+    "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+    "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+    "sealedB64": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+    "sealedBytes": 548,
+    "sealedChars": 731,
+    "lastColonAt": 149
+  },
+  "bareMinChars": 100,
+  "read": [
+    {
+      "name": "token-alone",
+      "why": "The token, alone, as the last line of the tool's output: the reader yields its four parts.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "token-and-lf",
+      "why": "The token and a line feed.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\n",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "token-and-crlf",
+      "why": "The token and CR LF.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\r\n",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "token-and-cr",
+      "why": "The token and a lone CR.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\r",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "the-whole-output-lf",
+      "why": "The tool's whole output, the lines before the token included (they are passed over), with LF line ends.",
+      "text": "Answer for request kevsyZmgCVPO8TTl-1oqKQ\nAccount 11111111-1111-4111-8111-111111111111, alice@example.org (the address the recovery copy names, signed by the account)\nOnly the person's device can open this answer. Upload the last line with the console or andvari-cli operator fulfil.\nandvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\n",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "the-whole-output-crlf",
+      "why": "The same with CR LF line ends.",
+      "text": "Answer for request kevsyZmgCVPO8TTl-1oqKQ\r\nAccount 11111111-1111-4111-8111-111111111111, alice@example.org (the address the recovery copy names, signed by the account)\r\nOnly the person's device can open this answer. Upload the last line with the console or andvari-cli operator fulfil.\r\nandvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\r\n",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "the-whole-output-cr",
+      "why": "The same with lone CR line ends.",
+      "text": "Answer for request kevsyZmgCVPO8TTl-1oqKQ\rAccount 11111111-1111-4111-8111-111111111111, alice@example.org (the address the recovery copy names, signed by the account)\rOnly the person's device can open this answer. Upload the last line with the console or andvari-cli operator fulfil.\randvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\r",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "mixed-line-ends",
+      "why": "The output with LF, CR LF and CR mixed, and the token wrapped: each is one line end.",
+      "text": "Answer for request kevsyZmgCVPO8TTl-1oqKQ\nAccount 11111111-1111-4111-8111-111111111111, alice@example.org (the address the recovery copy names, signed by the account)\rOnly the person's device can open this answer. Upload the last line with the console or andvari-cli operator fulfil.\r\nandvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZD\rk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8z\rAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPz\rZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjH\rbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\r\n",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "spaces-and-tabs-around",
+      "why": "Spaces and tabs before and after the token, and blank lines around it.",
+      "text": "\n \t\n  \tandvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No \t \n\n",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "byte-order-mark",
+      "why": "A file that starts with U+FEFF: one leading U+FEFF is dropped.",
+      "text": "\ufeffandvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\n",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "byte-order-mark-and-crlf-output",
+      "why": "U+FEFF, then the whole output with CR LF.",
+      "text": "\ufeffAnswer for request kevsyZmgCVPO8TTl-1oqKQ\r\nAccount 11111111-1111-4111-8111-111111111111, alice@example.org (the address the recovery copy names, signed by the account)\r\nOnly the person's device can open this answer. Upload the last line with the console or andvari-cli operator fulfil.\r\nandvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\r\n",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "wrapped-at-200",
+      "why": "The token wrapped every 200 characters: the line after the token line is base64url only, and is joined on with nothing between.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZD\nk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8z\nAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPz\nZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjH\nbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "wrapped-at-160-with-indent-and-crlf",
+      "why": "Wrapped every 160 characters, each line indented by two spaces, CR LF: trimmed, then joined.",
+      "text": "  andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxU\r\n  e92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX\r\n  6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3c\r\n  DQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucP\r\n  y477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjH\r\n  bCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\r\n",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "wrapped-right-after-the-last-colon",
+      "why": "Wrapped at 149 characters: the first line ends with the colon before the sealed part, and every later line is base64url only.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:\nnDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8R\noOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ih\nGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybW\ngcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P\n6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "wrapped-at-64-after-the-colons",
+      "why": "The four short parts on the first line, then the sealed part in lines of 64.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:\nnDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmL\nM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0\nq9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlY\nDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxr\nAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5\nzQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLg\nUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWg\ncPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tU\nhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7Wh\nKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3U\nyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31\nGXl6_U0iqCSHh40EYLHCRDiB-No",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "answer-for-an-address-of-the-same-length",
+      "why": "An answer whose statement names carol@example.org (17 octets, like alice@example.org), for this request: the reader cannot tell (its size is right). It is a convenience, not a boundary: the person's device refuses it (request_mismatch).",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:MdUYsJo7WKsp_J3a3LM2TCHVhe156Vpiyx5t2LUU_DfuRgyhKDzoqEZUvKR1_ptkOdVYYCKtOUM3p2DGPdeZgL3yTj_4E73o4KxTfZPyKd8c9jMV1H5o0s6AzvMXFbJAG6CCPgCdoXPiWnRYZbsrZ1Ut4hIWR4ojmTfb3nWAYvcABpU-PoUKsXiDCeyUsCuBVvh0JeW5tyUdHu3dKvb-bzsJswTfB7uj77flRvDedF3rXlXL-p18vMIzFzsG7G9Xc75ZQDOLZVaJkhTpInQNaW25-FRecOk2NSuSB6PEAvLX4NvVDJzXRapvxFfJki8GwXPhMWaRiog7BcjIutreIP0jkACQvl5F0mY-RuqpaIXcLOfrqHC48h-hmSVyr4YNOmyQXUXxVArNeEP6aVspVBT5wDf3wcNaQ6UmqptNIJlCaGoek8A7gTZxv1dIuwJaPdpcAJWnd7oD3jZLrGWUCY-qUFztc1tqt1YGCX3CV2rVA1ACDmaHBaabmBWBJUzofYlOaFVFMjWomFU9NebDn2OgsaeOTDDiuNoYEtEWe12TC22oB8qkwSsRB8P37YazlV4uzFiOERaJUpdNT9cP75tyyKKq7Huo8MZbIj7R0X6RzwJhjUMzl0ftNsYmc2Sles-Dikbm2tDz3-pr830ajYmxv4J-VUbpXxB4X2-KRoXShNPDbCpmxhEAOG8zK7gOOmKXLGTHayCYs9Uk8w8waB7623A",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "MdUYsJo7WKsp_J3a3LM2TCHVhe156Vpiyx5t2LUU_DfuRgyhKDzoqEZUvKR1_ptkOdVYYCKtOUM3p2DGPdeZgL3yTj_4E73o4KxTfZPyKd8c9jMV1H5o0s6AzvMXFbJAG6CCPgCdoXPiWnRYZbsrZ1Ut4hIWR4ojmTfb3nWAYvcABpU-PoUKsXiDCeyUsCuBVvh0JeW5tyUdHu3dKvb-bzsJswTfB7uj77flRvDedF3rXlXL-p18vMIzFzsG7G9Xc75ZQDOLZVaJkhTpInQNaW25-FRecOk2NSuSB6PEAvLX4NvVDJzXRapvxFfJki8GwXPhMWaRiog7BcjIutreIP0jkACQvl5F0mY-RuqpaIXcLOfrqHC48h-hmSVyr4YNOmyQXUXxVArNeEP6aVspVBT5wDf3wcNaQ6UmqptNIJlCaGoek8A7gTZxv1dIuwJaPdpcAJWnd7oD3jZLrGWUCY-qUFztc1tqt1YGCX3CV2rVA1ACDmaHBaabmBWBJUzofYlOaFVFMjWomFU9NebDn2OgsaeOTDDiuNoYEtEWe12TC22oB8qkwSsRB8P37YazlV4uzFiOERaJUpdNT9cP75tyyKKq7Huo8MZbIj7R0X6RzwJhjUMzl0ftNsYmc2Sles-Dikbm2tDz3-pr830ajYmxv4J-VUbpXxB4X2-KRoXShNPDbCpmxhEAOG8zK7gOOmKXLGTHayCYs9Uk8w8waB7623A"
+      }
+    },
+    {
+      "name": "empty-text",
+      "why": "An empty text.",
+      "text": "",
+      "expect": {
+        "verdict": "answer_empty"
+      }
+    },
+    {
+      "name": "one-line-feed",
+      "why": "A line feed alone.",
+      "text": "\n",
+      "expect": {
+        "verdict": "answer_empty"
+      }
+    },
+    {
+      "name": "spaces-tabs-and-line-ends",
+      "why": "Spaces, tabs, CR LF, LF and CR only.",
+      "text": " \t\r\n \n\t\r",
+      "expect": {
+        "verdict": "answer_empty"
+      }
+    },
+    {
+      "name": "byte-order-mark-alone",
+      "why": "U+FEFF alone.",
+      "text": "\ufeff",
+      "expect": {
+        "verdict": "answer_empty"
+      }
+    },
+    {
+      "name": "byte-order-mark-and-blank-lines",
+      "why": "U+FEFF, then blank lines.",
+      "text": "\ufeff  \r\n\t\n",
+      "expect": {
+        "verdict": "answer_empty"
+      }
+    },
+    {
+      "name": "the-recovery-copy",
+      "why": "The recovery copy itself (the escrow download, pretty-printed), pasted where the answer belongs.",
+      "text": "{\n  \"userId\": \"11111111-1111-4111-8111-111111111111\",\n  \"sealed\": \"R2ebhyE6UxdI4gVlBcK_5ZZ3g7tWIggBDdVFxiRGIGmwptFuV3HImJUtN159RgOFaIHxWhC7WXeakSSlkWZxKv08BY8aSS_cGkpFfpreuJLUMWeO6ww3gJTts8hLB_Az1UuaShyWegfGzokyZyQtp-WN10jBp52dHOurXPQ6EBfIh1VKw2N7A1yEog6_8HfaqvP7ASMwolN_N0TjttOId_2agT51MbwH9W1D63wAJmsUfxXQqLy5AiXjfu0Uznf4-QKpwyiRHO6hrM6Dkn7rKGWerPaHa0X_Debq8a_JctdRGmBQc7kcsCSFRwHCtT-PqXF2q3wjYBdn_7KBWVF1ZmO-5i25_HvPZrKk30UHNLlOWkjaFuKe30Ee9Fs9EhpFQ7Z30Y89CuSc7-h3yzENHcx7WxqTuZVK398VIw6D0k55yYPXH0sK2zBKBWco0Gv-IbOsJmeujHFS_Iwdc6beh1f2zW8Y7l4iz3MkhUPOQN8srzMtKD8U395_X0mqvuL6Ohtlkb3dFPEeoJhiC1NSd5c_aBt_Fjk-3XcCoP8RmqEYIb6nwBQdsuNx-YnQe1ZOKYt64EdtzFSUmBO_dSLag0o6REk-Pl6WH5LqZrp-SlrwJTdRuCIot8L1ejlczw\",\n  \"encryptedIdentitySeed\": \"AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI\",\n  \"identityPub\": \"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\"\n}\n",
+      "expect": {
+        "verdict": "answer_is_the_copy"
+      }
+    },
+    {
+      "name": "the-recovery-copy-on-one-line",
+      "why": "The same on one line.",
+      "text": "{\"userId\":\"11111111-1111-4111-8111-111111111111\",\"sealed\":\"R2ebhyE6UxdI4gVlBcK_5ZZ3g7tWIggBDdVFxiRGIGmwptFuV3HImJUtN159RgOFaIHxWhC7WXeakSSlkWZxKv08BY8aSS_cGkpFfpreuJLUMWeO6ww3gJTts8hLB_Az1UuaShyWegfGzokyZyQtp-WN10jBp52dHOurXPQ6EBfIh1VKw2N7A1yEog6_8HfaqvP7ASMwolN_N0TjttOId_2agT51MbwH9W1D63wAJmsUfxXQqLy5AiXjfu0Uznf4-QKpwyiRHO6hrM6Dkn7rKGWerPaHa0X_Debq8a_JctdRGmBQc7kcsCSFRwHCtT-PqXF2q3wjYBdn_7KBWVF1ZmO-5i25_HvPZrKk30UHNLlOWkjaFuKe30Ee9Fs9EhpFQ7Z30Y89CuSc7-h3yzENHcx7WxqTuZVK398VIw6D0k55yYPXH0sK2zBKBWco0Gv-IbOsJmeujHFS_Iwdc6beh1f2zW8Y7l4iz3MkhUPOQN8srzMtKD8U395_X0mqvuL6Ohtlkb3dFPEeoJhiC1NSd5c_aBt_Fjk-3XcCoP8RmqEYIb6nwBQdsuNx-YnQe1ZOKYt64EdtzFSUmBO_dSLag0o6REk-Pl6WH5LqZrp-SlrwJTdRuCIot8L1ejlczw\",\"encryptedIdentitySeed\":\"AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI\",\"identityPub\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\"}",
+      "expect": {
+        "verdict": "answer_is_the_copy"
+      }
+    },
+    {
+      "name": "the-recovery-copy-with-byte-order-mark",
+      "why": "The same from a file that starts with U+FEFF and uses CR LF.",
+      "text": "\ufeff{\r\n  \"userId\": \"11111111-1111-4111-8111-111111111111\",\r\n  \"sealed\": \"R2ebhyE6UxdI4gVlBcK_5ZZ3g7tWIggBDdVFxiRGIGmwptFuV3HImJUtN159RgOFaIHxWhC7WXeakSSlkWZxKv08BY8aSS_cGkpFfpreuJLUMWeO6ww3gJTts8hLB_Az1UuaShyWegfGzokyZyQtp-WN10jBp52dHOurXPQ6EBfIh1VKw2N7A1yEog6_8HfaqvP7ASMwolN_N0TjttOId_2agT51MbwH9W1D63wAJmsUfxXQqLy5AiXjfu0Uznf4-QKpwyiRHO6hrM6Dkn7rKGWerPaHa0X_Debq8a_JctdRGmBQc7kcsCSFRwHCtT-PqXF2q3wjYBdn_7KBWVF1ZmO-5i25_HvPZrKk30UHNLlOWkjaFuKe30Ee9Fs9EhpFQ7Z30Y89CuSc7-h3yzENHcx7WxqTuZVK398VIw6D0k55yYPXH0sK2zBKBWco0Gv-IbOsJmeujHFS_Iwdc6beh1f2zW8Y7l4iz3MkhUPOQN8srzMtKD8U395_X0mqvuL6Ohtlkb3dFPEeoJhiC1NSd5c_aBt_Fjk-3XcCoP8RmqEYIb6nwBQdsuNx-YnQe1ZOKYt64EdtzFSUmBO_dSLag0o6REk-Pl6WH5LqZrp-SlrwJTdRuCIot8L1ejlczw\",\r\n  \"encryptedIdentitySeed\": \"AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI\",\r\n  \"identityPub\": \"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\"\r\n}\r\n",
+      "expect": {
+        "verdict": "answer_is_the_copy"
+      }
+    },
+    {
+      "name": "json-with-identity-pub-only",
+      "why": "A JSON text whose only tell is \"identityPub\".",
+      "text": "{\"identityPub\":\"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\"}",
+      "expect": {
+        "verdict": "answer_is_the_copy"
+      }
+    },
+    {
+      "name": "json-that-is-not-the-copy",
+      "why": "A JSON text holding the sealed answer: it begins with { and names neither key of the copy.",
+      "text": "{\"sealed\":\"nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\"}\n",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "order-json-before-token",
+      "why": "A first line \"{\" and the token on the next line: step 2 decides on the first line.",
+      "text": "{\nandvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\n",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "order-copy-before-token",
+      "why": "The copy, then the token: step 2 decides.",
+      "text": "{\n  \"userId\": \"11111111-1111-4111-8111-111111111111\",\n  \"sealed\": \"R2ebhyE6UxdI4gVlBcK_5ZZ3g7tWIggBDdVFxiRGIGmwptFuV3HImJUtN159RgOFaIHxWhC7WXeakSSlkWZxKv08BY8aSS_cGkpFfpreuJLUMWeO6ww3gJTts8hLB_Az1UuaShyWegfGzokyZyQtp-WN10jBp52dHOurXPQ6EBfIh1VKw2N7A1yEog6_8HfaqvP7ASMwolN_N0TjttOId_2agT51MbwH9W1D63wAJmsUfxXQqLy5AiXjfu0Uznf4-QKpwyiRHO6hrM6Dkn7rKGWerPaHa0X_Debq8a_JctdRGmBQc7kcsCSFRwHCtT-PqXF2q3wjYBdn_7KBWVF1ZmO-5i25_HvPZrKk30UHNLlOWkjaFuKe30Ee9Fs9EhpFQ7Z30Y89CuSc7-h3yzENHcx7WxqTuZVK398VIw6D0k55yYPXH0sK2zBKBWco0Gv-IbOsJmeujHFS_Iwdc6beh1f2zW8Y7l4iz3MkhUPOQN8srzMtKD8U395_X0mqvuL6Ohtlkb3dFPEeoJhiC1NSd5c_aBt_Fjk-3XcCoP8RmqEYIb6nwBQdsuNx-YnQe1ZOKYt64EdtzFSUmBO_dSLag0o6REk-Pl6WH5LqZrp-SlrwJTdRuCIot8L1ejlczw\",\n  \"encryptedIdentitySeed\": \"AQHdpxNT-v9lmQh7IcAnUrlkKPIwLm76ZdCDAzHR6nHTMcEZJxo0HwH5GCgXi9gK9exaVulU16Waduy48g69VVpTwlH3vcLW1zI\",\n  \"identityPub\": \"dmn5TI1-jtERdRVMZoWG5QFr3LXPGreVJcHDayMnGio\"\n}\nandvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\n",
+      "expect": {
+        "verdict": "answer_is_the_copy"
+      }
+    },
+    {
+      "name": "bare-sealed-answer",
+      "why": "The sealed answer alone, as the old tool printed it: no request beside it.",
+      "text": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\n",
+      "expect": {
+        "verdict": "answer_bare"
+      }
+    },
+    {
+      "name": "bare-sealed-answer-wrapped",
+      "why": "The same wrapped every 64 characters.",
+      "text": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmL\nM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0\nq9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlY\nDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxr\nAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5\nzQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLg\nUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWg\ncPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tU\nhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7Wh\nKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3U\nyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31\nGXl6_U0iqCSHh40EYLHCRDiB-No\n",
+      "expect": {
+        "verdict": "answer_bare"
+      }
+    },
+    {
+      "name": "the-tokens-tail",
+      "why": "The lines of a wrapped token after its first line: base64url only.",
+      "text": "e92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX\n6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3c\nDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucP\ny477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjH\nbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "expect": {
+        "verdict": "answer_bare"
+      }
+    },
+    {
+      "name": "the-commit-hash-alone",
+      "why": "The commit hash alone: base64url characters only, but 64 of them, under the 100 a bare answer needs.",
+      "text": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "one-word",
+      "why": "One word of letters (\"yes\"): base64url characters only, but under 100 of them, so not a bare answer.",
+      "text": "yes\n",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "the-request-id-alone",
+      "why": "The request id alone (22 characters).",
+      "text": "kevsyZmgCVPO8TTl-1oqKQ\n",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "the-request-key-alone",
+      "why": "The request key alone (43 characters).",
+      "text": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E\n",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "base64url-99-characters",
+      "why": "The first 99 characters of the sealed part: one under the bound of a bare answer.",
+      "text": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "base64url-100-characters",
+      "why": "The first 100 characters of the sealed part: exactly the bound, so answer_bare.",
+      "text": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3y",
+      "expect": {
+        "verdict": "answer_bare"
+      }
+    },
+    {
+      "name": "base64url-100-characters-on-two-lines",
+      "why": "60 and 40 characters on two lines: the bound counts the lines together.",
+      "text": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarE\nuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3y\n",
+      "expect": {
+        "verdict": "answer_bare"
+      }
+    },
+    {
+      "name": "two-words",
+      "why": "Two words: a space is not a base64url character.",
+      "text": "hello world\n",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "the-request-code",
+      "why": "The request code, six groups of four.",
+      "text": "1a2b 3c4d 5e6f 7a8b 9c0d 1e2f\n",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "token-twice",
+      "why": "The token pasted twice: two lines begin with andvari-answer:.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\nandvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\n",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "token-then-a-prompt",
+      "why": "The token and the shell prompt after it (\"$\"): a line after the token that is not base64url.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\n$\n",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "token-then-a-word-with-a-dot",
+      "why": "The token and \"Done.\".",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\nDone.\n",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "token-in-capitals",
+      "why": "ANDVARI-ANSWER: in capitals: no line begins with andvari-answer:, and the line is not base64url.",
+      "text": "ANDVARI-ANSWER:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "token-inside-a-sentence",
+      "why": "The token after other words on its line.",
+      "text": "answer: andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "no-break-space-before-the-token",
+      "why": "U+00A0 before the token: only space and tab are removed.",
+      "text": "\u00a0andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "wrapped-at-80",
+      "why": "The token wrapped every 80 characters, as an 80-column terminal would: the second line holds a colon, which a wrapped line may hold, and step 4 reads the six parts.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzd\nn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxU\ne92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9Anj\nZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX\n6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8z\nAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3c\nDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_P\nmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucP\ny477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG\n4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjH\nbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "wrapped-one-before-the-last-colon",
+      "why": "Wrapped at 148 characters: the second line begins with the last colon.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9\n:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-\n8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb2\n1ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNY\nZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbx\nDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "wrapped-at-120-crlf",
+      "why": "Wrapped every 120 characters with CR LF.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c54\r\n4da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9Anj\r\nZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO\r\n_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3c\r\nDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPz\r\nZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG\r\n4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFS\r\nMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\r\n",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "wrapped-at-40",
+      "why": "Wrapped every 40 characters: the head itself is broken inside its parts, and every later line holds base64url characters and colons only.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:\nLKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzd\nn1E:078e38cc20f0a91be98bd147ed93410a8c54\n4da132ab102a829763af36e3e4d9:nDxxQEE5uxU\ne92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZD\nk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9Anj\nZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r\n_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX\n6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO\n_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8z\nAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy\n7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3c\nDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_P\nYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_P\nmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPz\nZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucP\ny477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9A\nzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG\n4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEC\nhVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjH\nbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFS\nMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "wrapped-at-80-whole-output",
+      "why": "The tool's whole output with its last line wrapped every 80 characters.",
+      "text": "Answer for request kevsyZmgCVPO8TTl-1oqKQ\nAccount 11111111-1111-4111-8111-111111111111, alice@example.org (the address the recovery copy names, signed by the account)\nOnly the person's device can open this answer. Upload the last line with the console or andvari-cli operator fulfil.\nandvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzd\nn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxU\ne92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9Anj\nZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX\n6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8z\nAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3c\nDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_P\nmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucP\ny477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG\n4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjH\nbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\n",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "token-then-a-colon-line",
+      "why": "The token and a line holding one colon: the line is joined on, and the token then has seven parts.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\n:\n",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "wrapped-at-80-then-a-prompt",
+      "why": "Wrapped every 80 characters, then a shell prompt line: a line after the token that is not token characters.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzd\nn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxU\ne92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9Anj\nZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX\n6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8z\nAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3c\nDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_P\nmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucP\ny477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG\n4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjH\nbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\nuser@host:~$\n",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "padding-on-the-last-wrapped-line",
+      "why": "Wrapped, with \"==\" on the last line: = is not a base64url character.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZD\nk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8z\nAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPz\nZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjH\nbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No==",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "five-parts",
+      "why": "The token without its commit hash.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "seven-parts",
+      "why": "The token with \":AAAA\" after it.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No:AAAA",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "version-2",
+      "why": "andvari-answer:2:\u2026",
+      "text": "andvari-answer:2:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "version-03",
+      "why": "andvari-answer:03:\u2026",
+      "text": "andvari-answer:03:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "request-id-of-32-bytes",
+      "why": "The third part is 32 bytes: not a b64_16.",
+      "text": "andvari-answer:3:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "request-key-not-canonical",
+      "why": "The fourth part's last character carries bits past the 32 bytes: not a b64_32.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1B:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "commit-hash-in-capitals",
+      "why": "The fifth part in upper-case hex: not a hex64.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078E38CC20F0A91BE98BD147ED93410A8C544DA132AB102A829763AF36E3E4D9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "sealed-part-empty",
+      "why": "The sixth part is empty.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "sealed-part-padded",
+      "why": "The sixth part ends with \"=\".",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No=",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "space-inside-the-sealed-part",
+      "why": "A space inside the sixth part.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGj kNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "token-for-another-request",
+      "why": "F1: a token made for another request (of the same address): the reader names the id the token carries.",
+      "text": "andvari-answer:3:h7QK7pJ1BOq3-NTF4Q7XFg:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:ZRha60B6iUr515aNtXcJTVUWIDBe-FPCmMyyprAlTmcklbsePsy5ey6tyOwatwsVLcO-YRDvh4HpRVEGc0rrj7zVnPU-v3fBa5NMS3jaeqBAG_M2Dm90JWso_c_IlzmswjScgRHk37xX1Qb3GZ8KVRnO6d1gegsauC4txtF1Lq0QEDMfEPwVM54ZQvF3M4mNHfuvYjNspyOVAFOCuBJso6XdrkMxJFlb4OsVJUVOZ-75DMEjG3ubRN7MxOXcgyUZSw0Sq8PhU41PPkinG2NxStZhneIC2JtspRSXtbtodvgYSeKLB0qz5uYaNWd0UvlekdlGaJ43bbP8zGh_tUlUIdgmghT8N0IQQJdz7HOob2rjVsj0sUwTTHaEqJDQTrl896QJfkDahaW1dBTXUcqjVPrBSiZkEazA6taUDL0--RfX24jWDKgGX9x8mRWR0JEjn8idta5ZP9vK-Gymk4rsnlrd-cKfGMZFAG7RKS6RA5jo8G3Jny4cihoBVWqJpQEF4I0TNyllImVjxEf9ed1PyZYVehFaXh8cAA0h_FBu_QbdzVqMKFb0RhKWuaKm8doCGatYQVeTYspTInUkZwuWDQS5EwnNajgjGkoaT6vwmNSMq6-yvDFHWob_mD1k9Ch2iAxCV6srbAU0qU_tkexEyFXfE1gaKhr5zAlJlpGBk_YpxbD5Y80m6pAvA0zY6HEYzPqKNyf2afl62-TDKM2edPffa00",
+      "expect": {
+        "verdict": "answer_other_request",
+        "tokenRequestId": "h7QK7pJ1BOq3-NTF4Q7XFg"
+      }
+    },
+    {
+      "name": "token-for-another-request-key",
+      "why": "A token for this request id but another request key.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:cMrbMNvJYWVl4VNSpRInL_QmqBQJgOUunvHjlZehDAY:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:-DJEP6K3FJN582c38V4Os6AAVmQUxp89LhbfRAAOlgjsNyygZbKqWiB-oZHUcwx21LXVH8wZF8ygJVQAXN-lDY82SUQffimHhTX_VcbPu7xhe4GPOQVI8nDAhJRweDwKgVfB3DQnbVJNcS9DFPo5uOVlQeo7XLvEYLt3gJb5djXgP6hyznXxlDO_CvMnJND4iS3WLS3Kd32h8pR9DyuDP6m7qLaxl2xLTqR5GzveRHipRXbFuo0VVWNSoHZ62R_VOQVtTNLr_gXXuKwzd23AmmH1xQga4W-CL1uxW_eeeSdBKfUOB4Giejo1l1_u5xeQLhD86WZfiTuM_dFlGeLK7s81zeBqByInX8s-hwyuOw09Avt3cbUDdD-hVdoCpRRZJgxhzA_p6dWLT2hQFfIPdYZiaVdsp5IQBsTTRfr9Ndwnen46qCqXeedotZJhNaG5R1YEOoNG_0mge9ZYz3hCqqY5K7pZca4p9f4MvevJYJX4glVVjujFDrGQ4FrFIZeZyBVn-yN4yIpB-nLc3IoMt7eDDk_yhWaKHoRTQ_DTbXJV-A9NCjyRrWjv0aGKSWKedeJf60zNTR7YOJB1N06u0qEOEj1r2EvDoiQEaamPwOiSZ9ULcc0mJSYCKqk8Wrd2fLZyAYO3NeqUFsKwVPYuPqj7QX6VFRYy7lQO7s_UJ_jakxp7MzFsS-ZaqR89Lc1XkOs0-zI_lhCE1ajsg-XME5Qs1vs",
+      "expect": {
+        "verdict": "answer_other_request_key"
+      }
+    },
+    {
+      "name": "order-request-before-key-and-size",
+      "why": "Another request id, another key and a cut sealed part.",
+      "text": "andvari-answer:3:h7QK7pJ1BOq3-NTF4Q7XFg:cMrbMNvJYWVl4VNSpRInL_QmqBQJgOUunvHjlZehDAY:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3y",
+      "expect": {
+        "verdict": "answer_other_request",
+        "tokenRequestId": "h7QK7pJ1BOq3-NTF4Q7XFg"
+      }
+    },
+    {
+      "name": "order-key-before-size",
+      "why": "Another request key and an over-long sealed part.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:cMrbMNvJYWVl4VNSpRInL_QmqBQJgOUunvHjlZehDAY:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-NoAAAA",
+      "expect": {
+        "verdict": "answer_other_request_key"
+      }
+    },
+    {
+      "name": "cut-by-one-character",
+      "why": "The last character of the sealed part is missing (730 characters, not canonical: L = floor(3 * 730 / 4) = 547).",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-N",
+      "expect": {
+        "verdict": "answer_cut_short"
+      }
+    },
+    {
+      "name": "cut-by-the-last-wrapped-line",
+      "why": "A token wrapped every 200 characters, its last line not copied.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZD\nk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8z\nAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPz\nZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjH",
+      "expect": {
+        "verdict": "answer_cut_short"
+      }
+    },
+    {
+      "name": "one-byte-short",
+      "why": "The sealed answer less its last byte, re-encoded: canonical, 547 bytes.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-A",
+      "expect": {
+        "verdict": "answer_cut_short"
+      }
+    },
+    {
+      "name": "one-byte-too-long",
+      "why": "The sealed answer and one byte more, re-encoded: 549 bytes.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-NoA",
+      "expect": {
+        "verdict": "answer_too_long"
+      }
+    },
+    {
+      "name": "one-character-too-long",
+      "why": "One character more (732 characters: canonical, 549 bytes).",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-NoA",
+      "expect": {
+        "verdict": "answer_too_long"
+      }
+    },
+    {
+      "name": "a-line-too-many",
+      "why": "The token and a line \"AAAA\" after it: base64url only, so it is joined on.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No\nAAAA\n",
+      "expect": {
+        "verdict": "answer_too_long"
+      }
+    },
+    {
+      "name": "right-length-not-canonical",
+      "why": "The right number of characters, but the last one carries bits past the 548 bytes: not canonical, L = floor(3 * 731 / 4) = 548, which is neither smaller nor larger.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-Np",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "answer-for-a-shorter-address",
+      "why": "bob's answer (15 octets, 545 bytes) for this request id and key, read against alice's request (548): the text calls it cut short.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:edef9faa437790ce566c202515e34afd7ce025c218cf92ad64853b2089688561:7xZrSN64wznj1NjJackrTgEHp9nr-iXRu6todV-nq0JxQtfA_K9jTXA9sRpYzn8LQyxps0P7pq8t8MNVFXNToN73zpvZL0ovdjbG-kihw9hqLO-4-DaOj6gt5Yh3tRQZOIhX9du5QUS-CbdfQQc-EfeR_9v_DlrDBS00wZmJ1iKXbtkDA1snD0Shvx3Ia5nfDzEkiyMZbCHDSI4jVkyotDMJAomgqU8twDH5zEg0sF-O209-GUK3Owo8_tO0dtKqcmiMhEsLKHaoskGzXluefr_aHD9V-AkZF_U7pB9FbashPudbRwK36d9LgJ04cYCgTA_MCaet6SUguFut_OFUrId_Ec9V1COH-882vFVLPM4RjMK2A5b_hgswoLHQ2lFN5CjJeA9NXb9K6D_FR8F1yGHWBk2sL3beohHTnkwmoaEE92sy2pHLvUjl_xMhm7J-FI73phpORL_GTh5s34C59h4mO8c2E_vEQtXW84IM5xdAqgnNzogViBOdOYhTzyIb7Vtz08W_9U7BHUb5r6KVUvairyxWiO71uwGVmTmF99ItJv8Svuk1YPHqaFZMF1e5dHCViyckweRtMr30CJtMkgCHfKfzuuPpAu_LlbWOOqQKc9fh-FFb5911ATMWMLRV-GIMzmxnOAgBoKJolOGPzSaULes3RqPdMkDZQWWbm1OQoP7UCIiyifU8Z9Fx_b2b2dw7BxouYlEfV2uY2eWQhd0",
+      "expect": {
+        "verdict": "answer_cut_short"
+      }
+    },
+    {
+      "name": "answer-read-against-a-shorter-address",
+      "why": "alice's answer read against a request row whose address is bob's: the text calls it too long.",
+      "text": "andvari-answer:3:kevsyZmgCVPO8TTl-1oqKQ:LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E:078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9:nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No",
+      "request": {
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "rPub": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "email": "bob@example.org"
+      },
+      "expect": {
+        "verdict": "answer_too_long"
+      }
+    }
+  ],
+  "readFile": [
+    {
+      "name": "file-token",
+      "why": "A file holding the token and a line feed, in UTF-8 (all ASCII).",
+      "bytesB64": "YW5kdmFyaS1hbnN3ZXI6MzprZXZzeVptZ0NWUE84VFRsLTFvcUtROkxLRUVkVnlValREdklwRDZNQmRQeU9fQ2JfU2Y1aWpWX2Fqd3ZOemRuMUU6MDc4ZTM4Y2MyMGYwYTkxYmU5OGJkMTQ3ZWQ5MzQxMGE4YzU0NGRhMTMyYWIxMDJhODI5NzYzYWYzNmUzZTRkOTpuRHh4UUVFNXV4VWU5Mi1HUWQ0d2lGN3cyNUk5Njk2bE5LNW1JdHBHVng0QzhrY3U3WkRrNVRCY0ZhckV1Um1MTTBubG9iOFNMendYYlVmNjIxUWdLT2s5QW5qWmdZZnVadzN5U0lmWWR3V1FWdU1XLV8wejJfT2xrcjh5eHpHMHE5cl9hd1ZkRHFtNnJ3MzMtSS04Um9PaVdGN3VaZzhOQkowMXViOTE2ZVg2ZnVsa2I5T0xiNWZoWkk0NGZ0bFlETE0tR2J3eDd2dF9yMzNSZ2xPX3pFQWRfNmU0QnBnd1dkOXVuaXlPZUQzOEZyc3FXcllyTWxKOWk4ekFRRHhyQXBwRWJCdnE5TlN5UVkwRThlYmFfSVBtc0xKNlhfSUk2b3k3RWIyMWloR2prTkJmSl9DS1dLaVRDN2tXaEJUNXpRSUdEZl9kdzNjRFFwdGU1RTZkVUZjWFhzYng4VTZmSk4zYVlUaGNTemxOSGVJMUVfUFljb3djd3F6REhGTGdVZ3h2ZFJzZzhrR3FzTVhRNldhZ3doaXdJX1Btc2JmUUhxN3J1OWlBWHZGMl9uTjBpbmhEOTNyTkNOWVp5YldnY1B6WmZYUjRiN3psWlhoVXBBdHN6b0owQWc2QjV2cndDY1FydUkwdHVjUHk0NzdjX2ZVVFB0cXo4ckJfTDh0VWhWc0ZXZ1lqUUdpcVZrN2hHOUF6YlJGQ3BNcXRWREpieU5OVnBDSkxUWnNmVHR6MXRqQ18tQ2w5eXVHNFI3V2hLazhMNWxEVHJMX3dZYnhEeDI1UDYtS3ZBTmU3YjFwTHdFQ2hWQWhGLUs0WkxZd2FmV3hNNHh6ak5MTmd0UTNVeWY3azJCOVhaakhiQ0EyUmJTdllPQ1pCXzcyY3V3UkwxLU0wSURFTlVIWENadFV3UEZTTUFOR0ljOTFXRUUzMUdYbDZfVTBpcUNTSGg0MEVZTEhDUkRpQi1Obwo",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "file-utf8-bom-and-crlf-output",
+      "why": "A file that starts with the UTF-8 byte-order mark (EF BB BF), then the whole output with CR LF: the mark is read as U+FEFF and dropped by step 1.",
+      "bytesB64": "77u_QW5zd2VyIGZvciByZXF1ZXN0IGtldnN5Wm1nQ1ZQTzhUVGwtMW9xS1ENCkFjY291bnQgMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExLCBhbGljZUBleGFtcGxlLm9yZyAodGhlIGFkZHJlc3MgdGhlIHJlY292ZXJ5IGNvcHkgbmFtZXMsIHNpZ25lZCBieSB0aGUgYWNjb3VudCkNCk9ubHkgdGhlIHBlcnNvbidzIGRldmljZSBjYW4gb3BlbiB0aGlzIGFuc3dlci4gVXBsb2FkIHRoZSBsYXN0IGxpbmUgd2l0aCB0aGUgY29uc29sZSBvciBhbmR2YXJpLWNsaSBvcGVyYXRvciBmdWxmaWwuDQphbmR2YXJpLWFuc3dlcjozOmtldnN5Wm1nQ1ZQTzhUVGwtMW9xS1E6TEtFRWRWeVVqVER2SXBENk1CZFB5T19DYl9TZjVpalZfYWp3dk56ZG4xRTowNzhlMzhjYzIwZjBhOTFiZTk4YmQxNDdlZDkzNDEwYThjNTQ0ZGExMzJhYjEwMmE4Mjk3NjNhZjM2ZTNlNGQ5Om5EeHhRRUU1dXhVZTkyLUdRZDR3aUY3dzI1STk2OTZsTks1bUl0cEdWeDRDOGtjdTdaRGs1VEJjRmFyRXVSbUxNMG5sb2I4U0x6d1hiVWY2MjFRZ0tPazlBbmpaZ1lmdVp3M3lTSWZZZHdXUVZ1TVctXzB6Ml9PbGtyOHl4ekcwcTlyX2F3VmREcW02cnczMy1JLThSb09pV0Y3dVpnOE5CSjAxdWI5MTZlWDZmdWxrYjlPTGI1ZmhaSTQ0ZnRsWURMTS1HYnd4N3Z0X3IzM1JnbE9fekVBZF82ZTRCcGd3V2Q5dW5peU9lRDM4RnJzcVdyWXJNbEo5aTh6QVFEeHJBcHBFYkJ2cTlOU3lRWTBFOGViYV9JUG1zTEo2WF9JSTZveTdFYjIxaWhHamtOQmZKX0NLV0tpVEM3a1doQlQ1elFJR0RmX2R3M2NEUXB0ZTVFNmRVRmNYWHNieDhVNmZKTjNhWVRoY1N6bE5IZUkxRV9QWWNvd2N3cXpESEZMZ1VneHZkUnNnOGtHcXNNWFE2V2Fnd2hpd0lfUG1zYmZRSHE3cnU5aUFYdkYyX25OMGluaEQ5M3JOQ05ZWnliV2djUHpaZlhSNGI3emxaWGhVcEF0c3pvSjBBZzZCNXZyd0NjUXJ1STB0dWNQeTQ3N2NfZlVUUHRxejhyQl9MOHRVaFZzRldnWWpRR2lxVms3aEc5QXpiUkZDcE1xdFZESmJ5Tk5WcENKTFRac2ZUdHoxdGpDXy1DbDl5dUc0UjdXaEtrOEw1bERUckxfd1lieER4MjVQNi1LdkFOZTdiMXBMd0VDaFZBaEYtSzRaTFl3YWZXeE00eHpqTkxOZ3RRM1V5ZjdrMkI5WFpqSGJDQTJSYlN2WU9DWkJfNzJjdXdSTDEtTTBJREVOVUhYQ1p0VXdQRlNNQU5HSWM5MVdFRTMxR1hsNl9VMGlxQ1NIaDQwRVlMSENSRGlCLU5vDQo",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "file-non-ascii-line-before-the-token",
+      "why": "A line in French before the token (\"R\u00e9ponse :\", \u00e9 as C3 A9): valid UTF-8, and lines before the token are passed over.",
+      "bytesB64": "UsOpcG9uc2UgOgphbmR2YXJpLWFuc3dlcjozOmtldnN5Wm1nQ1ZQTzhUVGwtMW9xS1E6TEtFRWRWeVVqVER2SXBENk1CZFB5T19DYl9TZjVpalZfYWp3dk56ZG4xRTowNzhlMzhjYzIwZjBhOTFiZTk4YmQxNDdlZDkzNDEwYThjNTQ0ZGExMzJhYjEwMmE4Mjk3NjNhZjM2ZTNlNGQ5Om5EeHhRRUU1dXhVZTkyLUdRZDR3aUY3dzI1STk2OTZsTks1bUl0cEdWeDRDOGtjdTdaRGs1VEJjRmFyRXVSbUxNMG5sb2I4U0x6d1hiVWY2MjFRZ0tPazlBbmpaZ1lmdVp3M3lTSWZZZHdXUVZ1TVctXzB6Ml9PbGtyOHl4ekcwcTlyX2F3VmREcW02cnczMy1JLThSb09pV0Y3dVpnOE5CSjAxdWI5MTZlWDZmdWxrYjlPTGI1ZmhaSTQ0ZnRsWURMTS1HYnd4N3Z0X3IzM1JnbE9fekVBZF82ZTRCcGd3V2Q5dW5peU9lRDM4RnJzcVdyWXJNbEo5aTh6QVFEeHJBcHBFYkJ2cTlOU3lRWTBFOGViYV9JUG1zTEo2WF9JSTZveTdFYjIxaWhHamtOQmZKX0NLV0tpVEM3a1doQlQ1elFJR0RmX2R3M2NEUXB0ZTVFNmRVRmNYWHNieDhVNmZKTjNhWVRoY1N6bE5IZUkxRV9QWWNvd2N3cXpESEZMZ1VneHZkUnNnOGtHcXNNWFE2V2Fnd2hpd0lfUG1zYmZRSHE3cnU5aUFYdkYyX25OMGluaEQ5M3JOQ05ZWnliV2djUHpaZlhSNGI3emxaWGhVcEF0c3pvSjBBZzZCNXZyd0NjUXJ1STB0dWNQeTQ3N2NfZlVUUHRxejhyQl9MOHRVaFZzRldnWWpRR2lxVms3aEc5QXpiUkZDcE1xdFZESmJ5Tk5WcENKTFRac2ZUdHoxdGpDXy1DbDl5dUc0UjdXaEtrOEw1bERUckxfd1lieER4MjVQNi1LdkFOZTdiMXBMd0VDaFZBaEYtSzRaTFl3YWZXeE00eHpqTkxOZ3RRM1V5ZjdrMkI5WFpqSGJDQTJSYlN2WU9DWkJfNzJjdXdSTDEtTTBJREVOVUhYQ1p0VXdQRlNNQU5HSWM5MVdFRTMxR1hsNl9VMGlxQ1NIaDQwRVlMSENSRGlCLU5vCg",
+      "expect": {
+        "verdict": "ok",
+        "requestId": "kevsyZmgCVPO8TTl-1oqKQ",
+        "requestKey": "LKEEdVyUjTDvIpD6MBdPyO_Cb_Sf5ijV_ajwvNzdn1E",
+        "commitHash": "078e38cc20f0a91be98bd147ed93410a8c544da132ab102a829763af36e3e4d9",
+        "sealed": "nDxxQEE5uxUe92-GQd4wiF7w25I9696lNK5mItpGVx4C8kcu7ZDk5TBcFarEuRmLM0nlob8SLzwXbUf621QgKOk9AnjZgYfuZw3ySIfYdwWQVuMW-_0z2_Olkr8yxzG0q9r_awVdDqm6rw33-I-8RoOiWF7uZg8NBJ01ub916eX6fulkb9OLb5fhZI44ftlYDLM-Gbwx7vt_r33RglO_zEAd_6e4BpgwWd9uniyOeD38FrsqWrYrMlJ9i8zAQDxrAppEbBvq9NSyQY0E8eba_IPmsLJ6X_II6oy7Eb21ihGjkNBfJ_CKWKiTC7kWhBT5zQIGDf_dw3cDQpte5E6dUFcXXsbx8U6fJN3aYThcSzlNHeI1E_PYcowcwqzDHFLgUgxvdRsg8kGqsMXQ6WagwhiwI_PmsbfQHq7ru9iAXvF2_nN0inhD93rNCNYZybWgcPzZfXR4b7zlZXhUpAtszoJ0Ag6B5vrwCcQruI0tucPy477c_fUTPtqz8rB_L8tUhVsFWgYjQGiqVk7hG9AzbRFCpMqtVDJbyNNVpCJLTZsfTtz1tjC_-Cl9yuG4R7WhKk8L5lDTrL_wYbxDx25P6-KvANe7b1pLwEChVAhF-K4ZLYwafWxM4xzjNLNgtQ3Uyf7k2B9XZjHbCA2RbSvYOCZB_72cuwRL1-M0IDENUHXCZtUwPFSMANGIc91WEE31GXl6_U0iqCSHh40EYLHCRDiB-No"
+      }
+    },
+    {
+      "name": "file-byte-ff-at-the-end",
+      "why": "The token, then the byte FF, which never appears in UTF-8.",
+      "bytesB64": "YW5kdmFyaS1hbnN3ZXI6MzprZXZzeVptZ0NWUE84VFRsLTFvcUtROkxLRUVkVnlValREdklwRDZNQmRQeU9fQ2JfU2Y1aWpWX2Fqd3ZOemRuMUU6MDc4ZTM4Y2MyMGYwYTkxYmU5OGJkMTQ3ZWQ5MzQxMGE4YzU0NGRhMTMyYWIxMDJhODI5NzYzYWYzNmUzZTRkOTpuRHh4UUVFNXV4VWU5Mi1HUWQ0d2lGN3cyNUk5Njk2bE5LNW1JdHBHVng0QzhrY3U3WkRrNVRCY0ZhckV1Um1MTTBubG9iOFNMendYYlVmNjIxUWdLT2s5QW5qWmdZZnVadzN5U0lmWWR3V1FWdU1XLV8wejJfT2xrcjh5eHpHMHE5cl9hd1ZkRHFtNnJ3MzMtSS04Um9PaVdGN3VaZzhOQkowMXViOTE2ZVg2ZnVsa2I5T0xiNWZoWkk0NGZ0bFlETE0tR2J3eDd2dF9yMzNSZ2xPX3pFQWRfNmU0QnBnd1dkOXVuaXlPZUQzOEZyc3FXcllyTWxKOWk4ekFRRHhyQXBwRWJCdnE5TlN5UVkwRThlYmFfSVBtc0xKNlhfSUk2b3k3RWIyMWloR2prTkJmSl9DS1dLaVRDN2tXaEJUNXpRSUdEZl9kdzNjRFFwdGU1RTZkVUZjWFhzYng4VTZmSk4zYVlUaGNTemxOSGVJMUVfUFljb3djd3F6REhGTGdVZ3h2ZFJzZzhrR3FzTVhRNldhZ3doaXdJX1Btc2JmUUhxN3J1OWlBWHZGMl9uTjBpbmhEOTNyTkNOWVp5YldnY1B6WmZYUjRiN3psWlhoVXBBdHN6b0owQWc2QjV2cndDY1FydUkwdHVjUHk0NzdjX2ZVVFB0cXo4ckJfTDh0VWhWc0ZXZ1lqUUdpcVZrN2hHOUF6YlJGQ3BNcXRWREpieU5OVnBDSkxUWnNmVHR6MXRqQ18tQ2w5eXVHNFI3V2hLazhMNWxEVHJMX3dZYnhEeDI1UDYtS3ZBTmU3YjFwTHdFQ2hWQWhGLUs0WkxZd2FmV3hNNHh6ak5MTmd0UTNVeWY3azJCOVhaakhiQ0EyUmJTdllPQ1pCXzcyY3V3UkwxLU0wSURFTlVIWENadFV3UEZTTUFOR0ljOTFXRUUzMUdYbDZfVTBpcUNTSGg0MEVZTEhDUkRpQi1Ob_8",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "file-overlong-slash",
+      "why": "A line before the token holding C0 AF, an overlong form of \"/\": not UTF-8.",
+      "bytesB64": "wK8KYW5kdmFyaS1hbnN3ZXI6MzprZXZzeVptZ0NWUE84VFRsLTFvcUtROkxLRUVkVnlValREdklwRDZNQmRQeU9fQ2JfU2Y1aWpWX2Fqd3ZOemRuMUU6MDc4ZTM4Y2MyMGYwYTkxYmU5OGJkMTQ3ZWQ5MzQxMGE4YzU0NGRhMTMyYWIxMDJhODI5NzYzYWYzNmUzZTRkOTpuRHh4UUVFNXV4VWU5Mi1HUWQ0d2lGN3cyNUk5Njk2bE5LNW1JdHBHVng0QzhrY3U3WkRrNVRCY0ZhckV1Um1MTTBubG9iOFNMendYYlVmNjIxUWdLT2s5QW5qWmdZZnVadzN5U0lmWWR3V1FWdU1XLV8wejJfT2xrcjh5eHpHMHE5cl9hd1ZkRHFtNnJ3MzMtSS04Um9PaVdGN3VaZzhOQkowMXViOTE2ZVg2ZnVsa2I5T0xiNWZoWkk0NGZ0bFlETE0tR2J3eDd2dF9yMzNSZ2xPX3pFQWRfNmU0QnBnd1dkOXVuaXlPZUQzOEZyc3FXcllyTWxKOWk4ekFRRHhyQXBwRWJCdnE5TlN5UVkwRThlYmFfSVBtc0xKNlhfSUk2b3k3RWIyMWloR2prTkJmSl9DS1dLaVRDN2tXaEJUNXpRSUdEZl9kdzNjRFFwdGU1RTZkVUZjWFhzYng4VTZmSk4zYVlUaGNTemxOSGVJMUVfUFljb3djd3F6REhGTGdVZ3h2ZFJzZzhrR3FzTVhRNldhZ3doaXdJX1Btc2JmUUhxN3J1OWlBWHZGMl9uTjBpbmhEOTNyTkNOWVp5YldnY1B6WmZYUjRiN3psWlhoVXBBdHN6b0owQWc2QjV2cndDY1FydUkwdHVjUHk0NzdjX2ZVVFB0cXo4ckJfTDh0VWhWc0ZXZ1lqUUdpcVZrN2hHOUF6YlJGQ3BNcXRWREpieU5OVnBDSkxUWnNmVHR6MXRqQ18tQ2w5eXVHNFI3V2hLazhMNWxEVHJMX3dZYnhEeDI1UDYtS3ZBTmU3YjFwTHdFQ2hWQWhGLUs0WkxZd2FmV3hNNHh6ak5MTmd0UTNVeWY3azJCOVhaakhiQ0EyUmJTdllPQ1pCXzcyY3V3UkwxLU0wSURFTlVIWENadFV3UEZTTUFOR0ljOTFXRUUzMUdYbDZfVTBpcUNTSGg0MEVZTEhDUkRpQi1Obwo",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "file-lone-continuation-byte",
+      "why": "A line before the token holding the lone continuation byte 80.",
+      "bytesB64": "gAphbmR2YXJpLWFuc3dlcjozOmtldnN5Wm1nQ1ZQTzhUVGwtMW9xS1E6TEtFRWRWeVVqVER2SXBENk1CZFB5T19DYl9TZjVpalZfYWp3dk56ZG4xRTowNzhlMzhjYzIwZjBhOTFiZTk4YmQxNDdlZDkzNDEwYThjNTQ0ZGExMzJhYjEwMmE4Mjk3NjNhZjM2ZTNlNGQ5Om5EeHhRRUU1dXhVZTkyLUdRZDR3aUY3dzI1STk2OTZsTks1bUl0cEdWeDRDOGtjdTdaRGs1VEJjRmFyRXVSbUxNMG5sb2I4U0x6d1hiVWY2MjFRZ0tPazlBbmpaZ1lmdVp3M3lTSWZZZHdXUVZ1TVctXzB6Ml9PbGtyOHl4ekcwcTlyX2F3VmREcW02cnczMy1JLThSb09pV0Y3dVpnOE5CSjAxdWI5MTZlWDZmdWxrYjlPTGI1ZmhaSTQ0ZnRsWURMTS1HYnd4N3Z0X3IzM1JnbE9fekVBZF82ZTRCcGd3V2Q5dW5peU9lRDM4RnJzcVdyWXJNbEo5aTh6QVFEeHJBcHBFYkJ2cTlOU3lRWTBFOGViYV9JUG1zTEo2WF9JSTZveTdFYjIxaWhHamtOQmZKX0NLV0tpVEM3a1doQlQ1elFJR0RmX2R3M2NEUXB0ZTVFNmRVRmNYWHNieDhVNmZKTjNhWVRoY1N6bE5IZUkxRV9QWWNvd2N3cXpESEZMZ1VneHZkUnNnOGtHcXNNWFE2V2Fnd2hpd0lfUG1zYmZRSHE3cnU5aUFYdkYyX25OMGluaEQ5M3JOQ05ZWnliV2djUHpaZlhSNGI3emxaWGhVcEF0c3pvSjBBZzZCNXZyd0NjUXJ1STB0dWNQeTQ3N2NfZlVUUHRxejhyQl9MOHRVaFZzRldnWWpRR2lxVms3aEc5QXpiUkZDcE1xdFZESmJ5Tk5WcENKTFRac2ZUdHoxdGpDXy1DbDl5dUc0UjdXaEtrOEw1bERUckxfd1lieER4MjVQNi1LdkFOZTdiMXBMd0VDaFZBaEYtSzRaTFl3YWZXeE00eHpqTkxOZ3RRM1V5ZjdrMkI5WFpqSGJDQTJSYlN2WU9DWkJfNzJjdXdSTDEtTTBJREVOVUhYQ1p0VXdQRlNNQU5HSWM5MVdFRTMxR1hsNl9VMGlxQ1NIaDQwRVlMSENSRGlCLU5vCg",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "file-encoded-surrogate",
+      "why": "A line before the token holding ED A0 80, the UTF-8 form of a surrogate (U+D800): not UTF-8.",
+      "bytesB64": "7aCACmFuZHZhcmktYW5zd2VyOjM6a2V2c3labWdDVlBPOFRUbC0xb3FLUTpMS0VFZFZ5VWpURHZJcEQ2TUJkUHlPX0NiX1NmNWlqVl9hand2TnpkbjFFOjA3OGUzOGNjMjBmMGE5MWJlOThiZDE0N2VkOTM0MTBhOGM1NDRkYTEzMmFiMTAyYTgyOTc2M2FmMzZlM2U0ZDk6bkR4eFFFRTV1eFVlOTItR1FkNHdpRjd3MjVJOTY5NmxOSzVtSXRwR1Z4NEM4a2N1N1pEazVUQmNGYXJFdVJtTE0wbmxvYjhTTHp3WGJVZjYyMVFnS09rOUFualpnWWZ1WnczeVNJZllkd1dRVnVNVy1fMHoyX09sa3I4eXh6RzBxOXJfYXdWZERxbTZydzMzLUktOFJvT2lXRjd1Wmc4TkJKMDF1YjkxNmVYNmZ1bGtiOU9MYjVmaFpJNDRmdGxZRExNLUdid3g3dnRfcjMzUmdsT196RUFkXzZlNEJwZ3dXZDl1bml5T2VEMzhGcnNxV3JZck1sSjlpOHpBUUR4ckFwcEViQnZxOU5TeVFZMEU4ZWJhX0lQbXNMSjZYX0lJNm95N0ViMjFpaEdqa05CZkpfQ0tXS2lUQzdrV2hCVDV6UUlHRGZfZHczY0RRcHRlNUU2ZFVGY1hYc2J4OFU2ZkpOM2FZVGhjU3psTkhlSTFFX1BZY293Y3dxekRIRkxnVWd4dmRSc2c4a0dxc01YUTZXYWd3aGl3SV9QbXNiZlFIcTdydTlpQVh2RjJfbk4waW5oRDkzck5DTllaeWJXZ2NQelpmWFI0Yjd6bFpYaFVwQXRzem9KMEFnNkI1dnJ3Q2NRcnVJMHR1Y1B5NDc3Y19mVVRQdHF6OHJCX0w4dFVoVnNGV2dZalFHaXFWazdoRzlBemJSRkNwTXF0VkRKYnlOTlZwQ0pMVFpzZlR0ejF0akNfLUNsOXl1RzRSN1doS2s4TDVsRFRyTF93WWJ4RHgyNVA2LUt2QU5lN2IxcEx3RUNoVkFoRi1LNFpMWXdhZld4TTR4empOTE5ndFEzVXlmN2syQjlYWmpIYkNBMlJiU3ZZT0NaQl83MmN1d1JMMS1NMElERU5VSFhDWnRVd1BGU01BTkdJYzkxV0VFMzFHWGw2X1UwaXFDU0hoNDBFWUxIQ1JEaUItTm8K",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "file-cut-sequence-at-the-end",
+      "why": "The token, a line feed, then E2 82, the first two bytes of a three-byte sequence.",
+      "bytesB64": "YW5kdmFyaS1hbnN3ZXI6MzprZXZzeVptZ0NWUE84VFRsLTFvcUtROkxLRUVkVnlValREdklwRDZNQmRQeU9fQ2JfU2Y1aWpWX2Fqd3ZOemRuMUU6MDc4ZTM4Y2MyMGYwYTkxYmU5OGJkMTQ3ZWQ5MzQxMGE4YzU0NGRhMTMyYWIxMDJhODI5NzYzYWYzNmUzZTRkOTpuRHh4UUVFNXV4VWU5Mi1HUWQ0d2lGN3cyNUk5Njk2bE5LNW1JdHBHVng0QzhrY3U3WkRrNVRCY0ZhckV1Um1MTTBubG9iOFNMendYYlVmNjIxUWdLT2s5QW5qWmdZZnVadzN5U0lmWWR3V1FWdU1XLV8wejJfT2xrcjh5eHpHMHE5cl9hd1ZkRHFtNnJ3MzMtSS04Um9PaVdGN3VaZzhOQkowMXViOTE2ZVg2ZnVsa2I5T0xiNWZoWkk0NGZ0bFlETE0tR2J3eDd2dF9yMzNSZ2xPX3pFQWRfNmU0QnBnd1dkOXVuaXlPZUQzOEZyc3FXcllyTWxKOWk4ekFRRHhyQXBwRWJCdnE5TlN5UVkwRThlYmFfSVBtc0xKNlhfSUk2b3k3RWIyMWloR2prTkJmSl9DS1dLaVRDN2tXaEJUNXpRSUdEZl9kdzNjRFFwdGU1RTZkVUZjWFhzYng4VTZmSk4zYVlUaGNTemxOSGVJMUVfUFljb3djd3F6REhGTGdVZ3h2ZFJzZzhrR3FzTVhRNldhZ3doaXdJX1Btc2JmUUhxN3J1OWlBWHZGMl9uTjBpbmhEOTNyTkNOWVp5YldnY1B6WmZYUjRiN3psWlhoVXBBdHN6b0owQWc2QjV2cndDY1FydUkwdHVjUHk0NzdjX2ZVVFB0cXo4ckJfTDh0VWhWc0ZXZ1lqUUdpcVZrN2hHOUF6YlJGQ3BNcXRWREpieU5OVnBDSkxUWnNmVHR6MXRqQ18tQ2w5eXVHNFI3V2hLazhMNWxEVHJMX3dZYnhEeDI1UDYtS3ZBTmU3YjFwTHdFQ2hWQWhGLUs0WkxZd2FmV3hNNHh6ak5MTmd0UTNVeWY3azJCOVhaakhiQ0EyUmJTdllPQ1pCXzcyY3V3UkwxLU0wSURFTlVIWENadFV3UEZTTUFOR0ljOTFXRUUzMUdYbDZfVTBpcUNTSGg0MEVZTEhDUkRpQi1Obwrigg",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    },
+    {
+      "name": "file-utf16le",
+      "why": "The token saved as UTF-16 LE with its byte-order mark (FF FE): not UTF-8.",
+      "bytesB64": "__5hAG4AZAB2AGEAcgBpAC0AYQBuAHMAdwBlAHIAOgAzADoAawBlAHYAcwB5AFoAbQBnAEMAVgBQAE8AOABUAFQAbAAtADEAbwBxAEsAUQA6AEwASwBFAEUAZABWAHkAVQBqAFQARAB2AEkAcABEADYATQBCAGQAUAB5AE8AXwBDAGIAXwBTAGYANQBpAGoAVgBfAGEAagB3AHYATgB6AGQAbgAxAEUAOgAwADcAOABlADMAOABjAGMAMgAwAGYAMABhADkAMQBiAGUAOQA4AGIAZAAxADQANwBlAGQAOQAzADQAMQAwAGEAOABjADUANAA0AGQAYQAxADMAMgBhAGIAMQAwADIAYQA4ADIAOQA3ADYAMwBhAGYAMwA2AGUAMwBlADQAZAA5ADoAbgBEAHgAeABRAEUARQA1AHUAeABVAGUAOQAyAC0ARwBRAGQANAB3AGkARgA3AHcAMgA1AEkAOQA2ADkANgBsAE4ASwA1AG0ASQB0AHAARwBWAHgANABDADgAawBjAHUANwBaAEQAawA1AFQAQgBjAEYAYQByAEUAdQBSAG0ATABNADAAbgBsAG8AYgA4AFMATAB6AHcAWABiAFUAZgA2ADIAMQBRAGcASwBPAGsAOQBBAG4AagBaAGcAWQBmAHUAWgB3ADMAeQBTAEkAZgBZAGQAdwBXAFEAVgB1AE0AVwAtAF8AMAB6ADIAXwBPAGwAawByADgAeQB4AHoARwAwAHEAOQByAF8AYQB3AFYAZABEAHEAbQA2AHIAdwAzADMALQBJAC0AOABSAG8ATwBpAFcARgA3AHUAWgBnADgATgBCAEoAMAAxAHUAYgA5ADEANgBlAFgANgBmAHUAbABrAGIAOQBPAEwAYgA1AGYAaABaAEkANAA0AGYAdABsAFkARABMAE0ALQBHAGIAdwB4ADcAdgB0AF8AcgAzADMAUgBnAGwATwBfAHoARQBBAGQAXwA2AGUANABCAHAAZwB3AFcAZAA5AHUAbgBpAHkATwBlAEQAMwA4AEYAcgBzAHEAVwByAFkAcgBNAGwASgA5AGkAOAB6AEEAUQBEAHgAcgBBAHAAcABFAGIAQgB2AHEAOQBOAFMAeQBRAFkAMABFADgAZQBiAGEAXwBJAFAAbQBzAEwASgA2AFgAXwBJAEkANgBvAHkANwBFAGIAMgAxAGkAaABHAGoAawBOAEIAZgBKAF8AQwBLAFcASwBpAFQAQwA3AGsAVwBoAEIAVAA1AHoAUQBJAEcARABmAF8AZAB3ADMAYwBEAFEAcAB0AGUANQBFADYAZABVAEYAYwBYAFgAcwBiAHgAOABVADYAZgBKAE4AMwBhAFkAVABoAGMAUwB6AGwATgBIAGUASQAxAEUAXwBQAFkAYwBvAHcAYwB3AHEAegBEAEgARgBMAGcAVQBnAHgAdgBkAFIAcwBnADgAawBHAHEAcwBNAFgAUQA2AFcAYQBnAHcAaABpAHcASQBfAFAAbQBzAGIAZgBRAEgAcQA3AHIAdQA5AGkAQQBYAHYARgAyAF8AbgBOADAAaQBuAGgARAA5ADMAcgBOAEMATgBZAFoAeQBiAFcAZwBjAFAAegBaAGYAWABSADQAYgA3AHoAbABaAFgAaABVAHAAQQB0AHMAegBvAEoAMABBAGcANgBCADUAdgByAHcAQwBjAFEAcgB1AEkAMAB0AHUAYwBQAHkANAA3ADcAYwBfAGYAVQBUAFAAdABxAHoAOAByAEIAXwBMADgAdABVAGgAVgBzAEYAVwBnAFkAagBRAEcAaQBxAFYAawA3AGgARwA5AEEAegBiAFIARgBDAHAATQBxAHQAVgBEAEoAYgB5AE4ATgBWAHAAQwBKAEwAVABaAHMAZgBUAHQAegAxAHQAagBDAF8ALQBDAGwAOQB5AHUARwA0AFIANwBXAGgASwBrADgATAA1AGwARABUAHIATABfAHcAWQBiAHgARAB4ADIANQBQADYALQBLAHYAQQBOAGUANwBiADEAcABMAHcARQBDAGgAVgBBAGgARgAtAEsANABaAEwAWQB3AGEAZgBXAHgATQA0AHgAegBqAE4ATABOAGcAdABRADMAVQB5AGYANwBrADIAQgA5AFgAWgBqAEgAYgBDAEEAMgBSAGIAUwB2AFkATwBDAFoAQgBfADcAMgBjAHUAdwBSAEwAMQAtAE0AMABJAEQARQBOAFUASABYAEMAWgB0AFUAdwBQAEYAUwBNAEEATgBHAEkAYwA5ADEAVwBFAEUAMwAxAEcAWABsADYAXwBVADAAaQBxAEMAUwBIAGgANAAwAEUAWQBMAEgAQwBSAEQAaQBCAC0ATgBvAA",
+      "expect": {
+        "verdict": "not_an_answer"
+      }
+    }
+  ]
+}

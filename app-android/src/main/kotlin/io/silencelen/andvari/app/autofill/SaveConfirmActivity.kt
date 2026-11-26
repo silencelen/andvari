@@ -69,6 +69,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/** The old save confirm runs on the old code and never runs in this app: saves are queued by [AutofillSave]. */
+internal const val OLD_SAVE_CONFIRM_RETIRED = true
+
 /**
  * Strip every caller-claimed domain out of a capture whose requesting package is NOT a
  * cert-pinned browser (G11; audit 2026-09-13 H55).
@@ -112,7 +115,7 @@ internal fun saveSubject(creds: SavedCredentials): String {
  * working set). [display] is brand + masked last4 ("Visa ••4242") — the ONLY card identity
  * the confirm surface ever shows: never a full PAN, never any CVV.
  */
-private sealed interface CardPlan {
+internal sealed interface CardPlan {
     val display: String
 
     data class Update(override val display: String, val itemId: String) : CardPlan
@@ -127,7 +130,7 @@ private sealed interface CardPlan {
  * user can tell a password change from a wrong-account merge (auto-saved logins are named by host).
  * Twin of the extension's saveTargetFor (savetarget.test.ts pins the shared 2a/2b/2c rule).
  */
-private sealed interface LoginPlan {
+internal sealed interface LoginPlan {
     data class Update(val itemId: String, val name: String, val username: String?) : LoginPlan
     object New : LoginPlan
 }
@@ -168,7 +171,13 @@ class SaveConfirmActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // Set BEFORE any content: login AND card confirms render secret-adjacent material here.
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
+        // Other apps' overlays are hidden while this is shown (API 31+).
+        if (android.os.Build.VERSION.SDK_INT >= 31) window.setHideOverlayWindows(true)
         setResult(RESULT_CANCELED) // back / dismiss = don't save
+        // The old session store must not be constructed by anything the new app
+        // runs. Saving runs on the new code now (AutofillSave queues it from the service) and nothing launches this
+        // activity; one that is started anyway is refused before anything of the old path is touched.
+        if (OLD_SAVE_CONFIRM_RETIRED) { finish(); return }
 
         val structure = intent.assistStructure()
         if (structure == null) { finish(); return }
@@ -459,7 +468,7 @@ class SaveConfirmActivity : ComponentActivity() {
 }
 
 @Composable
-private fun SaveCard(
+internal fun SaveCard(
     plan: LoginPlan,
     site: String,
     username: String?,
@@ -510,7 +519,7 @@ private fun SaveCard(
  * through to the login stage when one was captured.
  */
 @Composable
-private fun CardSaveCard(
+internal fun CardSaveCard(
     plan: CardPlan,
     busy: Boolean,
     error: String?,
@@ -546,7 +555,7 @@ private fun CardSaveCard(
 }
 
 @Composable
-private fun UnlockToSaveCard(
+internal fun UnlockToSaveCard(
     email: String,
     subject: String,
     busy: Boolean,

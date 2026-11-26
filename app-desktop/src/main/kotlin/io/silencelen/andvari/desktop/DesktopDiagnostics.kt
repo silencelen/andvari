@@ -2,6 +2,7 @@ package io.silencelen.andvari.desktop
 
 import io.silencelen.andvari.core.client.ApiException
 import io.silencelen.andvari.core.client.CsvImport
+import io.silencelen.andvari.core.client.HouseholdCopy
 import io.silencelen.andvari.core.crypto.CryptoException
 import io.silencelen.andvari.core.crypto.CryptoUnavailableException
 import io.silencelen.andvari.core.crypto.NATIVE_SODIUM_PATH_PROPERTY
@@ -21,16 +22,24 @@ import java.time.Instant
  * "Sign-in failed. Please try again." / "Couldn't unlock — please try again." for a permanent,
  * non-retryable, local condition. A password manager must never induce "I forgot my password" or
  * "the server is broken" for a failure it has already diagnosed. The verdict now travels to
- * [DesktopState.applySelfCheck], which renders the blocking, honest state (the 426 upgrade-screen
- * idiom) naming the diagnostic log instead of the password field.
+ * the root (`main()` builds no engine, and `TrustApp` renders the blocking, honest state naming the diagnostic log
+ * instead of the password field).
  */
 sealed class SelfCheck {
     object Ok : SelfCheck()
 
     /** [summary] is the throwable chain in one line — for the log and tests; the UI renders the
-     *  STATIC sentence ([DesktopState.CRYPTO_UNAVAILABLE_NOTICE]) plus the log path, never this. */
+     *  STATIC sentence ([CRYPTO_UNAVAILABLE_NOTICE]) plus the log path, never this. */
     data class CryptoUnavailable(val summary: String) : SelfCheck()
 }
+
+/**
+ * What the blocking screen says when native crypto did not load (audit H15). R23: core's sentence VERBATIM plus what
+ * only the desktop can add (the log) — HouseholdCopy's contract is "may say more, must not say less", pinned by
+ * SurfacePinsTest. (Moved here from the old `DesktopState`'s companion.)
+ */
+const val CRYPTO_UNAVAILABLE_NOTICE =
+    HouseholdCopy.CRYPTO_UNAVAILABLE + " Details were written to the diagnostic log below — send that file along."
 
 /**
  * Field diagnostics for failures that the household canon deliberately flattens to a calm,
@@ -60,6 +69,18 @@ sealed class SelfCheck {
  * path, every op() exception chain and full stack trace, readable by every local user. Both are
  * now created the store's way — the mode is part of the CREATE ([ownerOnly]), never a chmod after.
  */
+/**
+ * The JVM options the build gives the app (build.gradle.kts `hardenedJvmArgs`) that [args]
+ * (the running JVM's input arguments) lack. A later option of the same name wins, as in HotSpot.
+ */
+internal fun missingJvmHardening(args: List<String>): List<String> {
+    fun last(flag: String): String? = args.lastOrNull { it == "-XX:+$flag" || it == "-XX:-$flag" }
+    return buildList {
+        if (last("DisableAttachMechanism") != "-XX:+DisableAttachMechanism") add("-XX:+DisableAttachMechanism")
+        if (last("CreateCoredumpOnCrash") != "-XX:-CreateCoredumpOnCrash") add("-XX:-CreateCoredumpOnCrash")
+    }
+}
+
 object DesktopDiagnostics {
     /** Audit H126: rotate at 256 KiB keeping one generation — the log is bounded at 512 KiB total.
      *  Deliberately small: this is a support artifact a household member may be asked to send. */
@@ -91,6 +112,15 @@ object DesktopDiagnostics {
     fun logThrowable(context: String, t: Throwable) {
         log("$context :: ${throwableChain(t)}")
         append(redactedStackTrace(t))
+    }
+
+    /**
+     * An error no code caught (a thread's, the event thread's, a coroutine's without a
+     * handler) goes through [logThrowable], redacted, instead of the JVM's default, which printed it to standard error
+     * with its message (the session journal on Linux). Installed first thing in `main()`.
+     */
+    fun installUncaughtLogging() {
+        Thread.setDefaultUncaughtExceptionHandler { _, e -> runCatching { logThrowable("uncaught", e) } }
     }
 
     /** One line naming every link of the cause chain — the log's and [SelfCheck]'s shape. Every
@@ -268,7 +298,7 @@ object DesktopDiagnostics {
      * since the Windows `libsodium.dll` imports `VCRUNTIME140.dll` + the `api-ms-win-crt-*` UCRT.
      *
      * Returns the verdict (audit H15) — the caller MUST act on a [SelfCheck.CryptoUnavailable]
-     * (Main hands it to [DesktopState.applySelfCheck]); logging it alone is the defect this
+     * (Main builds no engine and hands [CRYPTO_UNAVAILABLE_NOTICE] to the root); logging it alone is the defect this
      * used to be. Never throws.
      */
     fun runStartupSelfCheck(): SelfCheck {
@@ -277,6 +307,9 @@ object DesktopDiagnostics {
             log("---- startup self-check ----")
             log("os.name=${System.getProperty("os.name")} os.arch=${System.getProperty("os.arch")} java=${System.getProperty("java.version")}")
             log("java.home=${System.getProperty("java.home")}")
+            // Note N5: say when this JVM runs without the hardening the build sets (a run from an IDE, say).
+            val missing = missingJvmHardening(java.lang.management.ManagementFactory.getRuntimeMXBean().inputArguments)
+            log(if (missing.isEmpty()) "jvm hardening: on" else "jvm hardening MISSING: ${missing.joinToString(" ")}")
             val runtimeBin = File(System.getProperty("java.home"), "bin")
             val rtDlls = runtimeBin.listFiles { f -> f.name.endsWith(".dll") }
                 ?.map { it.name }?.sorted() ?: emptyList()

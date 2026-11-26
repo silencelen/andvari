@@ -82,13 +82,19 @@ sealed class Statement {
         override val purpose get() = StatementPurpose.VAULT_GRANT
     }
 
-    /** `purpose = escrow-uvk`: [userId]'s UVK ([key]) sealed to the org key whose full fingerprint is [recoveryFp]. */
+    /**
+     * `purpose = escrow-uvk`: [userId]'s UVK ([key]) sealed to the org key whose full fingerprint is [recoveryFp].
+     * [email] is the account's `emailNorm` (spec 04 §3): given, the statement is the
+     * version-3 form, which says whose copy it is; null, the old version-2 form, which only the vectors and the
+     * released tool's `recover` still read.
+     */
     class EscrowUvk(
         val userId: String,
         identityKey: ByteArray,
         val recoveryFp: String,
         override val issuedAt: Long,
         key: ByteArray,
+        val email: String? = null,
     ) : Statement() {
         private val identityKeyBytes = identityKey.copyOf()
         private val keyBytes = key.copyOf()
@@ -120,6 +126,9 @@ sealed class UnverifiedStatement {
     class EscrowUvk internal constructor(override val parsed: Statement.EscrowUvk) : UnverifiedStatement() {
         val userId: String get() = parsed.userId
         val recoveryFp: String get() = parsed.recoveryFp
+
+        /** The address a version-3 statement claims (unverified), or null for the old form. */
+        val email: String? get() = parsed.email
     }
 
     internal companion object {
@@ -191,6 +200,9 @@ object SignedStatement {
     private val GRANT_KEYS = listOf("v", "purpose", "from", "to", "toKey", "vaultId", "grantId", "issuedAt", "vk")
     private val ESCROW_KEYS = listOf("v", "purpose", "userId", "identityKey", "recoveryFp", "issuedAt", "key")
 
+    /** The version-3 escrow template (spec 04 §3): the old keys with `email` after `userId`. */
+    private val ESCROW_V3_KEYS = listOf("v", "purpose", "userId", "email", "identityKey", "recoveryFp", "issuedAt", "key")
+
     private val json = Json // strict defaults: no lenient parsing, no comments, no trailing commas
 
     // ---- format detection -------------------------------------------------------------------------
@@ -230,10 +242,20 @@ object SignedStatement {
                 need(HEX64_RE.matches(statement.recoveryFp), "recoveryFp is not 64 lowercase hex")
                 need(isMs(statement.issuedAt), "issuedAt out of range")
                 need(statement.key.size == 32, "key must be 32 bytes")
-                escrowTemplate(
-                    2, StatementPurpose.ESCROW_UVK.literal, statement.userId, Bytes.toB64(statement.identityKey),
-                    statement.recoveryFp, statement.issuedAt, Bytes.toB64(statement.key),
-                )
+                val email = statement.email
+                if (email == null) {
+                    escrowTemplate(
+                        2, StatementPurpose.ESCROW_UVK.literal, statement.userId, Bytes.toB64(statement.identityKey),
+                        statement.recoveryFp, statement.issuedAt, Bytes.toB64(statement.key),
+                    )
+                } else {
+                    val emailB64 = emailField(email)
+                    need(emailB64 != null, "email is not an emailNorm")
+                    escrowV3Template(
+                        StatementPurpose.ESCROW_UVK.literal, statement.userId, emailB64!!, Bytes.toB64(statement.identityKey),
+                        statement.recoveryFp, statement.issuedAt, Bytes.toB64(statement.key),
+                    )
+                }
             }
         }.encodeToByteArray()
         need(bytes.size in MIN_STATEMENT_BYTES..MAX_STATEMENT_BYTES, "statement length out of range")
@@ -248,10 +270,20 @@ object SignedStatement {
         v: Int, purpose: String, userId: String, identityKey: String, recoveryFp: String, issuedAt: Long, key: String,
     ) = """{"v":$v,"purpose":"$purpose","userId":"$userId","identityKey":"$identityKey","recoveryFp":"$recoveryFp","issuedAt":$issuedAt,"key":"$key"}"""
 
+    /** The version-3 escrow statement (spec 04 §3); [email] is the `email_b64` text. [v] is the parsed number on a re-encode. */
+    private fun escrowV3Template(
+        purpose: String, userId: String, email: String, identityKey: String, recoveryFp: String, issuedAt: Long, key: String, v: Int = 3,
+    ) = """{"v":$v,"purpose":"$purpose","userId":"$userId","email":"$email","identityKey":"$identityKey","recoveryFp":"$recoveryFp","issuedAt":$issuedAt,"key":"$key"}"""
+
+    /** The `email_b64` form of [emailNorm] (spec 01 §5.1), or null when [emailNorm] is not already an `emailNorm`. */
+    private fun emailField(emailNorm: String): String? =
+        if (io.silencelen.andvari.core.trust.TrustGrammar.emailNorm(emailNorm) == emailNorm) Bytes.toB64(emailNorm.encodeToByteArray()) else null
+
     /**
      * STRICT parse of a statement under [purposeCode] (spec 01 §5.1 steps, in order):
      * 1. length 2..1024 and a known purpose code, else `bad_frame`;
-     * 2. every byte printable ASCII (0x20..0x7E), else `non_canonical`;
+     * 2. every byte printable ASCII (0x20..0x7E), and no nesting (no `[` anywhere, no second `{`: one
+     *    flat object, refused before any JSON parser sees the text), else `non_canonical`;
      * 3. platform JSON parse to an object with EXACTLY the purpose's key set, else `non_canonical`;
      * 4. every value inside its grammar, else `non_canonical`;
      * 5. re-encode through the template and byte-compare with the input, else `non_canonical`
@@ -268,6 +300,8 @@ object SignedStatement {
         val purpose = StatementPurpose.fromCode(purposeCode) ?: refuse(StatementVerdict.BAD_FRAME, "unknown purpose code")
         if (statement.size !in MIN_STATEMENT_BYTES..MAX_STATEMENT_BYTES) refuse(StatementVerdict.BAD_FRAME, "statement length")
         if (statement.any { it < 0x20 || it > 0x7E }) refuse(StatementVerdict.NON_CANONICAL, "not printable ASCII")
+        // One flat object, decided before the platform parser sees the text (see [isFlatStatement]).
+        if (!isFlatStatement(statement)) refuse(StatementVerdict.NON_CANONICAL, "nesting")
         val text = statement.decodeToString()
         val obj = try {
             json.parseToJsonElement(text) as? JsonObject
@@ -275,7 +309,9 @@ object SignedStatement {
             null
         } ?: refuse(StatementVerdict.NON_CANONICAL, "not a JSON object")
 
-        val keys = if (purpose == StatementPurpose.VAULT_GRANT) GRANT_KEYS else ESCROW_KEYS
+        // An escrow statement is matched against the template whose key set it has: version 3 carries `email` (spec 04 §3).
+        val escrowV3 = purpose == StatementPurpose.ESCROW_UVK && obj.containsKey("email")
+        val keys = if (purpose == StatementPurpose.VAULT_GRANT) GRANT_KEYS else if (escrowV3) ESCROW_V3_KEYS else ESCROW_KEYS
         if (obj.keys != keys.toSet() || obj.size != keys.size) refuse(StatementVerdict.NON_CANONICAL, "key set")
 
         val v = number(obj, "v", V_RE).toInt()
@@ -298,19 +334,31 @@ object SignedStatement {
                 parsed = g
             }
             StatementPurpose.ESCROW_UVK -> {
+                val userId = uuid(obj, "userId")
+                // `email_b64` (spec 01 §5.1): an address, never `none`, already normal.
+                val emailText = if (escrowV3) string(obj, "email") else null
+                val email = emailText?.let {
+                    (io.silencelen.andvari.core.trust.TrustGrammar.decodeEmail(it) as? io.silencelen.andvari.core.trust.TrustGrammar.Email.Of)?.emailNorm
+                        ?: refuse(StatementVerdict.NON_CANONICAL, "email grammar")
+                }
+                val identityKey = b64(obj, "identityKey", 32)
                 val recoveryFp = string(obj, "recoveryFp")
                 if (!HEX64_RE.matches(recoveryFp)) refuse(StatementVerdict.NON_CANONICAL, "recoveryFp grammar")
                 val e = Statement.EscrowUvk(
-                    userId = uuid(obj, "userId"), identityKey = b64(obj, "identityKey", 32), recoveryFp = recoveryFp,
-                    issuedAt = issuedAt, key = b64(obj, "key", 32),
+                    userId = userId, identityKey = identityKey, recoveryFp = recoveryFp, issuedAt = issuedAt, key = b64(obj, "key", 32), email = email,
                 )
-                reEncoded = escrowTemplate(v, purposeLiteral, e.userId, Bytes.toB64(e.identityKey), e.recoveryFp, e.issuedAt, Bytes.toB64(e.key))
+                reEncoded = if (emailText != null) {
+                    escrowV3Template(purposeLiteral, e.userId, emailText, Bytes.toB64(e.identityKey), e.recoveryFp, e.issuedAt, Bytes.toB64(e.key), v)
+                } else {
+                    escrowTemplate(v, purposeLiteral, e.userId, Bytes.toB64(e.identityKey), e.recoveryFp, e.issuedAt, Bytes.toB64(e.key))
+                }
                 parsed = e
             }
         }
         if (!reEncoded.encodeToByteArray().contentEquals(statement)) refuse(StatementVerdict.NON_CANONICAL, "not the canonical encoding")
 
-        if (v != 2) refuse(StatementVerdict.BAD_STATEMENT, "statement version $v")
+        // Each template has its own version: 3 for the escrow statement that names its address, 2 for every other.
+        if (v != (if (escrowV3) 3 else 2)) refuse(StatementVerdict.BAD_STATEMENT, "statement version $v")
         if (purposeLiteral != purpose.literal) refuse(StatementVerdict.BAD_STATEMENT, "purpose literal does not match the purpose code")
         if (parsed is Statement.VaultGrant && parsed.from == parsed.to) refuse(StatementVerdict.BAD_STATEMENT, "grant from == to")
         return parsed
@@ -325,6 +373,8 @@ object SignedStatement {
     /** Encode, sign with the joint key [signer] (from [CryptoProvider.signKeypairFromSeed]) and frame. */
     fun build(crypto: CryptoProvider, signer: KeyPairBytes, statement: Statement): ByteArray {
         need(signer.publicKey.size == SIGNER_BYTES, "signer public key must be 32 bytes")
+        // Nothing is signed with a wiped key: KeysGoneException.
+        KeyFloor.requireSigningKey(signer.privateKey)
         val body = encode(statement)
         val code = statement.purpose.code
         val sig = crypto.signDetached(signer.privateKey, signedMessage(code, signer.publicKey, body))

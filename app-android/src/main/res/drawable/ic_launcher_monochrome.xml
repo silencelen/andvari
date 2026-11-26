@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The flat rune for themed (monochrome) icons; the system tints it. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:scaleX="3.38624"
+        android:scaleY="3.38624"
+        android:translateX="13.3651"
+        android:translateY="14.0423">
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M4.85,6.768 L19.15,13.368 L19.15,16.232 L4.85,9.632 Z" />
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M10.7,2.35 L13.3,3.55 L13.3,21.25 L10.7,20.05 Z" />
+    </group>
+</vector>

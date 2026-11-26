@@ -53,6 +53,11 @@ data class FillLogin(
     val hasTotp: Boolean,
     /** Its web addresses (not secret: addresses, not credentials), for a caller that applies its own site rule. */
     val uris: List<String>,
+    /**
+     * Its Android app addresses (`androidapp://<package>`), kept apart from [uris] so no web matcher ever sees one: for
+     * the Android service's own app rule. From the same working set as everything else here.
+     */
+    val appUris: List<String> = emptyList(),
 )
 
 /** A payment card as a list shows it: its name and a masked line ("Visa ••4242"). No number, date or code. */

@@ -1,10 +1,13 @@
 import type { ItemDoc } from "../api/types";
 import { adExport } from "../crypto/ad";
 import {
+  FILE_KEY_BYTES,
   HEADER_BYTES as ATTACHMENT_HEADER_BYTES,
   decryptAttachment,
   encryptAttachment,
+  fileKeyOf,
 } from "../crypto/attachments";
+import { allZero } from "../crypto/keyfloor";
 import { fromB64, fromUtf8, toB64, utf8 } from "../crypto/bytes";
 import { open as envelopeOpen, seal as envelopeSeal, sealWithNonce } from "../crypto/envelope";
 import { hkdfSha256 } from "../crypto/hkdf";
@@ -489,6 +492,11 @@ export class OpenedBackup {
     if (!(section >= 1 && section < this.sections.length)) {
       throw new BackupError(ERR_TRUNCATED, `no such attachment section ${section} (file has ${this.attachmentSectionCount})`);
     }
+    // Core Export.readAttachmentSection twin: a manifest file key that is no key (all zeros, the wrong length) is a
+    // damaged backup, never a lock (the floor's KeysGoneError) and never decrypted.
+    if (fileKey.length !== FILE_KEY_BYTES || allZero(fileKey)) {
+      throw new BackupError(ERR_WRONG_PASSPHRASE_OR_CORRUPT, `attachment section ${section} has a damaged file key`);
+    }
     const [off, len] = this.sections[section]!;
     if (len <= ATTACHMENT_HEADER_BYTES) {
       throw new BackupError(ERR_WRONG_PASSPHRASE_OR_CORRUPT, `attachment section ${section} too short`);
@@ -507,7 +515,13 @@ export class OpenedBackup {
 
   /** Convenience over [readAttachmentSection] driven by a §2.4 manifest entry. */
   readAttachment(entry: BackupAttachmentEntry): Uint8Array {
-    return this.readAttachmentSection(entry.section, fromB64(entry.fileKey));
+    const fileKey = fileKeyOf(entry.fileKey);
+    if (fileKey === null) throw new BackupError(ERR_WRONG_PASSPHRASE_OR_CORRUPT, `attachment section ${entry.section} has a damaged file key`);
+    try {
+      return this.readAttachmentSection(entry.section, fileKey);
+    } finally {
+      fileKey.fill(0);
+    }
   }
 }
 

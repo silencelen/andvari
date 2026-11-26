@@ -37,6 +37,23 @@ describe("H1 client-side KDF fence", () => {
     await expect(new ApiClient("http://s").prelogin("a@b.c")).rejects.toBeInstanceOf(KdfPolicyError);
   });
 
+  it("spec 01 §7, the whole fence: a cost that is not whole, or a memory cost that is not a whole number of KiB, is refused at every response that serves one, as the server's fault", async () => {
+    for (const kdfParams of [{ ...FLOOR, memBytes: FLOOR.memBytes + 512 }, { ...FLOOR, ops: 3.5 }, { ...FLOOR, memBytes: FLOOR.memBytes + 0.5 }]) {
+      stub({ kdfSalt: "AA", kdfParams });
+      const pre = await new ApiClient("http://s").prelogin("a@b.c").catch((e: unknown) => e);
+      expect(pre, JSON.stringify(kdfParams)).toBeInstanceOf(KdfPolicyError);
+      expect((pre as KdfPolicyError).code).toBe("kdf_not_whole");
+      stub({ minVersion: {}, kdfParams });
+      await expect(new ApiClient("http://s").clientPolicy()).rejects.toBeInstanceOf(KdfPolicyError);
+      stub(acct(kdfParams));
+      await expect(new ApiClient("http://s", TOKENS).accountKeys()).rejects.toBeInstanceOf(KdfPolicyError);
+      stub(session(kdfParams));
+      const onTokens = vi.fn();
+      await expect(new ApiClient("http://s", undefined, onTokens).login("a@b.c", "authkey", "dev")).rejects.toBeInstanceOf(KdfPolicyError);
+      expect(onTokens).not.toHaveBeenCalled();
+    }
+  });
+
   it("accepts the honest at-floor default", async () => {
     stub({ kdfSalt: "AA", kdfParams: FLOOR });
     await expect(new ApiClient("http://s").prelogin("a@b.c")).resolves.toMatchObject({ kdfParams: { memBytes: 67_108_864 } });

@@ -1,13 +1,12 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
-import type { ApiClient } from "../api/client";
 import { adUsage } from "../crypto/ad";
 import { fromB64, fromUtf8, toB64, utf8 } from "../crypto/bytes";
 import { initSodium } from "../crypto/sodium";
 import { usageKey } from "../crypto/usagekey";
 import type { Account } from "./account";
-import { UsageTracker, type UsageMap, mergeUsage, parseUsage, planFlush, pruneUsage, recordUse, serializeUsage } from "./usage";
+import { UsageTracker, type UsageMap, type UsageWire, mergeUsage, parseUsage, planFlush, pruneUsage, recordUse, serializeUsage } from "./usage";
 
 /**
  * Usage ledger pins (spec 02 §8.2, design 2026-08-22-login-health). The network half is a thin
@@ -141,8 +140,8 @@ describe("UsageTracker.flush", () => {
   function makeTracker(seed: UsageMap | null = null) {
     let stored: string | null = seed === null ? null : serializeUsage(seed);
     const knobs = { failGet: false, failOpen: false, rejectPut: false, puts: 0, gets: 0 };
-    const client = {
-      getUsage: async () => {
+    const client: UsageWire = {
+      usage: async () => {
         knobs.gets++;
         if (knobs.failGet) throw new Error("GET /usage failed");
         return { sealedUsage: stored, updatedAt: 0 };
@@ -153,7 +152,7 @@ describe("UsageTracker.flush", () => {
         knobs.puts++;
         stored = sealedUsage;
       },
-    } as unknown as ApiClient;
+    };
     const account = {
       sealUsage: async (b: Uint8Array) => fromUtf8(b),
       openUsage: async (s: string) => {

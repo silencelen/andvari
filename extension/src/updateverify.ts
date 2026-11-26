@@ -27,7 +27,7 @@ export const TEST_PUBKEY = "TEST_KEY_placeholder__pin_the_real_workstation_pubke
  *  THE REFERENCE INSTANCE: the multi-tenant §9 objection — a single owner-pinned key makes every
  *  self-host `/downloads` unverifiable-by-construction — is answered by scope, not by staying dark.
  *  `background.checkForUpdate` runs the channel ONLY when the configured server is the shipped
- *  DEFAULT_SERVER_URL, so a self-host/custom origin never fetches the manifest at all (the same
+ *  public instance (UPDATE_ORIGIN), so a self-host/custom origin never fetches the manifest at all (the same
  *  fail-closed-quiet no-nag state the un-armed build had). Per-instance signed updates stay separate
  *  later work. Still a SET (§M-D7) for overlap rotation. Mirrors core `UpdateVerify.PINNED` —
  *  byte-locked by updateverify.test.ts, change together. */

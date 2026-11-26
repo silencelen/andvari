@@ -3,6 +3,7 @@ package io.silencelen.andvari.core.ios
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.darwin.Darwin
 import io.silencelen.andvari.core.app.ActionResult
+import io.silencelen.andvari.core.app.AppApi
 import io.silencelen.andvari.core.app.AutofillVault
 import io.silencelen.andvari.core.app.BlobStore
 import io.silencelen.andvari.core.app.ExportFile
@@ -104,6 +105,18 @@ class IosSessionController private constructor(seams: IosSeams) : SessionControl
     constructor(config: IosStorageConfig) : this(IosSeams(config))
 
     constructor() : this(IosStorageConfig())
+
+    /**
+     * The app API of the onboarding and trust design (IF-3, [AppApi]) over this controller's session: what the
+     * SwiftUI screens for first run, sign-in, links, contacts, shared vaults, devices and recovery are built against.
+     * It is an [AppApi] and never a `DesktopAppApi`, so nothing reached from here leads to an operator view or takes
+     * a server's setup link (design §9.1).
+     *
+     * **Always null: the old path's controller has no engine-backed app API.** That API is the new path's and shares
+     * nothing with this controller: Swift gets it from [AndvariBridgeApp.app] ([IosAppSeam]); previews and UI tests use
+     * [io.silencelen.andvari.core.bridge.AndvariBridge.fakeApp].
+     */
+    fun appApi(): AppApi? = null
 
     /**
      * One file of an item, decrypted, for a preview or to save to Files ([readAttachment]): in memory only, as NSData,

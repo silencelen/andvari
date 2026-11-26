@@ -81,10 +81,9 @@ describe("H132 — one empty-state idiom: the Empty component", () => {
     expect(empty).toContain('className="empty"');
   });
 
-  it("the views that had bare `.muted` empties now use it (Trash, version history, audit log)", () => {
+  it("the views that had bare `.muted` empties now use it (Trash, version history)", () => {
     expect(src("Vault.tsx")).toContain("<Empty><p>Nothing here — deleted items you can recover will show up in this list.</p></Empty>");
     expect(src("Vault.tsx")).toContain("<Empty><p>No earlier versions yet — history starts from the next change.</p></Empty>");
-    expect(src("Admin.tsx")).toContain("<Empty><p>No audit events");
   });
 
   it("every empty-state sentence ends in terminal punctuation", () => {
@@ -126,11 +125,10 @@ describe("H133 — one back affordance", () => {
 });
 
 describe("H133 — initialisms in the audit table read as initialisms", () => {
-  it("the admin audit headers are ID and IP, not Id and Ip", () => {
-    const admin = src("Admin.tsx");
-    expect(admin).toContain("<th>ID</th>");
-    expect(admin).toContain("<th>IP</th>");
-    expect(admin).not.toContain("<th>Id</th>");
-    expect(admin).not.toContain("<th>Ip</th>");
+  it("no table header writes an initialism as a word", () => {
+    for (const f of files) {
+      expect(src(f)).not.toContain("<th>Id</th>");
+      expect(src(f)).not.toContain("<th>Ip</th>");
+    }
   });
 });

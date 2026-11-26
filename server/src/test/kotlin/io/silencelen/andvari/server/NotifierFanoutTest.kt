@@ -42,7 +42,7 @@ class NotifierFanoutTest {
     @Test
     fun notifyRev_returnsImmediately_evenWithAWedgedPeer() {
         val notifier = Notifier()
-        notifier.register("wedged-user", "d1", FakeSession(capacity = 0))
+        notifier.register("wedged-user", "d1", "s1", FakeSession(capacity = 0))
 
         // The fan-out is a launch, not an await: the caller is back before the 2 s send timeout, let
         // alone the 60 s pong reaper that used to be the only bound.
@@ -57,8 +57,8 @@ class NotifierFanoutTest {
         val healthy = FakeSession(capacity = Channel.UNLIMITED)
         // Registered in this order under ONE user so the wedged conn is reached first: with a
         // sequential fan-out the healthy peer would wait behind it.
-        notifier.register("u", "wedged", wedged)
-        notifier.register("u", "healthy", healthy)
+        notifier.register("u", "wedged", "s1", wedged)
+        notifier.register("u", "healthy", "s2", healthy)
 
         notifier.notifyRev(listOf("u"), 42)
 

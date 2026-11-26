@@ -2,31 +2,24 @@ package io.silencelen.andvari.recovery
 
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
-import io.silencelen.andvari.core.crypto.Ad
 import io.silencelen.andvari.core.crypto.Bytes
-import io.silencelen.andvari.core.crypto.Envelope
 import io.silencelen.andvari.core.crypto.Escrow
+import io.silencelen.andvari.core.crypto.EscrowVerdict
 import io.silencelen.andvari.core.crypto.Fingerprint
-import io.silencelen.andvari.core.crypto.KdfParams
-import io.silencelen.andvari.core.crypto.Keys
-import io.silencelen.andvari.core.crypto.PasswordGenerator
 import io.silencelen.andvari.core.crypto.createCryptoProvider
-import io.silencelen.andvari.core.model.RecoveryUpload
-import kotlinx.serialization.json.Json
-import java.io.File
-import java.nio.file.Files
-import java.nio.file.Path
-import java.nio.file.attribute.PosixFilePermission
-import java.nio.file.attribute.PosixFilePermissions
+import io.silencelen.andvari.core.trust.RecoveryRotation
 import java.time.LocalDate
 
 /**
- * andvari recovery-cli — OFFLINE escrow ceremony + recovery (spec 04).
+ * andvari recovery-cli — OFFLINE escrow ceremony and the operator's half of assisted recovery (spec 04).
  * Runs on an air-gapped machine. No network I/O anywhere (verified by test:
  * no HTTP classes on the classpath), and a server-URL argument anywhere on the
  * command line is refused outright (spec 04 §5). The org recovery private seed
  * lives only in memory during a command and on the printed sheet / USB — never
  * on disk here, never on the server, never in git/PBS/B2.
+ *
+ * There is no temporary password at any point (spec 04 §7): the person sets their own new master
+ * password on their own device, after the app opens the signed answer `assist` produces.
  *
  * Commands:
  *   keygen                              generate the org recovery keypair + printable sheet
@@ -36,32 +29,31 @@ import java.time.LocalDate
  *   verify <seedFile> <dumpJson>        fleet canary: unseal EVERY escrow blob from a sqlite dump,
  *                                       PASS/FAIL per user, exit 1 on any FAIL (the drill is
  *                                       docs/drills/escrow-canary-drill.md — recorded elsewhere)
- *   recover --user <uuid> --identity-fp <hex> --identity-file <download.json> [<sealedBlobB64>]
- *                                       open ONE named member's escrow (v2 signed, or v1 legacy under the
- *                                       mandatory identity check), confirm, and emit an admin recovery
- *                                       upload bundle (spec 04 §4; security review 2026-10, root cause A)
+ *   assist …                            open ONE named member's escrow (spec 04 §4) and emit the 0x09
+ *                                       answer for an assisted-recovery request (spec 04 §7 step 3)
+ *   rotate --instance <uuid> --to <pub> sign a 0x08 rotation with the outgoing seed (spec 04 §5)
  */
 
 private val crypto = createCryptoProvider()
-private val json = Json { prettyPrint = true }
 
 fun main(args: Array<String>) {
     // spec 04 §5: this tool is OFFLINE — no command takes a server address, so a server
     // URL among the args means a confused (or hostile) invocation. Refuse before dispatch.
     serverUrlArg(args)?.let {
-        die("refusing to run: argument '$it' looks like an andvari server URL — recovery-cli is offline-only and never contacts a server (spec 04 §5)")
+        die("REFUSED (server_url_refused): argument '$it' looks like an andvari server URL — recovery-cli is offline-only and never contacts a server (spec 04 §5)")
     }
     try {
         when (args.getOrNull(0)) {
             "keygen" -> keygen()
-            "fingerprint" -> fingerprint(argOrDie(args, 1, "pubkeyB64"))
+            "fingerprint" -> fingerprint(args.getOrNull(1) ?: "")
             "canary" -> when (args.getOrNull(1)) {
-                "make" -> canaryMake(argOrDie(args, 2, "pubkeyB64"))
-                "verify" -> canaryVerify(argOrDie(args, 2, "sealedB64"))
-                else -> die("usage: canary make <pubkeyB64> | canary verify <sealedB64>")
+                "make" -> canaryMake(args.getOrNull(2) ?: "")
+                "verify" -> canaryVerify(args.getOrNull(2) ?: "")
+                else -> die("REFUSED (unknown_option): $CANARY_USAGE")
             }
-            "verify" -> verifyDump(argOrDie(args, 1, "seedFile"), argOrDie(args, 2, "escrowDumpJson"))
-            "recover" -> recover(args.drop(1))
+            "verify" -> verifyDump(args.drop(1))
+            "assist" -> assist(args.drop(1))
+            "rotate" -> rotate(args.drop(1))
             else -> die(
                 """
                 andvari recovery-cli (OFFLINE — run air-gapped)
@@ -69,14 +61,17 @@ fun main(args: Array<String>) {
                   fingerprint <pubkeyB64>
                   canary make <pubkeyB64>
                   canary verify <sealedB64>
-                  verify <seedFile> <escrowDumpJson>
-                  recover --user <uuid> (--identity-fp <32+ hex> | --no-identity-anchor) --identity-file <escrow-download.json> [--legacy] [<sealedBlobB64>]
+                  verify <seedFile> <escrowDumpJson> [--instance-file <file> [--outgoing-sheets]]
+                  assist --instance <uuid> --request <requestId> --request-key <rPub> --request-code <code> --email <their address> --user <uuid> (--identity-fp <32+ hex> | --no-identity-anchor) --identity-file <escrow-download.json>
+                  rotate --instance <uuid> --to <newRecoveryPubB64>
                 """.trimIndent(),
             )
         }
-    } catch (e: Exception) {
-        // A14 (F12): a dump's decode error quotes the dump, which is the server's data.
-        die("error: ${io.silencelen.andvari.core.client.TerminalText.escape(e.message.orEmpty())}")
+    } catch (e: RecoverRefused) {
+        die(e.message ?: "refused")
+    } catch (e: Throwable) {
+        // Never a stack trace: the kind of fault, no message.
+        die("REFUSED (unexpected_fault): an unexpected fault (${e::class.simpleName ?: "unknown"}). Nothing was produced.")
     }
 }
 
@@ -105,7 +100,7 @@ private fun keygen() {
 
 /**
  * The printable recovery sheet (spec 04 §1): seed (base64url + QR), pubkey, fingerprints,
- * generation date, env snippet, and next steps including the recovery one-liner. A pure
+ * generation date, env snippet, and next steps including the assisted-recovery one-liner. A pure
  * text builder so tests can pin the sheet's required fields without capturing stdout.
  */
 internal fun keygenSheet(seed: ByteArray, generatedOn: LocalDate = LocalDate.now()): String = buildString {
@@ -146,32 +141,54 @@ internal fun keygenSheet(seed: ByteArray, generatedOn: LocalDate = LocalDate.now
     appendLine("      'canary make <pubkey>' and store the sealed blob server-side, then")
     appendLine("      'canary verify <sealed>' FROM THE PRINTED SEED before any real account.")
     appendLine()
-    appendLine("Recovery (when a member is locked out): run 'recovery-cli recover --user <their id>")
-    appendLine("      --identity-fp <their identity fingerprint, 32+ hex> --identity-file <admin escrow download>'")
-    appendLine("      and follow prompts. The identity fingerprint comes from YOUR pin of them or their own sheet.")
+    appendLine("Assisted recovery (a member lost both the master password and the kit, and asked for help):")
+    appendLine("      after the 7-day hold, check the request code with them over a channel you already had, then run")
+    appendLine("      'recovery-cli assist --instance <instance id> --request <request id> --request-key <rPub>")
+    appendLine("      --request-code <the code they read to you> --email <their address, as YOU know it> --user <their id>")
+    appendLine("      --identity-fp <32+ hex> --identity-file <escrow download>' and upload its last line with fulfil.")
+    appendLine("      The identity fingerprint comes from YOUR pin of them or their own kit, never from the console.")
+    appendLine("      No temporary password exists at any point.")
 }
 
 private fun fingerprint(pubB64: String) {
-    val pub = Bytes.fromB64(pubB64)
-    require(pub.size == 32) { "public key must be 32 bytes" }
+    val pub = keyArg(pubB64, "the public key")
     println("fingerprint: ${Escrow.fingerprint(crypto, pub)}")
     println("short:       ${Fingerprint.groupedShort(Escrow.fingerprint(crypto, pub)).replace("\n", " ")}")
 }
 
 private fun canaryMake(pubB64: String) {
-    val pub = Bytes.fromB64(pubB64)
+    val pub = keyArg(pubB64, "the public key")
     val sealed = Escrow.sealCanary(crypto, pub)
     println("Canary sealed blob (store server-side as the ceremony canary):")
     println(Bytes.toB64(sealed))
 }
 
 private fun canaryVerify(sealedB64: String) {
-    val seedB64 = readSecret("Paste the recovery seed from the PRINTED SHEET (base64url): ")
-    val seed = Bytes.fromB64(seedB64.trim())
+    canaryCheck(crypto, sealedB64) { readSecret("Paste the recovery seed from the PRINTED SHEET (base64url): ") }.forEach { println(printable(it)) }
+}
+
+internal const val CANARY_USAGE = "usage: canary make <pubkeyB64> | canary verify <sealedB64>"
+
+/**
+ * `canary verify` (spec 04 §4, genesis step 3): [sealedB64] exactly as given (`bad_copy`), then the seed [readSeedText]
+ * gives (`bad_seed`), then the canary must open to its fixed payload with it (`canary_failed`). The lines to print on
+ * success; a [RecoverRefused] with its name otherwise. The seed and its key are wiped.
+ */
+internal fun canaryCheck(crypto: io.silencelen.andvari.core.crypto.CryptoProvider, sealedB64: String, readSeedText: () -> String?): List<String> {
+    val canary = blobArg(sealedB64, "the sealed canary")
+    val seed = readSeedText()?.let { readSeed(it) } ?: throw RecoverRefused("REFUSED (bad_seed): $BAD_SEED_SENTENCE")
     val kp = crypto.boxKeypairFromSeed(seed)
-    Escrow.openCanary(crypto, kp, Bytes.fromB64(sealedB64))
-    println("CANARY VERIFIED ✓  print → restore → unseal works end-to-end.")
-    println("Fingerprint of the sheet's key: ${Escrow.fingerprint(crypto, kp.publicKey)}")
+    try {
+        try {
+            Escrow.openCanary(crypto, kp, canary)
+        } catch (e: Exception) {
+            throw RecoverRefused("REFUSED (canary_failed): the canary does not open to its fixed payload with this sheet (${e::class.simpleName}). Nothing proves this sheet can open the copies.")
+        }
+        return listOf("CANARY VERIFIED ✓  print → restore → unseal works end-to-end.", "Fingerprint of the sheet's key: ${Escrow.fingerprint(crypto, kp.publicKey)}")
+    } finally {
+        kp.privateKey.fill(0)
+        seed.fill(0)
+    }
 }
 
 /**
@@ -184,187 +201,464 @@ private fun canaryVerify(sealedB64: String) {
  * a FILE (typed/scanned from the sheet onto the air-gapped box, or the USB copy) so the
  * drill is scriptable; the dump is `sqlite3 -json` output of the server's escrow table.
  */
-private fun verifyDump(seedFile: String, dumpFile: String) {
-    val seed = Bytes.fromB64(File(seedFile).readText().trim())
-    require(seed.size == 32) { "seed file must contain a base64url 32-byte seed" }
-    val rows = EscrowVerify.parseDump(File(dumpFile).readText())
-    if (rows.isEmpty()) die("no escrow rows in $dumpFile — export with: sqlite3 -json <db> \"${EscrowVerify.DUMP_SQL}\"")
-
-    val kp = crypto.boxKeypairFromSeed(seed)
-    println("Escrow fleet verify — recovery key ${Fingerprint.shortForm(Escrow.fingerprint(crypto, kp.publicKey))} (${rows.size} blob(s))")
-    println()
-    val results = EscrowVerify.verify(crypto, seed, rows)
-    EscrowVerify.tableLines(results).forEach(::println) // A14 (F12): userId + detail escaped
-    val fails = results.count { !it.pass }
-    println()
-    println("${results.size - fails}/${results.size} PASS")
-    // §8.4 drill hook: the receipt lets the server drop each PASSED account's retained legacy blob.
-    // Printed even on a partial failure — it lists only the accounts that passed.
-    println()
-    println("Drill receipt — upload in the web admin panel (Admin → \"Record a fleet drill\") or POST it to")
-    println("/api/v1/admin/escrow/drill as admin; it holds only userIds and blob hashes:")
-    println(EscrowVerify.receiptForTerminal(results))
-    if (fails > 0) die("$fails escrow blob(s) FAILED — those accounts are NOT recoverable with this key (spec 04 §4: P1 incident, re-ceremony + re-escrow)")
-    println("All escrowed accounts are recoverable with this sheet.")
+private fun verifyDump(args: List<String>) {
+    val status = runVerify(crypto, args, AssistIo.terminal())
+    if (status != 0) kotlin.system.exitProcess(status)
 }
 
-private fun recover(args: List<String>) {
+/**
+ * The fleet check from its arguments (after `verify`) to its verdict, against [terminal]; returns the exit status
+ * ([EscrowVerify.exitStatus]; 1 for a refusal). In this order, every refusal before any sheet is read or asked for: the
+ * command line; `--instance-file`, read and checked; the dump; then the seed file (the sheet), and only after it, with
+ * `--outgoing-sheets`, each outgoing sheet at a prompt, newest first (spec 04 §4, "Which key each copy is sealed to").
+ */
+internal fun runVerify(crypto: io.silencelen.andvari.core.crypto.CryptoProvider, args: List<String>, terminal: AssistIo): Int {
+    val io = AssistIo(
+        terminal.readFile, terminal.readSecret, terminal.readLine,
+        out = { terminal.out(printable(it)) }, err = { terminal.err(printable(it)) }, clock = terminal.clock,
+    )
+    var seed: ByteArray? = null
+    val outgoing = LinkedHashMap<String, ByteArray?>()
+    try {
+        val seedFile = args.getOrNull(0) ?: throw RecoverRefused("REFUSED (missing_argument): seedFile is missing\n$VERIFY_USAGE")
+        val dumpFile = args.getOrNull(1) ?: throw RecoverRefused("REFUSED (missing_argument): escrowDumpJson is missing\n$VERIFY_USAGE")
+        val opts = verifyOptions(args.drop(2))
+        val history = opts.instanceFile?.let { path ->
+            val bytes = try {
+                io.read(path, ToolInput.INSTANCE_FILE_MAX)
+            } catch (e: ToolInput.TooLarge) {
+                throw tooLarge("bad_instance_file", "--instance-file", e.cap, "the server's GET /api/v1/instance answer")
+            } catch (e: Exception) {
+                throw RecoverRefused("REFUSED (bad_instance_file): --instance-file cannot be read (${e::class.simpleName})")
+            }
+            KeyHistory.read(crypto, bytes, null, opts.card0Hash)
+        }
+        val note = history?.note ?: ""
+        val dumpText = try {
+            EscrowVerify.strictText(io.read(dumpFile, ToolInput.DUMP_MAX))
+        } catch (e: ToolInput.TooLarge) {
+            throw tooLarge("bad_dump", dumpFile, e.cap, "a dump the tool reads")
+        } catch (e: Exception) {
+            null
+        }
+        val rows = try {
+            ToolInput.jsonProblem(dumpText!!)?.let { throw RecoverRefused("REFUSED (bad_dump): $dumpFile is not a dump the tool reads: $it") }
+            EscrowVerify.parseDump(dumpText)
+        } catch (e: RecoverRefused) {
+            throw e
+        } catch (e: Exception) {
+            throw RecoverRefused("REFUSED (bad_dump): $dumpFile is not UTF-8 sqlite3 -json output of: ${EscrowVerify.DUMP_SQL}")
+        }
+        if (rows.isEmpty()) throw RecoverRefused("REFUSED (bad_dump): no escrow rows in $dumpFile — export with: sqlite3 -json <db> \"${EscrowVerify.DUMP_SQL}\"")
+
+        // The sheets, only now: first the seed file's, then the outgoing ones at prompts.
+        val s = try {
+            readSeedFile(EscrowVerify.strictText(io.read(seedFile, ToolInput.SEED_FILE_MAX)))
+        } catch (e: ToolInput.TooLarge) {
+            throw tooLarge("bad_seed", "the seed file", e.cap, "one line with the 32-byte seed")
+        } catch (e: Exception) {
+            null
+        } ?: throw RecoverRefused("REFUSED (bad_seed): the seed file must contain the 32-byte seed in base64url, as UTF-8 text")
+        seed = s
+        val kp = crypto.boxKeypairFromSeed(s)
+        val sheetFp = Escrow.fingerprint(crypto, kp.publicKey)
+        kp.privateKey.fill(0)
+        if (opts.outgoingSheets && sheetFp != history!!.current) throw RecoverRefused(wrongSheet(sheetFp, "the CURRENT sheet", history.current).replace("Nothing was produced.", "Nothing was checked.") + note)
+        io.out("Escrow fleet verify — recovery key ${Fingerprint.shortForm(sheetFp)} (${rows.size} blob(s))\n")
+        history?.sayItFirst(forAssist = false)?.forEach { io.out("$it\n") }
+        if (opts.outgoingSheets) {
+            val h = history!!
+            if (h.outgoing.isEmpty()) {
+                io.out("--outgoing-sheets: the key has no outgoing key, so no other sheet is asked for.$note\n")
+            } else {
+                io.out("--outgoing-sheets: the tool now asks for each OUTGOING sheet, newest first, and opens the copies sealed to it. An empty line says you no longer hold that sheet: its copies then FAIL, as not recoverable.$note\n")
+            }
+            for (k in h.outgoing) {
+                val text = io.readSecret("Paste the recovery seed from the OUTGOING sheet (${KeyHistory.short(k.fp)}, outgoing since ${KeyHistory.date(k.since)})$note (base64url), or an empty line if you no longer hold it: ")
+                    ?: throw RecoverRefused("REFUSED (bad_seed): no recovery seed was given for the outgoing sheet. Nothing was checked.")
+                if (text.trim { it == ' ' || it == '\t' }.isEmpty()) {
+                    outgoing[k.fp] = null
+                    continue
+                }
+                val o = readSeed(text) ?: throw RecoverRefused("REFUSED (bad_seed): the recovery seed is not the 32-byte seed in base64url printed on the sheet. Nothing was checked.")
+                outgoing[k.fp] = o
+                val okp = crypto.boxKeypairFromSeed(o)
+                val got = Escrow.fingerprint(crypto, okp.publicKey)
+                okp.privateKey.fill(0)
+                if (got != k.fp) throw RecoverRefused(wrongSheet(got, "the OUTGOING sheet", k.fp).replace("Nothing was produced.", "Nothing was checked.") + note)
+            }
+        }
+        io.out("\n")
+        val results = EscrowVerify.verify(crypto, s, rows, history, outgoing.takeIf { opts.outgoingSheets })
+        val lines = EscrowVerify.reportLines(results, history) // A14 (F12): every cell escaped
+        val status = EscrowVerify.exitStatus(results)
+        lines.dropLast(1).forEach { io.out("$it\n") }
+        if (status == EscrowVerify.EXIT_ALL_GOOD) io.out(lines.last() + "\n") else io.err(lines.last())
+        return status
+    } catch (e: RecoverRefused) {
+        io.err(e.message ?: VERIFY_USAGE)
+        return 1
+    } catch (e: Throwable) {
+        io.err("REFUSED (unexpected_fault): an unexpected fault (${e::class.simpleName ?: "unknown"}) during the fleet check. Nothing was checked.")
+        return 1
+    } finally {
+        seed?.fill(0)
+        outgoing.values.forEach { it?.fill(0) }
+    }
+}
+
+/** The fleet check's options after its two files. */
+internal class VerifyOptions(val instanceFile: String?, val outgoingSheets: Boolean, val card0Hash: String? = null)
+
+/**
+ * The fleet check's options after its two files, each at most once: `--instance-file <file>` with exactly one of
+ * `--card0-hash <64 hex>` and `--instance-file-unchecked` (spec 04 §5, as for `assist`), and `--outgoing-sheets`, which
+ * needs the file (`instance_file_missing`): the outgoing sheets are never given on the command line, the tool asks for
+ * them after the seed file.
+ */
+internal fun verifyOptions(options: List<String>): VerifyOptions {
+    var instanceFile: String? = null
+    var outgoingSheets = false
+    var card0Hash: String? = null
+    var unchecked = false
+    val given = HashSet<String>()
+    var i = 0
+    while (i < options.size) {
+        val a = options[i]
+        if (a in VERIFY_OPTIONS && !given.add(a)) throw RecoverRefused(repeatedOption(a, VERIFY_USAGE))
+        when (a) {
+            "--instance-file" -> instanceFile = options.getOrNull(++i) ?: throw RecoverRefused("REFUSED (bad_instance_file): --instance-file needs the file\n$VERIFY_USAGE")
+            "--card0-hash" -> card0Hash = options.getOrNull(++i) ?: ""
+            "--instance-file-unchecked" -> unchecked = true
+            "--outgoing-sheets" -> outgoingSheets = true
+            else -> throw RecoverRefused("REFUSED (unknown_option): unknown option ${io.silencelen.andvari.core.client.TerminalText.escape(a)}\n$VERIFY_USAGE")
+        }
+        i++
+    }
+    if (outgoingSheets && instanceFile == null) {
+        throw RecoverRefused("REFUSED (instance_file_missing): --outgoing-sheets needs --instance-file: only the server's checked card chain and rotations say which keys are outgoing\n$VERIFY_USAGE")
+    }
+    val anchor = KeyHistory.anchorOptions(instanceFile, card0Hash, unchecked, VERIFY_USAGE)
+    return VerifyOptions(instanceFile, outgoingSheets, anchor)
+}
+
+private val VERIFY_OPTIONS = setOf("--instance-file", "--card0-hash", "--instance-file-unchecked", "--outgoing-sheets")
+
+internal const val VERIFY_USAGE =
+    "usage: verify <seedFile> <escrowDumpJson> [--instance-file <the server's GET /api/v1/instance answer> " +
+        "(--card0-hash <64 hex> | --instance-file-unchecked) [--outgoing-sheets]]"
+
+/** `assist` (spec 04 §7 step 3): see [AssistCommand]. Prints the sealed answer the operator uploads with `fulfil`. */
+private fun assist(args: List<String>) {
+    val status = runAssist(crypto, args, AssistIo.terminal())
+    if (status != 0) kotlin.system.exitProcess(status)
+}
+
+/**
+ * What `assist` reads and writes: its one file, the operator's typed lines, the two output streams and the clock. The
+ * command line gives the terminal's ([terminal]); a test gives its own, and so sees what was read, asked and produced.
+ */
+internal class AssistIo(
+    /** A file by its path, read up to the limit given and never further ([ToolInput.readFile]); see [read]. */
+    val readFile: (String, Int) -> ByteArray,
+    /** The recovery seed, typed or piped without echo; null when there is no input. */
+    val readSecret: (String) -> String?,
+    val readLine: () -> String?,
+    /** Standard output: the answer, and the line before the identity file is read. */
+    val out: (String) -> Unit,
+    /** Standard error: every prompt, the copy's display and every refusal, one line each. */
+    val err: (String) -> Unit,
+    val clock: () -> Long,
+) {
+    companion object {
+        fun terminal() = AssistIo(
+            readFile = { path, cap -> ToolInput.readFile(path, cap) },
+            readSecret = { readSecret(it) },
+            readLine = { ToolInput.stdinLine() },
+            out = { print(it); System.out.flush() },
+            err = { System.err.println(it) },
+            clock = { System.currentTimeMillis() },
+        )
+    }
+
+    /** The file at [path], at most [cap] bytes ([ToolInput.TooLarge] otherwise), whoever [readFile] is. */
+    fun read(path: String, cap: Int): ByteArray = ToolInput.within(readFile(path, cap), cap)
+}
+
+/** The sentence for a file over its limit: what it is, and what it therefore is not. */
+private fun tooLarge(name: String, option: String, cap: Int, isNot: String): RecoverRefused =
+    RecoverRefused("REFUSED ($name): $option is larger than ${ToolInput.size(cap)}, so it is not $isNot; it was not read whole")
+
+/** `assist` from its arguments to its answer, against [io]. Returns the exit status: 0 with the answer printed, 1 with nothing produced. */
+internal fun runAssist(
+    crypto: io.silencelen.andvari.core.crypto.CryptoProvider,
+    args: List<String>,
+    terminal: AssistIo,
+    /** Called at the start of each stage after the seed is read; a test throws from it on purpose. */
+    fault: (AssistStage) -> Unit = {},
+): Int {
+    // Everything assist prints goes through the one escaping function, on every path.
+    val io = AssistIo(
+        terminal.readFile, terminal.readSecret, terminal.readLine,
+        out = { terminal.out(printable(it)) }, err = { terminal.err(printable(it)) }, clock = terminal.clock,
+    )
     val opts = try {
-        RecoverCommand.parse(args)
+        AssistCommand.parse(crypto, args)
     } catch (e: RecoverRefused) {
-        die(e.message ?: RecoverCommand.USAGE)
+        io.err(e.message ?: AssistCommand.USAGE)
+        return 1
     }
+    // The clock is checked with the arguments, and the value checked is the one the answer signs.
+    val now = io.clock()
+    try {
+        AssistCommand.checkClock(now)
+    } catch (e: RecoverRefused) {
+        io.err(e.message ?: "bad clock")
+        return 1
+    }
+    io.out("Request code matches the request key.\n")
     val (identityCheck, sealedB64) = try {
-        RecoverCommand.readIdentityFile(File(opts.identityFile).readText(), opts)
+        val bytes = try {
+            io.read(opts.recover.identityFile, ToolInput.IDENTITY_FILE_MAX)
+        } catch (e: ToolInput.TooLarge) {
+            throw tooLarge("bad_identity_file", "--identity-file", e.cap, "a recovery-copy download")
+        } catch (e: Exception) {
+            throw RecoverRefused("REFUSED (bad_identity_file): --identity-file cannot be read (${e::class.simpleName})")
+        }
+        RecoverCommand.readIdentityFileBytes(bytes, opts.recover)
     } catch (e: RecoverRefused) {
-        die(e.message ?: "bad --identity-file")
+        io.err(e.message ?: "bad --identity-file")
+        return 1
     }
-    val seedB64 = readSecret("Paste the recovery seed from the PRINTED SHEET (base64url): ")
-    val seed = Bytes.fromB64(seedB64.trim())
-    val kp = crypto.boxKeypairFromSeed(seed)
-    seed.fill(0)
-    val opened = try {
-        RecoverCommand.openAndConfirm(crypto, kp, opts, identityCheck, sealedB64, ::readlnOrNull) { System.err.println(it) }
+    // spec 04 §5: a copy sealed to a key the server has since replaced. The server's own card chain and signed rotations,
+    // checked here, say which sheet signs the answer and which keys it replaced; all of it before any seed is asked for.
+    val history = opts.instanceFile?.let { path ->
+        try {
+            val bytes = try {
+                io.read(path, ToolInput.INSTANCE_FILE_MAX)
+            } catch (e: ToolInput.TooLarge) {
+                throw tooLarge("bad_instance_file", "--instance-file", e.cap, "the server's GET /api/v1/instance answer")
+            } catch (e: Exception) {
+                throw RecoverRefused("REFUSED (bad_instance_file): --instance-file cannot be read (${e::class.simpleName})")
+            }
+            KeyHistory.read(crypto, bytes, opts.instanceId, opts.card0Hash)
+        } catch (e: RecoverRefused) {
+            io.err(e.message ?: "bad --instance-file")
+            return 1
+        }
+    }
+    history?.sayItFirst()?.forEach(io.err)
+    val note = history?.note ?: ""
+    val currentPrompt = if (history == null) {
+        "Paste the recovery seed from the PRINTED SHEET (base64url): "
+    } else {
+        "Paste the recovery seed from the CURRENT sheet (${KeyHistory.short(history.current)})$note (base64url): "
+    }
+    val seedText = io.readSecret(currentPrompt) ?: run {
+        io.err("REFUSED (bad_seed): no recovery seed was given. Nothing was produced.")
+        return 1
+    }
+    // From here on the seed is in memory: whatever happens ends as one line that names its kind and no secret, with
+    // nothing produced, and the seed and its keys are wiped.
+    var stage = AssistStage.SEED
+    val seed = readSeed(seedText) ?: run {
+        io.err("REFUSED (bad_seed): $BAD_SEED_SENTENCE")
+        return 1
+    }
+    var kp: io.silencelen.andvari.core.crypto.KeyPairBytes? = null
+    var opened: io.silencelen.andvari.core.crypto.EscrowOpened? = null
+    var outgoingSeed: ByteArray? = null
+    var outgoingKp: io.silencelen.andvari.core.crypto.KeyPairBytes? = null
+    try {
+        fault(stage)
+        stage = AssistStage.KEYS
+        fault(stage)
+        val keys = crypto.boxKeypairFromSeed(seed).also { kp = it }
+        if (history != null) {
+            val got = Escrow.fingerprint(crypto, keys.publicKey)
+            if (got != history.current) throw RecoverRefused(wrongSheet(got, "the CURRENT sheet", history.current) + note)
+        }
+        stage = AssistStage.OPEN
+        fault(stage)
+        // Which sheet opens the copy: the current one, or else the outgoing ones the rotations name, newest first. The
+        // copy's own signed statement then names the key it was sealed to, and the opener requires it to be that sheet's.
+        var opener = keys
+        var outgoing: OutgoingKey? = null
+        if (history != null && history.outgoing.isNotEmpty()) {
+            val sealedBytes = Bytes.fromB64Canonical(sealedB64) ?: throw RecoverRefused("REFUSED (bad_copy): ${RecoverCommand.BAD_COPY_SENTENCE}")
+            if (opensWith(crypto, keys, sealedBytes)) {
+                io.err("This copy opens with the CURRENT sheet: the account sealed it after the change. The outgoing sheet is not needed.$note")
+            } else {
+                for (k in history.outgoing) {
+                    io.err("This copy does not open with ${if (outgoing == null) "the CURRENT sheet" else "the OUTGOING sheet ${KeyHistory.short(outgoing.fp)}"}: it was sealed before ${KeyHistory.date(k.since)}.$note")
+                    val text = io.readSecret("Paste the recovery seed from the OUTGOING sheet (${KeyHistory.short(k.fp)}, outgoing since ${KeyHistory.date(k.since)})$note (base64url): ")
+                        ?: throw RecoverRefused("REFUSED (bad_seed): no recovery seed was given for the outgoing sheet. Nothing was produced.")
+                    outgoingKp?.privateKey?.fill(0)
+                    outgoingSeed?.fill(0)
+                    val s = readSeed(text) ?: throw RecoverRefused("REFUSED (bad_seed): $BAD_SEED_SENTENCE")
+                    outgoingSeed = s
+                    val okp = crypto.boxKeypairFromSeed(s).also { outgoingKp = it }
+                    val got = Escrow.fingerprint(crypto, okp.publicKey)
+                    if (got != k.fp) throw RecoverRefused(wrongSheet(got, "the OUTGOING sheet", k.fp) + note)
+                    outgoing = k
+                    if (opensWith(crypto, okp, sealedBytes)) {
+                        opener = okp
+                        break
+                    }
+                }
+                if (opener === keys) {
+                    throw RecoverRefused(
+                        "REFUSED (${EscrowVerdict.UNOPENABLE.code}): this copy opens with neither the current sheet nor any outgoing sheet the rotations name. " +
+                            "It is not sealed to any recovery key of this server's history: the server may have given you another copy. Nothing was produced.$note",
+                    )
+                }
+            }
+        }
+        val o = RecoverCommand.openAndConfirm(
+            crypto, opener, opts.recover, opts.email, identityCheck, sealedB64, "the signed answer for request ${opts.requestId}",
+            io.readLine,
+            signedWith = if (opener === keys) null else "The copy names that OUTGOING key as the one it is sealed to; the answer is signed with the CURRENT sheet, ${KeyHistory.short(history!!.current)}.$note",
+            unopenableHint = if (history == null) UNOPENABLE_HINT else null,
+        ) { line -> io.err(line) }.also { opened = it }
+        // The outgoing sheet's work is done: it opened the copy, which named its key. The chain from that key to the one that
+        // signs is checked once more, link by link, as a device would follow it; then the outgoing seed is wiped.
+        outgoing?.takeIf { opener !== keys }?.let { k ->
+            RecoveryRotation.verifyChain(crypto, k.chain, opts.instanceId, k.fp, history!!.current)?.let {
+                throw RecoverRefused("REFUSED (rotation_chain_broken): the rotations from ${KeyHistory.short(k.fp)} to ${KeyHistory.short(history.current)} do not verify (${it.code}). Nothing was produced.$note")
+            }
+        }
+        outgoingKp?.privateKey?.fill(0)
+        outgoingSeed?.fill(0)
+        val copyEmail = o.email ?: throw RecoverRefused("REFUSED (${EscrowVerdict.NO_ADDRESS.code}): ${RecoverCommand.NO_ADDRESS_SENTENCE}")
+        stage = AssistStage.ANSWER
+        fault(stage)
+        val uvk = o.uvk
+        o.wipe()
+        val answer = AssistCommand.answer(crypto, seed, opts, copyEmail, uvk, now)
+        stage = AssistStage.OUTPUT
+        // The whole output is made before any of it is written: a fault leaves nothing behind.
+        val text = answerOutput(opts, answer)
+        fault(stage)
+        io.out(text)
+        return 0
+    } catch (e: RecoverRefused) {
+        io.err(e.message ?: "refused")
+        return 1
+    } catch (e: Throwable) {
+        io.err(unexpectedFault(stage, e))
+        return 1
+    } finally {
+        opened?.wipe()
+        kp?.privateKey?.fill(0)
+        seed.fill(0)
+        outgoingKp?.privateKey?.fill(0)
+        outgoingSeed?.fill(0)
+    }
+}
+
+/**
+ * A typed seed as the tool reads it (spec 04 §4 step 1), like everything else a person types: space and tab removed from
+ * both ends and nothing else, then exactly 32 bytes in canonical unpadded base64url. Null when it is not one (`bad_seed`):
+ * padding, the other base64 alphabet, a no-break space or any other character around it.
+ */
+internal fun readSeed(text: String): ByteArray? = Bytes.fromB64Exact(text.trim { it == ' ' || it == '\t' }, 32)
+
+/** A seed file (the fleet check's) is one line: its line ending, LF or CR LF, is removed, then [readSeed]. */
+internal fun readSeedFile(text: String): ByteArray? =
+    readSeed(if (text.endsWith("\r\n")) text.dropLast(2) else text.removeSuffix("\n"))
+
+/** Whether [sealed] opens with [keys]; what it opens to is wiped at once, unread (the opener reads it, in its order). */
+private fun opensWith(crypto: io.silencelen.andvari.core.crypto.CryptoProvider, keys: io.silencelen.andvari.core.crypto.KeyPairBytes, sealed: ByteArray): Boolean =
+    try {
+        crypto.sealOpen(keys.publicKey, keys.privateKey, sealed).fill(0)
+        true
+    } catch (e: io.silencelen.andvari.core.crypto.CryptoException) {
+        false
+    }
+
+/** spec 04 §5: the seed pasted is another sheet's than the one asked for. */
+internal fun wrongSheet(got: String, which: String, want: String): String =
+    "REFUSED (wrong_sheet): the seed you pasted is the sheet ${KeyHistory.short(got)}, not $which, ${KeyHistory.short(want)}. Nothing was produced."
+
+/** What `unopenable` adds when `assist` was run without `--instance-file` (spec 04 §5). */
+internal const val UNOPENABLE_HINT =
+    "If the server's recovery key was replaced since this account sealed its copy, the copy is sealed to the outgoing key: save the server's " +
+        "GET /api/v1/instance answer to a file, run again with --instance-file <that file> and --card0-hash <the server's card 0 hash, 64 hex digits, " +
+        "as `andvari-cli card show` prints it>, and have both the current and the outgoing sheet at hand."
+
+/** Where `assist` was after the seed was read, for the one line an unexpected fault ends in. */
+internal enum class AssistStage(val words: String) {
+    SEED("reading the recovery seed"),
+    KEYS("deriving the recovery key from the seed"),
+    OPEN("opening the recovery copy"),
+    ANSWER("making the answer"),
+    OUTPUT("printing the answer"),
+}
+
+/** spec 04 §7 step 3: the seed typed or piped is not 32 bytes of base64url. */
+internal const val BAD_SEED_SENTENCE = "the recovery seed is not the 32-byte seed in base64url printed on the sheet. Nothing was produced."
+
+/**
+ * The one line an unexpected fault ends in: its name, the kind of fault (the exception's class, never its
+ * message, which could quote what it was working on) and the stage, and that nothing was produced.
+ */
+internal fun unexpectedFault(stage: AssistStage, e: Throwable): String =
+    "REFUSED (unexpected_fault): an unexpected fault (${e::class.simpleName ?: "unknown"}) while ${stage.words}. Nothing was produced: " +
+        "no answer was printed and nothing was written. Run the command again; if it happens again, report this line."
+
+/**
+ * The one escaping function every printed line of the tool goes through: each line of [text] with
+ * its control characters, separators and direction overrides made visible ([io.silencelen.andvari.core.client.TerminalText.escape]);
+ * the tool's own line breaks are kept.
+ */
+internal fun printable(text: String): String = text.split('\n').joinToString("\n") { io.silencelen.andvari.core.client.TerminalText.escape(it) }
+
+/** A key given on the command line (`fingerprint`, `canary make`): exactly as given, 32 bytes of canonical base64url. */
+internal fun keyArg(text: String, name: String): ByteArray =
+    Bytes.fromB64Exact(text, 32) ?: throw RecoverRefused("REFUSED (bad_key): $name must be a 32-byte public key in base64url, exactly as given")
+
+/** A sealed blob given on the command line (`canary verify`): exactly as given, canonical base64url. */
+internal fun blobArg(text: String, name: String): ByteArray =
+    Bytes.fromB64Canonical(text)?.takeIf { it.isNotEmpty() } ?: throw RecoverRefused("REFUSED (bad_copy): $name must be base64url, exactly as given")
+
+/**
+ * What `assist` prints on standard output once the answer is made (spec 04 §7 step 3, item 6): who it is for, and as
+ * the LAST line, with nothing after it, the answer token the console and `andvari-cli operator fulfil` read.
+ */
+internal fun answerOutput(opts: AssistOptions, answer: AssistAnswer): String = buildString {
+    appendLine()
+    appendLine("ANSWER for request ${opts.requestId} (account ${opts.recover.userId}, address ${opts.email}${if (opts.recover.unanchored) ", UNANCHORED" else ""}):")
+    appendLine("It is signed by the recovery key and sealed to the person's device; only that device can open it, and only")
+    appendLine("that device can then finish: the server takes the new password only with the value inside the answer.")
+    appendLine("Give the console, or andvari-cli operator fulfil, the whole last line below (the console also takes this whole output):")
+    appendLine()
+    appendLine(io.silencelen.andvari.core.trust.AnswerToken.format(opts.requestId, Bytes.toB64(opts.requestKey), answer.commitHash, answer.sealed))
+}
+
+/** `rotate` (spec 04 §5): see [RotateCommand]. Prints the 0x08 statement to store with `PUT /instance/rotation`. */
+private fun rotate(args: List<String>) {
+    val opts = try {
+        RotateCommand.parse(args)
+    } catch (e: RecoverRefused) {
+        die(e.message ?: RotateCommand.USAGE)
+    }
+    val seed = readSeed(readSecret("Paste the OUTGOING recovery seed from its printed sheet (base64url): ")) ?: die("REFUSED (bad_seed): $BAD_SEED_SENTENCE")
+    val (frame, fields) = try {
+        RotateCommand.statement(crypto, seed, opts, System.currentTimeMillis())
     } catch (e: RecoverRefused) {
         die(e.message ?: "refused")
+    } catch (e: Throwable) {
+        die("REFUSED (unexpected_fault): an unexpected fault (${e::class.simpleName ?: "unknown"}) while signing the rotation. Nothing was produced.")
     } finally {
-        kp.privateKey.fill(0)
+        seed.fill(0)
     }
-    // Step 13: only now generate the temp password, derive, and wrap the UVK under Ad.uvk(--user).
-    val uvk = opened.uvk
-    opened.wipe()
-    val userId = opts.userId // the account the admin named — proven, never read from the payload
-    val anchored = opened.anchored
-
-    // Generate a one-time temporary password + fresh KDF material, re-wrap UVK under it.
-    val tempPassword = humanTempPassword()
-    val tempSalt = crypto.randomBytes(KdfParams.SALT_BYTES)
-    val params = KdfParams.DEFAULT
-    // ZEROIZATION (H80, recheck R22 — Account.enroll's shape): the temp MK lives only long enough
-    // to split into its two purposes; the wrapKey and the unsealed UVK die once the UVK is sealed.
-    val mk = Keys.masterKey(crypto, tempPassword, tempSalt, params)
-    val (tempAuthKey, tempWrapKey) = try {
-        Keys.authKey(crypto, mk) to Keys.wrapKey(crypto, mk)
-    } finally {
-        mk.fill(0)
-    }
-    val tempWrappedUvk = try {
-        Envelope.seal(crypto, tempWrapKey, uvk, Ad.uvk(userId))
-    } finally {
-        tempWrapKey.fill(0)
-        uvk.fill(0)
-    }
-
-    val bundle = try {
-        recoveryBundle(userId, tempAuthKey, tempWrappedUvk, tempSalt, params)
-    } finally {
-        tempAuthKey.fill(0) // the bundle carries its base64 form; the raw bytes are done
-    }
-    val bundleJson = json.encodeToString(RecoveryUpload.serializer(), bundle)
-
+    println("Rotation for instance ${fields.instanceId}")
+    println("  from ${Fingerprint.groupedShort(fields.fromFp).replace("\n", " ")}")
+    println("  to   ${Fingerprint.groupedShort(fields.toFp).replace("\n", " ")}")
+    println("Store it with PUT /api/v1/instance/rotation {statement, currentAuthKey}, THEN sign the card with recoveryFp = ${fields.toFp}:")
     println()
-    if (!anchored) {
-        println("!!! UNANCHORED RECOVERY — no identity fingerprint was checked (design §2.3, Q2). Before handing")
-        println("!!! over the password, have the member compare their identity fingerprint on a device that")
-        println("!!! still knows it; any device that unlocked this account before refuses a swapped identity.")
-    }
-    println("RECOVERY BUNDLE for userId=$userId${if (anchored) "" else "  [UNANCHORED]"}")
-    println("UVK was unsealed offline; it never touches the online machine except re-wrapped.")
-    println()
-    println("1. Give the user this ONE-TIME temporary password (out-of-band, e.g. in person):")
-    println("       $tempPassword")
-    println()
-    println("2. Upload this bundle from the web admin panel: Admin → the member's row →")
-    println("   \"Apply recovery bundle\" (paste the JSON or pick the file below). Wire route for")
-    println("   scripts: POST /api/v1/admin/recovery as admin. The server sets mustChangePassword")
-    println("   and revokes their sessions.")
-    println()
-    println(bundleJson)
-    println()
-    println("3. User logs in with the temp password on any client → forced password change.")
-    val bundleFile = writeBundleOwnerOnly(Path.of("andvari-recovery-$userId${if (anchored) "" else "-UNANCHORED"}.json"), bundleJson + "\n")
-    println("(also written to $bundleFile, owner-only 0600)")
-    println("   DELETE that file once the upload is accepted: it carries tempAuthKey, which is the")
-    println("   account's live login credential until the member completes the forced change.")
+    println(Bytes.toB64(frame))
 }
-
-/**
- * Write the recovery upload bundle with OWNER-ONLY permissions, create-then-verify, and never
- * over an existing file — the update-signer keygen discipline (tools/update-signer Main.kt),
- * applied here because this file is a credential too (audit H60): `tempAuthKey` is turned
- * straight into the member's login verifier by `POST /admin/recovery`, and login accepts the raw
- * authKey, so anyone who can read the bundle can authenticate as the recovered member (sessions,
- * ciphertext download, a lockout via PUT /account/password) until the forced password change.
- * A default-umask write (typically 0644) left it world-readable on BOTH machines it visits — the
- * offline box and the online one it is carried to. The UVK stays wrapped under the temp password,
- * so this is credential exposure, not key exposure — but it was the one recovery artefact not
- * under the tree's owner-only rule (0.26.2 desktop export temp files, update-signer keys).
- *
- * Create-then-VERIFY: `supportedFileAttributeViews().contains("posix")` is a property of the
- * JVM's default provider, not of the mount — on FAT/exFAT/CIFS (a plausible USB used to carry the
- * bundle) createFile silently yields the mount-default perms. So the perms are re-read and, if
- * 0600 did not take, the empty file is deleted and the write refused rather than a warning
- * printed over a readable credential. On a non-POSIX JVM (Windows) we warn and write: the
- * ceremony must still complete, and the operator is told to secure the file. Refusing to clobber
- * protects a bundle from an earlier ceremony (O_EXCL via createFile — also refuses a dangling
- * symlink target).
- */
-internal fun writeBundleOwnerOnly(path: Path, text: String): Path {
-    if (Files.exists(path)) {
-        error("refusing to overwrite existing $path — move it aside (or delete it if its ceremony is finished) and re-run")
-    }
-    val posix = path.fileSystem.supportedFileAttributeViews().contains("posix")
-    val ownerOnly = setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE)
-    if (posix) {
-        Files.createFile(path, PosixFilePermissions.asFileAttribute(ownerOnly))
-        val got = Files.getPosixFilePermissions(path)
-        if (got != ownerOnly) {
-            Files.deleteIfExists(path)
-            error("cannot enforce owner-only (0600) perms on $path (got $got) — refusing to write the recovery bundle (a login credential) to a world-readable location; write it to a POSIX filesystem")
-        }
-    } else {
-        Files.createFile(path)
-        System.err.println("WARNING: non-POSIX filesystem — cannot set owner-only (0600) permissions on $path; secure it yourself (it carries the member's temporary login credential).")
-    }
-    Files.write(path, text.toByteArray(Charsets.UTF_8))
-    if (posix) {
-        val perms = Files.getPosixFilePermissions(path)
-        if (perms != ownerOnly) {
-            Files.deleteIfExists(path)
-            error("could not keep $path at 0600 (got $perms) — deleted it; refusing to leave a login credential readable")
-        }
-    }
-    return path.toAbsolutePath()
-}
-
-/**
- * Build the admin recovery-upload bundle as the server's EXACT [RecoveryUpload] type so the
- * emitted JSON is round-trip-guaranteed to decode. PRC-1: hand-building a JsonObject let
- * `tempKdfParams` serialize as a JSON STRING (`"{}"`) instead of the object the server's
- * non-lenient decoder expects, so `POST /admin/recovery` 400'd — the household's only path
- * back from a forgotten master password broke at the final admin-upload step. Serializing the
- * typed value cannot drift from the wire contract; [RecoveryCeremonyTest] round-trips it.
- */
-internal fun recoveryBundle(
-    userId: String,
-    tempAuthKey: ByteArray,
-    tempWrappedUvk: ByteArray,
-    tempKdfSalt: ByteArray,
-    params: KdfParams,
-): RecoveryUpload = RecoveryUpload(
-    userId = userId,
-    tempAuthKey = Bytes.toB64(tempAuthKey),
-    tempWrappedUvk = Bytes.toB64(tempWrappedUvk),
-    tempKdfSalt = Bytes.toB64(tempKdfSalt),
-    tempKdfParams = params,
-)
-
-// A readable temp password: 16 characters, letters + digits, no symbols, ambiguous glyphs
-// (0/O, 1/l/I) excluded — it is read out or typed once by the member, then replaced by the
-// forced change at first sign-in. (Not words: the comment used to promise a passphrase the
-// generator never produced.)
-private fun humanTempPassword(): String =
-    PasswordGenerator.generate(crypto, io.silencelen.andvari.core.crypto.GeneratorOptions(length = 16, symbols = false, avoidAmbiguous = true))
 
 private fun qr(text: String): String {
     val matrix = QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, 0, 0)
@@ -388,7 +682,7 @@ private fun qr(text: String): String {
  * UVK and lives only in offline/printed-sheet custody (ER-1). No-echo via the console when a
  * real terminal is attached to BOTH stdin and stdout (the char[] is zeroed after copying it
  * out); otherwise a plaintext line from stdin for piped drills/scripts, with the prompt on
- * stderr so a redirected stdout (`recover ... > bundle.json`) never captures the prompt.
+ * stderr so a redirected stdout (`assist ... > answer.txt`) never captures the prompt.
  * PT-L10 caveat (JDK 17): `System.console()` is null when EITHER stream is not a tty — so
  * TYPING the seed while stdout is redirected takes this fallback and the TERMINAL echoes it to
  * scrollback. We warn loudly on stderr; the fully-safe paths are: pipe the seed via stdin, or
@@ -396,7 +690,7 @@ private fun qr(text: String): String {
  */
 internal fun readSecret(message: String): String {
     System.console()?.let { console ->
-        val chars = console.readPassword(message) ?: die("no input")
+        val chars = console.readPassword(message) ?: die(NO_SEED)
         return String(chars).also { chars.fill(' ') }
     }
     System.err.println(
@@ -406,13 +700,13 @@ internal fun readSecret(message: String): String {
     )
     System.err.print(message)
     System.err.flush()
-    return readlnOrNull() ?: die("no input")
+    // Bounded (spec 04 §4, "The tool's inputs are hostile"): an overlong line is never held whole and fails as bad_seed.
+    return ToolInput.stdinLine() ?: die(NO_SEED)
 }
 
-private fun argOrDie(args: Array<String>, i: Int, name: String): String =
-    args.getOrNull(i) ?: die("missing argument: $name")
+private const val NO_SEED = "REFUSED (bad_seed): no recovery seed was given. Nothing was produced."
 
 private fun die(message: String): Nothing {
-    System.err.println(message)
+    System.err.println(printable(message))
     kotlin.system.exitProcess(1)
 }

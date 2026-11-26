@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { ApiError, type ApiClient } from "../api/client";
 import type {
   DeletedVaultSummary,
@@ -11,18 +11,27 @@ import type {
   WireItem,
   WireVault,
 } from "../api/types";
+import { adVaultMeta } from "../crypto/ad";
+import { toB64, utf8 } from "../crypto/bytes";
+import { seal } from "../crypto/envelope";
 import { fingerprint } from "../crypto/escrow";
 import type { KdfParams } from "../crypto/keys";
-import { acceptProofFromHash, deleteProof, offerProof, removeProof, removeV2Proof, restoreProof } from "../crypto/lifecycleproof";
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
 import { initSodium } from "../crypto/sodium";
 import { Account } from "./account";
-import { CopyDeniedError, ItemChangedError, VaultStore } from "./store";
+import { type FakeRole, FakeSharedLogs } from "./fakesharedlogs.testkit";
+import { ChangeNotStoredError, CopyDeniedError, HOLDING_MS, type ItemWire, ItemChangedError, VaultStore } from "./store";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { deletedNoteText, RecentlyRemoved } from "../ui/Sharing";
+import { DELETED_NOTE_ALONE, DELETED_NOTE_ALONE_NO_DAY, DELETED_NOTE_NO_DAY, fill } from "../ui/copy";
+import { fmtDay } from "../ui/format";
 
 /**
  * Lifecycle (Skipti, spec 03 §11) store tests against the REAL Account crypto and a fake
- * ApiClient — proof-verify tri-state, holding-area park/reinstate/replay, consumed-deleteId
- * recognition, and the F19 copy-leg-first sequencing. Same drive pattern as store.test.ts.
+ * ApiClient — the removal verdict read from the verified log (FakeSharedLogs stands in for it),
+ * holding-area park/reinstate/replay, a replayed tombstone after a restore, and the F19
+ * copy-leg-first sequencing. Same drive pattern as store.test.ts.
  */
 
 const KDF: KdfParams = { v: 1, alg: "argon2id13", ops: 1, memBytes: 8192 };
@@ -54,7 +63,7 @@ class FakeApi {
     return resp;
   }
 
-  async push(mutations: Mutation[]): Promise<PushResponse> {
+  async pushMutations(mutations: Mutation[]): Promise<PushResponse> {
     this.pushes.push(mutations);
     if (mutations.some((m) => this.emptyResultsVaults.has(m.vaultId))) {
       return { rev: ++this.rev, results: [] }; // malformed reply — no per-mutation results
@@ -117,6 +126,11 @@ class FakeApi {
   asClient(): ApiClient {
     return this as unknown as ApiClient;
   }
+
+  /** The item routes the store calls (its ItemWire): this fake serves them too. */
+  asWire(): ItemWire {
+    return this as unknown as ItemWire;
+  }
 }
 
 async function enroll(email: string): Promise<Account> {
@@ -138,6 +152,8 @@ interface Seed {
   member: Account;
   store: VaultStore;
   api: FakeApi;
+  logs: FakeSharedLogs;
+  vk: Uint8Array;
   vaultId: string;
   itemId: string;
   vault: WireVault;
@@ -146,17 +162,17 @@ interface Seed {
 }
 
 /** A member holding a shared vault (owner-created, VK sealed to the member) at cursor 5. */
-async function seededMember(role = "writer"): Promise<Seed> {
+async function seededMember(role: FakeRole = "writer"): Promise<Seed> {
   const owner = await enroll("owner@example.com");
   const member = await enroll("member@example.com");
-  const { request, vaultId } = owner.buildCreateSharedVault("Family");
-  const sealedVk = owner.wrapVkForMember(member.identityPub, vaultId);
-  // A6: this fixture's member vouched for the v1-only key (as after "Accept" on the review card), so the
-  // legacy key is writable here; signedgrant.store.test.ts covers the unconfirmed path.
-  member.authorizeLegacyKey(vaultId, owner.legacyKeyTag(vaultId)!); // bound to the vault key (A6 HIGH-1)
+  // The key and the member's role are what the vault's verified log says (design §3.6); the grant row is a hint only.
+  const vaultId = owner.newItemId();
+  const vk = randomBytes(32);
+  owner.logKeyRing().set(vaultId, vk.slice());
+  owner.attachLogRoles(() => "owner", () => true);
   const itemId = owner.newItemId();
-  const vault: WireVault = { vaultId, type: "shared", rev: 2, metaBlob: request.metaBlob, createdAt: 0 };
-  const grant: WireGrant = { vaultId, userId: member.userId, role, wrappedVk: "", rev: 3, sealedVk };
+  const vault: WireVault = { vaultId, type: "shared", rev: 2, metaBlob: toB64(seal(vk, utf8(JSON.stringify({ name: "Family" })), adVaultMeta(vaultId))), createdAt: 0 };
+  const grant: WireGrant = { vaultId, userId: member.userId, role, wrappedVk: "", rev: 3 };
   const item: WireItem = {
     itemId,
     vaultId,
@@ -170,10 +186,12 @@ async function seededMember(role = "writer"): Promise<Seed> {
     blob: owner.encryptItem(vaultId, itemId, DOC).blob,
   };
   const api = new FakeApi();
-  const store = new VaultStore(api.asClient(), member);
+  const store = new VaultStore(api.asClient(), member, undefined, undefined, api.asWire());
+  const logs = new FakeSharedLogs(member).attachTo(store);
+  logs.share(vaultId, vk, role);
   api.queue.push({ rev: 5, full: true, vaults: [vault], grants: [grant], items: [item], removedGrants: [] });
   await store.sync();
-  return { owner, member, store, api, vaultId, itemId, vault, grant, item };
+  return { owner, member, store, api, logs, vk, vaultId, itemId, vault, grant, item };
 }
 
 describe("Skipti tri-state removedGrants (spec 03 §11)", () => {
@@ -181,14 +199,13 @@ describe("Skipti tri-state removedGrants (spec 03 §11)", () => {
     await initSodium();
   });
 
-  it("VALID delete proof → soft-hide + attributed notice; VK forgotten, item hidden", async () => {
+  it("a delete the verified log shows → soft-hide + attributed notice; VK forgotten, item hidden", async () => {
     const s = await seededMember();
-    const key = await s.owner.lifecycleKeyFor(s.vaultId);
-    const deleteId = crypto.randomUUID();
     const purgeAt = Date.now() + 7 * 86_400_000;
+    s.logs.deleteVault(s.vaultId); // the log ends in the owner's delete (§3.11); the served purge time is only shown
     s.api.queue.push({
       rev: 6, full: false, vaults: [], grants: [], items: [], removedGrants: [s.vaultId],
-      removedGrantsInfo: [{ vaultId: s.vaultId, reason: "deleted", deleteId, deleteProof: await deleteProof(key, s.vaultId, deleteId), purgeAt }],
+      removedGrantsInfo: [{ vaultId: s.vaultId, reason: "deleted", purgeAt }],
     });
     await store_sync(s);
 
@@ -202,23 +219,62 @@ describe("Skipti tri-state removedGrants (spec 03 §11)", () => {
     expect(n?.purgeAt).toBe(purgeAt);
   });
 
-  it("INVALID delete proof → anomaly warning + unverified holding", async () => {
+  it("a delete shows the grace end the log answers carried (spec 03 §10.6); the holding's own clock is 30 days from the verification", async () => {
     const s = await seededMember();
-    const deleteId = crypto.randomUUID();
+    const hinted = Date.now() + 7 * 86_400_000;
+    const served = hinted + 3 * 86_400_000; // the server's stored grace end, which the screen shows
+    s.logs.deleteVault(s.vaultId, { deletedAt: Date.now(), purgeAt: served });
     s.api.queue.push({
       rev: 6, full: false, vaults: [], grants: [], items: [], removedGrants: [s.vaultId],
-      removedGrantsInfo: [{ vaultId: s.vaultId, reason: "deleted", deleteId, deleteProof: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", purgeAt: Date.now() + 1000 }],
+      removedGrantsInfo: [{ vaultId: s.vaultId, reason: "deleted", purgeAt: hinted }],
+    });
+    const before = Date.now();
+    await store_sync(s);
+    const held = s.store.heldVaults().find((h) => h.vaultId === s.vaultId);
+    expect(held?.purgeAt).toBe(served);
+    expect(held?.expungeAt, "neither date the server gave").toBeGreaterThanOrEqual(before + HOLDING_MS);
+    expect(held?.expungeAt).toBeLessThanOrEqual(Date.now() + HOLDING_MS);
+    expect(s.store.notices().find((x) => x.vaultId === s.vaultId)?.purgeAt).toBe(served);
+  });
+
+  it("the owner's delete shows the append's grace end; from an older server that serves none, no day, and the note points to the deleted vaults", async () => {
+    const day = 86_400_000;
+    const s = await seededMember();
+    s.logs.share(s.vaultId, s.vk, "owner");
+    s.logs.nextAppendGrace = { deletedAt: 1_000, purgeAt: 1_000 + 10 * day };
+    expect(await s.store.deleteSharedVault(s.vaultId)).toEqual({ purgeAt: 1_000 + 10 * day });
+    expect(deletedNoteText({ name: "Family", purgeAt: 1_000 + 10 * day, alone: true })).toBe(fill(DELETED_NOTE_ALONE, "Family", fmtDay(1_000 + 10 * day)));
+
+    const old = await seededMember();
+    old.logs.share(old.vaultId, old.vk, "owner");
+    // On the code before: a day computed from the entry's time and this app's usual grace, which the server never said.
+    const { purgeAt } = await old.store.deleteSharedVault(old.vaultId);
+    expect(purgeAt).toBeNull();
+    expect(deletedNoteText({ name: "Family", purgeAt, alone: true })).toBe(fill(DELETED_NOTE_ALONE_NO_DAY, "Family"));
+    expect(deletedNoteText({ name: "Family", purgeAt, alone: false })).toBe(fill(DELETED_NOTE_NO_DAY, "Family"));
+  });
+
+  it("a removal whose log does not verify → anomaly warning + unverified holding", async () => {
+    const s = await seededMember();
+    s.logs.fail(s.vaultId);
+    s.api.queue.push({
+      rev: 6, full: false, vaults: [], grants: [], items: [], removedGrants: [s.vaultId],
+      removedGrantsInfo: [{ vaultId: s.vaultId, reason: "deleted", purgeAt: Date.now() + 1000 }],
     });
     await store_sync(s);
     expect(s.store.notices().find((x) => x.vaultId === s.vaultId)?.kind).toBe("anomaly");
     expect(s.store.heldVaults().find((h) => h.vaultId === s.vaultId)?.verified).toBe(false);
   });
 
-  it("BARE revocation of a held vault (no info) → anomaly", async () => {
+  it("a removal the verified log shows (the owner's signed remove) is held as verified, not as an unverified removal", async () => {
+    // The 2026-11-16 walk: after alice's signed `remove`, bob's holding area read "unverified removal" (design §3.12:
+    // a removal is attributed when the removed device verifies the remove entry).
     const s = await seededMember();
-    s.api.queue.push({ rev: 6, full: false, vaults: [], grants: [], items: [], removedGrants: [s.vaultId], removedGrantsInfo: [] });
+    s.logs.remove(s.vaultId);
+    s.api.queue.push({ rev: 6, full: false, vaults: [], grants: [], items: [], removedGrants: [s.vaultId], removedGrantsInfo: [{ vaultId: s.vaultId, reason: "removed" }] });
     await store_sync(s);
-    expect(s.store.notices().find((x) => x.vaultId === s.vaultId)?.kind).toBe("anomaly");
+    expect(s.store.notices().find((x) => x.vaultId === s.vaultId)?.kind).toBe("removed");
+    expect(s.store.heldVaults().find((h) => h.vaultId === s.vaultId)).toMatchObject({ reason: "removed", verified: true });
   });
 
   it("UNVERIFIABLE (vault never held) → silent no-op: no notice, no holding, held vault untouched", async () => {
@@ -230,78 +286,16 @@ describe("Skipti tri-state removedGrants (spec 03 §11)", () => {
     expect(s.store.get(s.itemId)).toBeDefined(); // our real vault is untouched
   });
 
-  it("reason='left' → calm 'you left' notice, not an anomaly", async () => {
-    const s = await seededMember();
-    s.api.queue.push({
-      rev: 6, full: false, vaults: [], grants: [], items: [], removedGrants: [s.vaultId],
-      removedGrantsInfo: [{ vaultId: s.vaultId, reason: "left" }],
-    });
-    await store_sync(s);
-    expect(s.store.notices().find((x) => x.vaultId === s.vaultId)?.kind).toBe("left");
-  });
-
-  it("reason='removed' with a VALID removeProof → attributed 'removed'; without → anomaly", async () => {
-    const s = await seededMember();
-    const key = await s.owner.lifecycleKeyFor(s.vaultId);
-    const nonce = crypto.randomUUID();
-    s.api.queue.push({
-      rev: 6, full: false, vaults: [], grants: [], items: [], removedGrants: [s.vaultId],
-      removedGrantsInfo: [{ vaultId: s.vaultId, reason: "removed", removeProof: await removeProof(key, s.vaultId, s.member.userId, nonce), removeNonce: nonce }],
-    });
-    await store_sync(s);
-    expect(s.store.notices().find((x) => x.vaultId === s.vaultId)?.kind).toBe("removed");
-
-    // A second held vault, removed WITHOUT a proof → anomaly.
-    const s2 = await seededMember();
-    s2.api.queue.push({
-      rev: 6, full: false, vaults: [], grants: [], items: [], removedGrants: [s2.vaultId],
-      removedGrantsInfo: [{ vaultId: s2.vaultId, reason: "removed" }],
-    });
-    await store_sync(s2);
-    expect(s2.store.notices().find((x) => x.vaultId === s2.vaultId)?.kind).toBe("anomaly");
-  });
-
-  it("H06: the owner's store MINTS the removal proof, and a victim relayed that proof lands 'removed', not 'anomaly'", async () => {
-    // Audit 2026-09-13 H06: the only production caller of member removal (web Sharing) sent the
-    // DELETE with no body, so the server relayed NULL proof/nonce and every legitimate removal
-    // reached the removed member as the forgery ("anomaly") banner. The test above proves the
-    // VERIFY side; this one proves the MINT side and joins the two: the exact body the owner's
-    // store sends, relayed verbatim by the server, must be what the victim's store accepts.
-    const s = await seededMember();
-    const ownerApi = new FakeApi();
-    const ownerStore = new VaultStore(ownerApi.asClient(), s.owner);
-    await ownerStore.removeVaultMember(s.vaultId, s.member.userId);
-    const call = ownerApi.calls.find((c) => c.name === "removeVaultMember");
-    expect(call, "the DELETE went out").toBeTruthy();
-    expect(call!.args.id).toBe(s.vaultId);
-    expect(call!.args.userId).toBe(s.member.userId);
-    const body = call!.args.body as { proofV?: number; proof?: string; nonce?: string; issuedAt?: number } | undefined;
-    // Branch A7 (root cause A §6.2): the body is a v2 removal proof — a 16-byte nonce and the owner's clock.
-    expect(body?.proofV, "a v2 proof").toBe(2);
-    expect(body?.nonce, "a fresh 16-byte nonce rides the body").toMatch(/^[A-Za-z0-9_-]{22}$/);
-    expect(body?.proof, "a proof rides the body").toBeTruthy();
-    // The proof is the remove-v2 MAC under the vault's lifecycle key, over THIS target.
-    const key = await s.owner.lifecycleKeyFor(s.vaultId);
-    expect(body!.proof).toBe(await removeV2Proof(key, s.vaultId, s.member.userId, body!.nonce!, body!.issuedAt!));
-
-    // Server relay (Service.kt stores proof+nonce on the grant; Repo.kt hands them back in
-    // removedGrantsInfo) → the victim's engine attributes the removal to the owner.
-    s.api.queue.push({
-      rev: 6, full: false, vaults: [], grants: [], items: [], removedGrants: [s.vaultId],
-      removedGrantsInfo: [{ vaultId: s.vaultId, reason: "removed", removeProof: body!.proof, removeNonce: body!.nonce, proofV: body!.proofV, issuedAt: body!.issuedAt }],
-    });
-    await store_sync(s);
-    expect(s.store.notices().find((x) => x.vaultId === s.vaultId)?.kind).toBe("removed");
-  });
-
   it("notices never fire on a since=0 / fresh-device pull", async () => {
-    const owner = await enroll("owner@example.com");
     const member = await enroll("member@example.com");
-    const { vaultId } = owner.buildCreateSharedVault("Family");
+    const vaultId = member.newItemId();
     const api = new FakeApi();
-    const store = new VaultStore(api.asClient(), member);
+    const store = new VaultStore(api.asClient(), member, undefined, undefined, api.asWire());
+    const logs = new FakeSharedLogs(member).attachTo(store);
+    logs.share(vaultId, randomBytes(32), "writer");
+    logs.deleteVault(vaultId); // even a delete the log shows
     // First pull (since=0) already carries a removedGrants for a vault the fresh device never held.
-    api.queue.push({ rev: 5, full: true, vaults: [], grants: [], items: [], removedGrants: [vaultId], removedGrantsInfo: [{ vaultId, reason: "deleted", deleteId: "x", deleteProof: "y" }] });
+    api.queue.push({ rev: 5, full: true, vaults: [], grants: [], items: [], removedGrants: [vaultId], removedGrantsInfo: [{ vaultId, reason: "deleted" }] });
     await store.sync();
     expect(store.notices()).toHaveLength(0);
     expect(store.heldVaults()).toHaveLength(0);
@@ -315,15 +309,19 @@ describe("Skipti holding area: park, reinstate, replay (F21)", () => {
 
   it("an edit denied by an in-grace delete is parked (not thrown), surfaced, and replayed on restore", async () => {
     const s = await seededMember("writer");
-    const key = await s.owner.lifecycleKeyFor(s.vaultId);
-    const deleteId = crypto.randomUUID();
     const purgeAt = Date.now() + 7 * 86_400_000;
 
-    // The owner deletes mid-edit: the member's save is DENIED, then the delete lands next pull.
+    // The owner deletes mid-edit (the log says so): the member's save is DENIED, then the delete lands next pull.
     s.api.denyVaults.add(s.vaultId);
+    const realSync = s.api.sync.bind(s.api);
+    s.api.sync = async (since: number) => {
+      s.logs.deleteVault(s.vaultId); // the reconcile pull is where this browser's log learns of the delete
+      s.api.sync = realSync;
+      return realSync(since);
+    };
     s.api.queue.push({
       rev: 6, full: false, vaults: [], grants: [], items: [], removedGrants: [s.vaultId],
-      removedGrantsInfo: [{ vaultId: s.vaultId, reason: "deleted", deleteId, deleteProof: await deleteProof(key, s.vaultId, deleteId), purgeAt }],
+      removedGrantsInfo: [{ vaultId: s.vaultId, reason: "deleted", purgeAt }],
     });
 
     // Must NOT throw — the edit is parked, not lost.
@@ -333,10 +331,10 @@ describe("Skipti holding area: park, reinstate, replay (F21)", () => {
     expect(n?.parkedCount).toBe(1);
     expect(s.store.heldVaults().find((h) => h.vaultId === s.vaultId)).toBeDefined();
 
-    // Restore: a live grant + the restore-marked vault + the item re-arrive → reinstate + replay.
+    // Restore (the log's `restore`): a live grant + the vault + the item re-arrive → reinstate + replay.
     s.api.denyVaults.delete(s.vaultId); // the replayed edit now applies
-    const rProof = await restoreProof(key, s.vaultId, deleteId);
-    const restoredVault: WireVault = { ...s.vault, rev: 8, restoreProof: rProof, deleteId };
+    s.logs.share(s.vaultId, s.vk, "writer");
+    const restoredVault: WireVault = { ...s.vault, rev: 8 };
     const before = s.api.pushes.length;
     s.api.queue.push({ rev: 9, full: false, vaults: [restoredVault], grants: [{ ...s.grant, rev: 9 }], items: [{ ...s.item, rev: 9 }], removedGrants: [] });
     await store_sync(s);
@@ -349,8 +347,35 @@ describe("Skipti holding area: park, reinstate, replay (F21)", () => {
     expect(s.store.notices().some((x) => x.vaultId === s.vaultId && x.kind === "restored")).toBe(true);
   });
 
-  it("a reader-denied edit on a STILL-LIVE vault rethrows (not parked)", async () => {
-    const s = await seededMember("reader");
+  it("a grant re-arriving for a held vault whose key the log has not given back yet is no restore (design §3.6)", async () => {
+    // The 2026-11-16 walk: alice added bob again after removing him; before he answered, his browser said
+    // "“Family” was restored." and the held copy left the holding area, although a re-add is asked first and he went on
+    // to decline it. A held shared vault comes back only once its key is adopted again.
+    const s = await seededMember("writer");
+    s.logs.remove(s.vaultId);
+    s.api.queue.push({ rev: 6, full: false, vaults: [], grants: [], items: [], removedGrants: [s.vaultId], removedGrantsInfo: [{ vaultId: s.vaultId, reason: "removed" }] });
+    await store_sync(s);
+    expect(s.store.heldVaults().find((h) => h.vaultId === s.vaultId)).toBeDefined();
+
+    // Added again: the grant row comes back, but the share is asked and not answered, so the log adopts no key.
+    s.logs.pend(s.vaultId, s.vk, "writer");
+    s.api.queue.push({ rev: 7, full: false, vaults: [{ ...s.vault, rev: 7 }], grants: [{ ...s.grant, rev: 7 }], items: [], removedGrants: [] });
+    await store_sync(s);
+    expect(s.store.notices().some((x) => x.vaultId === s.vaultId && x.kind === "restored")).toBe(false);
+    expect(s.store.heldVaults().find((h) => h.vaultId === s.vaultId)).toBeDefined();
+
+    // Accepted: the key is adopted again at the next pull, which reinstates it even without a new grant row.
+    s.logs.decide(s.vaultId);
+    s.api.queue.push({ rev: 8, full: false, vaults: [{ ...s.vault, rev: 8 }], grants: [], items: [{ ...s.item, rev: 8 }], removedGrants: [] });
+    await store_sync(s);
+    expect(s.store.heldVaults()).toHaveLength(0);
+    expect(s.store.notices().some((x) => x.vaultId === s.vaultId && x.kind === "restored")).toBe(true);
+  });
+
+  it("a server-denied edit on a STILL-LIVE vault rethrows (not parked)", async () => {
+    // A writer by the log, so the edit is sent (a reader's never is: INV-WRITE-KEY refuses it locally); the server
+    // denies it and no delete follows.
+    const s = await seededMember("writer");
     s.api.denyVaults.add(s.vaultId);
     // No delete arrives — the reconcile pull is empty, so the vault stays live.
     await expect(s.store.save(s.itemId, { ...DOC, name: "reader edit" }, [], undefined, s.vaultId)).rejects.toBeInstanceOf(ApiError);
@@ -358,25 +383,20 @@ describe("Skipti holding area: park, reinstate, replay (F21)", () => {
   });
 });
 
-describe("Skipti consumed-deleteId recognition", () => {
+describe("Skipti replayed tombstone after a restore", () => {
   beforeAll(async () => {
     await initSodium();
   });
 
-  it("a replayed tombstone whose deleteId a restore already consumed is recognized, not re-warned", async () => {
+  it("a replayed tombstone after a restore is not re-warned while the verified log shows the vault restored", async () => {
     const s = await seededMember("writer");
-    const key = await s.owner.lifecycleKeyFor(s.vaultId);
-    const deleteId = crypto.randomUUID();
-
-    // The vault re-arrives carrying a valid restore marker → the deleteId is consumed.
-    const rProof = await restoreProof(key, s.vaultId, deleteId);
-    s.api.queue.push({ rev: 6, full: false, vaults: [{ ...s.vault, rev: 6, restoreProof: rProof, deleteId }], grants: [], items: [], removedGrants: [] });
-    await store_sync(s);
-
-    // A stale/malicious server now replays the OLD tombstone bearing that deleteId.
+    // The log's delete and then its restore: the vault is live again (deleteId cleared).
+    s.logs.deleteVault(s.vaultId);
+    s.logs.share(s.vaultId, s.vk, "writer");
+    // A stale or malicious server now replays the OLD tombstone.
     s.api.queue.push({
       rev: 7, full: false, vaults: [], grants: [], items: [], removedGrants: [s.vaultId],
-      removedGrantsInfo: [{ vaultId: s.vaultId, reason: "deleted", deleteId, deleteProof: await deleteProof(key, s.vaultId, deleteId), purgeAt: Date.now() + 1000 }],
+      removedGrantsInfo: [{ vaultId: s.vaultId, reason: "deleted", purgeAt: Date.now() + 1000 }],
     });
     await store_sync(s);
 
@@ -384,68 +404,6 @@ describe("Skipti consumed-deleteId recognition", () => {
     expect(s.store.get(s.itemId)).toBeDefined();
     expect(s.store.heldVaults()).toHaveLength(0);
     expect(s.store.notices().some((n) => n.vaultId === s.vaultId)).toBe(false);
-  });
-});
-
-describe("Skipti transfer verification (spec 03 §11)", () => {
-  beforeAll(async () => {
-    await initSodium();
-  });
-
-  it("surfaces an incoming offer only after its proof verifies; a garbage proof stays hidden", async () => {
-    const s = await seededMember("writer");
-    const key = await s.owner.lifecycleKeyFor(s.vaultId);
-    const offerId = crypto.randomUUID();
-    const expiresAt = Date.now() + 14 * 86_400_000;
-    const seq = 1;
-    const goodProof = await offerProof(key, s.vaultId, offerId, s.member.userId, expiresAt, seq);
-
-    // Valid offer → visible as an acceptable incoming transfer.
-    s.api.queue.push({
-      rev: 6, full: false,
-      vaults: [{ ...s.vault, rev: 6, pendingTransfer: { toUserId: s.member.userId, offerId, proof: goodProof, expiresAt, seq } }],
-      grants: [], items: [], removedGrants: [],
-    });
-    await store_sync(s);
-    expect(s.store.incomingTransfers().map((t) => t.vaultId)).toContain(s.vaultId);
-
-    // A tampered proof on a new offer → NOT surfaced (consent screen never renders).
-    const s2 = await seededMember("writer");
-    s2.api.queue.push({
-      rev: 6, full: false,
-      vaults: [{ ...s2.vault, rev: 6, pendingTransfer: { toUserId: s2.member.userId, offerId: crypto.randomUUID(), proof: "AAAA", expiresAt, seq: 1 } }],
-      grants: [], items: [], removedGrants: [],
-    });
-    await store_sync(s2);
-    expect(s2.store.incomingTransfers()).toHaveLength(0);
-  });
-
-  it("an UNVERIFIED completed transfer warns (retain-and-warn) and does NOT burn the seq chain", async () => {
-    const s = await seededMember("writer");
-    const key = await s.owner.lifecycleKeyFor(s.vaultId);
-    const offerId = crypto.randomUUID();
-    const seq = 1;
-    const wrapHash = "00".repeat(32);
-
-    // Bogus acceptProof (server-side ownership rewrite): anomaly warning, no completion notice.
-    s.api.queue.push({
-      rev: 6, full: false,
-      vaults: [{ ...s.vault, rev: 6, lastTransfer: { offerId, newOwnerUserId: s.member.userId, acceptProof: "AAAA", seq, wrapHash } }],
-      grants: [], items: [], removedGrants: [],
-    });
-    await store_sync(s);
-    expect(s.store.notices().find((n) => n.vaultId === s.vaultId)?.kind).toBe("transfer-anomaly");
-
-    // The same row re-delivered later WITH the genuine proof: the unverified sighting must not
-    // have marked the seq seen — the real completion notice still fires.
-    const goodAccept = await acceptProofFromHash(key, s.vaultId, offerId, s.member.userId, seq, wrapHash);
-    s.api.queue.push({
-      rev: 7, full: false,
-      vaults: [{ ...s.vault, rev: 7, lastTransfer: { offerId, newOwnerUserId: s.member.userId, acceptProof: goodAccept, seq, wrapHash } }],
-      grants: [], items: [], removedGrants: [],
-    });
-    await store_sync(s);
-    expect(s.store.notices().find((n) => n.vaultId === s.vaultId)?.kind).toBe("transfer-complete");
   });
 });
 
@@ -512,6 +470,186 @@ describe("Skipti F19 move/copy copy-leg-first sequencing (design §8)", () => {
     await s.store.runGesture(g); // the SAME gesture again (a retry)
     expect(s.api.pushes.at(-1)![0]!.mutationId).toBe(firstCopyId); // deterministic from gestureId
     expect(s.api.pushes.length).toBeGreaterThan(n);
+  });
+});
+
+/**
+ * Design §3.8, spec 02 §10.6: when this browser has verified that a shared vault is deleted (in its grace, or for good
+ * through the tombstone), its own copy goes into the holding area for 30 days from that verification, or until the
+ * person removes it. Never until the vault's own purge time.
+ */
+describe("the holding area keeps a deleted vault's copy 30 days from the verification", () => {
+  const DAY = 86_400_000;
+  beforeAll(async () => {
+    await initSodium();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const removal = (s: Seed, purgeAt: number): SyncResponse => ({
+    rev: 6, full: false, vaults: [], grants: [], items: [], removedGrants: [s.vaultId],
+    removedGrantsInfo: [{ vaultId: s.vaultId, reason: "deleted", purgeAt }],
+  });
+  const heldAt = async (s: Seed, at: number): Promise<boolean> => {
+    vi.setSystemTime(at);
+    await s.store.sync(); // every sync drops what is past its date
+    return s.store.heldVaults().some((h) => h.vaultId === s.vaultId);
+  };
+
+  it("a delete verified in its grace: there on day 29, gone on day 31, whatever the vault's own dates", async () => {
+    const s = await seededMember();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.now();
+    s.logs.deleteVault(s.vaultId, { deletedAt: t0 - 2 * DAY, purgeAt: t0 + 5 * DAY }); // the server's grace ends in 5 days
+    s.api.queue.push(removal(s, t0 + 5 * DAY));
+    await s.store.sync();
+    expect(s.store.heldVaults().find((h) => h.vaultId === s.vaultId)?.expungeAt).toBe(t0 + 30 * DAY);
+    expect(await heldAt(s, t0 + 6 * DAY), "past the vault's purge time").toBe(true);
+    expect(await heldAt(s, t0 + 29 * DAY)).toBe(true);
+    expect(await heldAt(s, t0 + 31 * DAY)).toBe(false);
+  });
+
+  it("a purge the device sees late still gives the full 30 days, counted from the verification", async () => {
+    const s = await seededMember();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.now();
+    // The browser was away through the whole grace: the delete was 40 days ago, the purge 33 days ago.
+    s.logs.deleteVault(s.vaultId, { deletedAt: t0 - 40 * DAY, purgeAt: t0 - 33 * DAY });
+    s.logs.purge(s.vaultId, t0 - 33 * DAY);
+    s.api.queue.push(removal(s, t0 - 33 * DAY));
+    await s.store.sync();
+    const held = s.store.heldVaults().find((h) => h.vaultId === s.vaultId);
+    expect(held?.reason).toBe("deleted");
+    expect(held?.verified).toBe(true);
+    expect(held?.expungeAt).toBe(t0 + 30 * DAY);
+    const notice = s.store.notices().find((n) => n.vaultId === s.vaultId);
+    expect(notice?.keptUntil, "the notice names the day the copy leaves").toBe(t0 + 30 * DAY);
+    expect(await heldAt(s, t0 + 29 * DAY)).toBe(true);
+    expect(await heldAt(s, t0 + 31 * DAY)).toBe(false);
+  });
+
+  it("a purge verified for a copy held since the delete keeps it 30 days from the purge's verification", async () => {
+    const s = await seededMember();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.now();
+    s.logs.deleteVault(s.vaultId, { deletedAt: t0, purgeAt: t0 + 7 * DAY });
+    s.api.queue.push(removal(s, t0 + 7 * DAY));
+    await s.store.sync();
+    vi.setSystemTime(t0 + 8 * DAY);
+    s.logs.purge(s.vaultId, t0 + 7 * DAY);
+    s.api.queue.push({ ...removal(s, t0 + 7 * DAY), rev: 7 }); // the purge, seen a day after it happened
+    await s.store.sync();
+    expect(s.store.heldVaults().find((h) => h.vaultId === s.vaultId)?.expungeAt).toBe(t0 + 38 * DAY);
+    expect(await heldAt(s, t0 + 37 * DAY)).toBe(true);
+    expect(await heldAt(s, t0 + 39 * DAY)).toBe(false);
+  });
+
+  it("the person's “Remove from this device” drops the copy at once, whatever its date, and tells the server nothing", async () => {
+    const s = await seededMember();
+    s.logs.deleteVault(s.vaultId);
+    s.api.queue.push(removal(s, Date.now() + 7 * DAY));
+    await s.store.sync();
+    expect(s.store.heldVaults().map((h) => h.vaultId)).toEqual([s.vaultId]);
+    const pushes = s.api.pushes.length;
+    const calls = s.api.calls.length;
+    const syncs = s.api.sinceLog.length;
+    await s.store.removeHeldCopy(s.vaultId);
+    expect(s.store.heldVaults()).toEqual([]);
+    expect([s.api.pushes.length, s.api.calls.length, s.api.sinceLog.length]).toEqual([pushes, calls, syncs]);
+  });
+
+  /** The seeded vault, held by this account as its owner (the verified log names it). */
+  const owned = async (): Promise<Seed> => {
+    const s = await seededMember();
+    s.logs.share(s.vaultId, s.vk, "owner");
+    return s;
+  };
+
+  it("the owner's own delete puts the copy into the holding area, 30 days from the verification, with no notice", async () => {
+    const s = await owned();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.now();
+    s.api.queue.push(removal(s, t0 + 7 * DAY)); // the reconcile pull after the delete
+    await s.store.deleteSharedVault(s.vaultId);
+    expect(s.store.get(s.itemId), "out of the live view").toBeUndefined();
+    const held = s.store.heldVaults().find((h) => h.vaultId === s.vaultId);
+    expect(held).toMatchObject({ reason: "deleted", verified: true, byMe: true, itemCount: 1, expungeAt: t0 + 30 * DAY });
+    expect(s.store.notices(), "never \"deleted by its owner\" for the owner's own delete").toEqual([]);
+  });
+
+  it("the review's sequence: the owner deletes, then restores; the server withholds the restore and serves the purge: the copy is held, with its 30 days", async () => {
+    const s = await owned();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.now();
+    s.api.queue.push(removal(s, t0 + 7 * DAY));
+    await s.store.deleteSharedVault(s.vaultId);
+    const deleteId = (s.logs.logs.verifiedState(s.vaultId) as unknown as { deleteId: string }).deleteId;
+    // The restore gets no answer: the server keeps it and never stores it.
+    s.logs.nextAppend = "pending";
+    await expect(s.store.restoreSharedVault(s.vaultId, deleteId)).rejects.toBeInstanceOf(ChangeNotStoredError);
+    // A day after the grace, the server serves the purge.
+    vi.setSystemTime(t0 + 8 * DAY);
+    s.logs.purge(s.vaultId, t0 + 7 * DAY);
+    s.api.queue.push({ ...removal(s, t0 + 7 * DAY), rev: 7 });
+    await s.store.sync();
+    const held = s.store.heldVaults().find((h) => h.vaultId === s.vaultId);
+    expect(held).toMatchObject({ reason: "deleted", verified: true, byMe: true, itemCount: 1, expungeAt: t0 + 38 * DAY });
+    expect(s.store.notices()).toEqual([]);
+    expect(await heldAt(s, t0 + 37 * DAY)).toBe(true);
+    expect(await heldAt(s, t0 + 39 * DAY)).toBe(false);
+  });
+
+  it("an owner's delete the server stored while its answer was lost, seen at a later pull: held, with no notice", async () => {
+    const s = await owned();
+    s.logs.deleteVault(s.vaultId); // stored by the server; this browser learns of it from the pull
+    s.api.queue.push(removal(s, Date.now() + 7 * DAY));
+    await s.store.sync();
+    expect(s.store.heldVaults().find((h) => h.vaultId === s.vaultId)).toMatchObject({ byMe: true, verified: true });
+    expect(s.store.notices()).toEqual([]);
+  });
+
+  it("a member's view of the owner's delete is unchanged: held, as deleted by its owner, with the notice", async () => {
+    const s = await seededMember();
+    s.logs.deleteVault(s.vaultId);
+    s.api.queue.push(removal(s, Date.now() + 7 * DAY));
+    await s.store.sync();
+    expect(s.store.heldVaults().find((h) => h.vaultId === s.vaultId)).toMatchObject({ byMe: false, verified: true, reason: "deleted" });
+    expect(s.store.notices().map((n) => n.kind)).toEqual(["deleted"]);
+  });
+
+  it("the owner's held copy is removed from this device at once, telling the server nothing; its line says the owner deleted it", async () => {
+    const s = await owned();
+    s.api.queue.push(removal(s, Date.now() + 7 * DAY));
+    await s.store.deleteSharedVault(s.vaultId);
+    const html = renderToStaticMarkup(createElement(RecentlyRemoved, { store: s.store, hide: [] }));
+    expect(html).toContain("you deleted it · kept sealed until");
+    expect(html).not.toContain("deleted by its owner");
+    const calls = [s.api.pushes.length, s.api.calls.length, s.api.sinceLog.length];
+    await s.store.removeHeldCopy(s.vaultId);
+    expect(s.store.heldVaults()).toEqual([]);
+    expect([s.api.pushes.length, s.api.calls.length, s.api.sinceLog.length]).toEqual(calls);
+  });
+
+  it("a leave this browser made still drops the vault at once", async () => {
+    const s = await seededMember();
+    s.api.queue.push({ rev: 6, full: false, vaults: [], grants: [], items: [], removedGrants: [s.vaultId], removedGrantsInfo: [{ vaultId: s.vaultId, reason: "left" }] });
+    await s.store.leaveSharedVault(s.vaultId);
+    expect(s.store.heldVaults()).toEqual([]);
+    expect(s.store.notices()).toEqual([]);
+  });
+
+  it("a removal that fails on disk throws and leaves the copy in view", async () => {
+    const s = await seededMember();
+    s.logs.deleteVault(s.vaultId);
+    s.api.queue.push(removal(s, Date.now() + 7 * DAY));
+    await s.store.sync();
+    const cache = (s.store as unknown as { cache: { removeHeld: (id: string) => Promise<void> } }).cache;
+    cache.removeHeld = async () => {
+      throw new Error("disk");
+    };
+    await expect(s.store.removeHeldCopy(s.vaultId)).rejects.toThrow("disk");
+    expect(s.store.heldVaults().map((h) => h.vaultId)).toEqual([s.vaultId]);
   });
 });
 

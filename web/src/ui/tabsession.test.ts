@@ -5,12 +5,15 @@ import { ApiClient, type Tokens } from "../api/client";
 import { clearSession, lockRevokeUnconfirmed, loadSession, makeClient, recordLockRevoke, resetTabClaim, saveSession, type Session } from "./session";
 import {
   abandonSignIn,
+  beginSignIn,
+  beginUnlock,
   adoptSharedPair,
   dropOnSignOutElsewhere,
   idleTimerUserId,
   lockTabTokens,
   pendingSignInBinding,
   revokeForSignOut,
+  type SignInFlow,
   storageVerdict,
 } from "./tabsession";
 
@@ -41,15 +44,29 @@ function fakeStorage(): Storage {
 const jsonResp = (status: number, body: unknown): Response =>
   ({ ok: status >= 200 && status < 300, status, statusText: String(status), json: async () => body, text: async () => JSON.stringify(body) }) as unknown as Response;
 
-/** A fake server: logout answers [logoutStatus] and records the bearer it saw (null = unauthenticated). */
-function server(opts: { logoutStatus?: number } = {}) {
-  const seen = { logouts: [] as (string | null)[], refreshes: 0 };
+/**
+ * A flow's own login, as the wire runs it (api/wireclient.ts `login`): the pair is installed, then the flow is told it.
+ * The real wire's order is checked by journey 12 against the real server.
+ */
+async function loginAs(client: ApiClient, flow: SignInFlow): Promise<void> {
+  await client.login("y@example.com", "auth", "test");
+  flow.installed(client.getTokens()!);
+}
+
+/** A fake server: logout answers [logoutStatus] and records the bearer it saw (null = unauthenticated); end-session
+ *  (spec 03 §2, row 93) answers [endStatus] and records the refresh token it was sent. */
+function server(opts: { logoutStatus?: number; endStatus?: number } = {}) {
+  const seen = { logouts: [] as (string | null)[], refreshes: 0, ends: [] as string[] };
   vi.stubGlobal("fetch", async (url: string | URL, init?: RequestInit) => {
     const u = String(url);
     const auth = (init?.headers as Record<string, string> | undefined)?.["Authorization"] ?? null;
     if (u.endsWith("/api/v1/auth/logout")) {
       seen.logouts.push(auth);
       return jsonResp(opts.logoutStatus ?? 204, {});
+    }
+    if (u.endsWith("/api/v1/auth/end-session")) {
+      seen.ends.push((JSON.parse(String(init?.body)) as { refreshToken: string }).refreshToken);
+      return jsonResp(opts.endStatus ?? 200, { ok: true });
     }
     if (u.endsWith("/api/v1/auth/refresh")) {
       seen.refreshes++;
@@ -63,7 +80,7 @@ function server(opts: { logoutStatus?: number } = {}) {
 const PAIR: Tokens = { accessToken: "acc-1", refreshToken: "ref-1" };
 const SHARED: Tokens = { accessToken: "acc-s", refreshToken: "ref-s" };
 const UID = "11111111-1111-4111-8111-111111111111";
-const meta = (userId: string, tokens: Tokens | null): Session => ({ baseUrl: "", userId, personalVaultId: "pv", email: "m@example.com", isAdmin: false, tokens });
+const meta = (userId: string, tokens: Tokens | null): Session => ({ baseUrl: "", userId, personalVaultId: "pv", email: "m@example.com", tokens });
 
 beforeEach(() => {
   vi.stubGlobal("localStorage", fakeStorage());
@@ -74,7 +91,7 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("W1 — a sign-out with no pair never POSTs unauthenticated; the lock's own revoke result is what counts", () => {
-  it("the lock revokes while the pair is held, then drops it, and hands back the revoke result", async () => {
+  it("the lock ends its session while the pair is held, then drops it, and hands back the result", async () => {
     const seen = server();
     const client = new ApiClient("", PAIR);
     let settled = false;
@@ -82,9 +99,11 @@ describe("W1 — a sign-out with no pair never POSTs unauthenticated; the lock's
     void revoked?.then(() => (settled = true));
     expect(client.getTokens()).toBeNull();
     expect(revoked).not.toBeNull();
-    expect(settled, "the lock does not wait for the revocation").toBe(false);
+    expect(settled, "the lock does not wait for the server").toBe(false);
     expect(await revoked).toBe(true);
-    expect(seen.logouts).toEqual(["Bearer acc-1"]);
+    // Spec 03 §2: end-session with this tab's own refresh token; the logout would end every tab.
+    expect(seen.ends).toEqual(["ref-1"]);
+    expect(seen.logouts).toEqual([]);
   });
 
   it("a sign-out after that lock reuses its result — no second, unauthenticated POST, no false alarm", async () => {
@@ -92,11 +111,12 @@ describe("W1 — a sign-out with no pair never POSTs unauthenticated; the lock's
     const client = new ApiClient("", PAIR);
     const { revoked: atLock } = await lockTabTokens(client, { flush: null, flushWaitMs: 10, revoke: true });
     expect(await revokeForSignOut(client, atLock)).toBe(true);
-    expect(seen.logouts).toEqual(["Bearer acc-1"]);
+    expect(seen.ends).toEqual(["ref-1"]);
+    expect(seen.logouts).toEqual([]);
   });
 
-  it("a lock-time revoke the server did NOT confirm is what the sign-out reports", async () => {
-    server({ logoutStatus: 500 });
+  it("a lock-time end the server did NOT confirm is what the sign-out reports", async () => {
+    server({ endStatus: 500 });
     const client = new ApiClient("", PAIR);
     const { revoked: atLock } = await lockTabTokens(client, { flush: null, flushWaitMs: 10, revoke: true });
     expect(await atLock).toBe(false);
@@ -118,7 +138,7 @@ describe("W1 — a sign-out with no pair never POSTs unauthenticated; the lock's
 
 describe("W-b (A14 review 3) — the lock's revoke result outlives a reload, in the tab's sessionStorage", () => {
   it("a lock-time revoke the server did not confirm is still reported after a reload (a new App, no in-memory record)", async () => {
-    server({ logoutStatus: 500 });
+    server({ endStatus: 500 });
     const client = new ApiClient("", PAIR);
     recordLockRevoke(UID, "pending"); // App records it as it locks
     const { revoked: atLock } = await lockTabTokens(client, { flush: null, flushWaitMs: 10, revoke: true });
@@ -363,11 +383,11 @@ describe("W3 — the caller's saveSession is the only writer of a fresh login pa
     expect(loadSession()?.tokens?.refreshToken, "X's persisted pair is neither replaced nor adopted").toBe("x-ref");
   });
 
-  it("a sign-in that fails after login() revokes the pair it got and drops it, writing nothing", async () => {
+  it("a sign-in that fails after login() ends the pair it got, alone, and drops it, writing nothing", async () => {
     localStorage.setItem(`andvari.cacheOptIn.${X}`, "1");
     saveSession(meta(X, { accessToken: "x-acc", refreshToken: "x-ref" })); // another tab's live shared pair for X
     const client = makeClient(null, "");
-    const seen = { logouts: [] as (string | null)[] };
+    const seen = { logouts: [] as (string | null)[], ends: [] as string[] };
     vi.stubGlobal("fetch", async (url: string | URL, init?: RequestInit) => {
       const u = String(url);
       if (u.endsWith("/api/v1/auth/login")) return jsonResp(200, { ...ySession, userId: X });
@@ -375,15 +395,164 @@ describe("W3 — the caller's saveSession is the only writer of a fresh login pa
         seen.logouts.push((init?.headers as Record<string, string> | undefined)?.["Authorization"] ?? null);
         return jsonResp(204, {});
       }
+      if (u.endsWith("/api/v1/auth/end-session")) {
+        seen.ends.push((JSON.parse(String(init?.body)) as { refreshToken: string }).refreshToken);
+        return jsonResp(204, {});
+      }
       return jsonResp(404, {});
     });
-    await client.login("y@example.com", "auth", "test");
+    const flow = beginSignIn(client);
+    await loginAs(client, flow);
     client.boundUserId = X; // even after unlock had bound it, a later failure must not write under X
-    expect(await abandonSignIn(client)).toBe(true);
-    expect(seen.logouts).toEqual(["Bearer y-acc"]);
+    expect(await abandonSignIn(client, flow)).toBe(true);
+    // A refused session is ended by its own refresh token: the logout would end every session of this browser's device,
+    // another tab's session of the same account included.
+    expect(seen.ends).toEqual(["y-ref"]);
+    expect(seen.logouts).toEqual([]);
     expect(client.getTokens()).toBeNull();
     expect(loadSession()?.tokens?.refreshToken, "the persisted session is untouched").toBe("x-ref");
-    expect(abandonSignIn(client), "nothing held, nothing to revoke").toBeNull();
+    expect(abandonSignIn(client, flow), "nothing held, nothing to revoke").toBeNull();
+  });
+
+  it("a sign-in that fails or is refused ends only a pair it was itself given: the pair held when it began is never ended nor dropped", async () => {
+    const ends: string[] = [];
+    const logouts: string[] = [];
+    const record = (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (u.endsWith("/api/v1/auth/end-session")) ends.push((JSON.parse(String(init?.body)) as { refreshToken: string }).refreshToken);
+      if (u.endsWith("/api/v1/auth/logout")) logouts.push(u);
+    };
+    // The unlock card's "Sign in" over a kept session: the client holds the kept pair (perhaps a token the server already
+    // replaced, after a refresh whose answer was lost). The sign-in fails before login answers: nothing is ended.
+    const kept = new ApiClient("", { accessToken: "k-acc", refreshToken: "k-ref-spent" });
+    vi.stubGlobal("fetch", async (url: string | URL, init?: RequestInit) => {
+      record(url, init);
+      throw new TypeError("Failed to fetch");
+    });
+    let flow = beginSignIn(kept);
+    await loginAs(kept, flow).catch(() => {});
+    expect(abandonSignIn(kept, flow), "the kept pair was not given to this sign-in").toBeNull();
+    expect(kept.getTokens(), "nor is it dropped").toEqual({ accessToken: "k-acc", refreshToken: "k-ref-spent" });
+    expect(ends).toEqual([]);
+    expect(logouts).toEqual([]);
+    // A refusal before login (the server answers 401): the same.
+    vi.stubGlobal("fetch", async (url: string | URL, init?: RequestInit) => {
+      record(url, init);
+      return jsonResp(401, { error: "invalid_credentials" });
+    });
+    flow = beginSignIn(kept);
+    await loginAs(kept, flow).catch(() => {});
+    expect(abandonSignIn(kept, flow)).toBeNull();
+    expect(ends).toEqual([]);
+    // The same sign-in given a session, then refused (a check after login failed): that session alone is ended, by its
+    // own token; the kept pair it replaced in this tab's memory is not sent.
+    vi.stubGlobal("fetch", async (url: string | URL, init?: RequestInit) => {
+      record(url, init);
+      if (String(url).endsWith("/api/v1/auth/login")) return jsonResp(200, ySession);
+      return jsonResp(200, {});
+    });
+    flow = beginSignIn(kept);
+    await loginAs(kept, flow);
+    expect(await abandonSignIn(kept, flow)).toBe(true);
+    expect(ends).toEqual(["y-ref"]);
+    expect(logouts).toEqual([]);
+    expect(kept.getTokens()).toBeNull();
+    // With no flow nothing is ended; an unlock's way out ends the held session it opened.
+    const unrecorded = new ApiClient("", { accessToken: "u-acc", refreshToken: "u-ref" });
+    expect(abandonSignIn(unrecorded, null)).toBeNull();
+    expect(unrecorded.getTokens()).not.toBeNull();
+    expect(await abandonSignIn(unrecorded, beginUnlock())).toBe(true);
+    expect(ends).toEqual(["y-ref", "u-ref"]);
+  });
+
+  it("the second reading's sequence: another tab rotates the shared pair during a sign-in and this tab adopts it; the sign-in fails; the shared session is not ended", async () => {
+    const ends: string[] = [];
+    // The offline copy is on: the tabs share one pair, K. This tab is on the unlock card's "Sign in".
+    const tab1 = new ApiClient("", { accessToken: "k-acc", refreshToken: "k-ref" });
+    vi.stubGlobal("fetch", async (url: string | URL, init?: RequestInit) => {
+      if (String(url).endsWith("/api/v1/auth/end-session")) ends.push((JSON.parse(String(init?.body)) as { refreshToken: string }).refreshToken);
+      throw new TypeError("Failed to fetch");
+    });
+    const flow = beginSignIn(tab1);
+    // Tab 2 refreshes the shared pair to K'; this tab's storage listener adopts it (App's `adopt` verdict).
+    adoptSharedPair(tab1, { accessToken: "k2-acc", refreshToken: "k2-ref" }, false);
+    await loginAs(tab1, flow).catch(() => {}); // the network fails before login answers
+    expect(abandonSignIn(tab1, flow), "the adopted pair is not this sign-in's").toBeNull();
+    expect(tab1.getTokens()?.refreshToken, "nor is it dropped").toBe("k2-ref");
+    expect(ends).toEqual([]);
+  });
+
+  it("two flows on one client keep a record each: a second flow started while the first is busy does not take the first's session from it", async () => {
+    const ends: string[] = [];
+    let n = 0;
+    vi.stubGlobal("fetch", async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (u.endsWith("/api/v1/auth/end-session")) {
+        ends.push((JSON.parse(String(init?.body)) as { refreshToken: string }).refreshToken);
+        return jsonResp(200, { ok: true });
+      }
+      if (u.endsWith("/api/v1/auth/login")) return jsonResp(200, { ...ySession, refreshToken: `y-ref-${++n}` });
+      return jsonResp(404, {});
+    });
+    const client = new ApiClient("", null);
+    const first = beginSignIn(client);
+    const second = beginSignIn(client); // "Forgot" or "Back" while the first is still busy
+    await loginAs(client, first); // the first flow's own login installs y-ref-1
+    expect(abandonSignIn(client, second), "the second flow was given nothing").toBeNull();
+    expect(await abandonSignIn(client, first), "the first flow's own session is still its own to end").toBe(true);
+    expect(ends).toEqual(["y-ref-1"]);
+  });
+
+  it("a flow's own session, rotated by this client's own refresh, is still its own; one rotated by another tab is not", async () => {
+    const ends: string[] = [];
+    vi.stubGlobal("fetch", async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (u.endsWith("/api/v1/auth/end-session")) {
+        ends.push((JSON.parse(String(init?.body)) as { refreshToken: string }).refreshToken);
+        return jsonResp(200, { ok: true });
+      }
+      if (u.endsWith("/api/v1/auth/login")) return jsonResp(200, ySession);
+      if (u.endsWith("/api/v1/auth/refresh")) return jsonResp(200, { accessToken: "y-acc2", refreshToken: "y-ref2" });
+      if (u.endsWith("/api/v1/account/keys")) {
+        const auth = (init?.headers as Record<string, string> | undefined)?.["Authorization"];
+        return auth === "Bearer y-acc" ? jsonResp(401, { error: "unauthorized" }) : jsonResp(200, {});
+      }
+      return jsonResp(404, {});
+    });
+    const client = new ApiClient("", null);
+    const flow = beginSignIn(client);
+    await loginAs(client, flow);
+    await client.accountKeys().catch(() => {}); // a 401, this client's own refresh: y-ref becomes y-ref2
+    expect(client.getTokens()?.refreshToken).toBe("y-ref2");
+    expect(client.holdsSessionOf("y-ref")).toBe(true);
+    expect(await abandonSignIn(client, flow)).toBe(true);
+    expect(ends).toEqual(["y-ref2"]);
+    // A pair set from outside (another tab's rotation, adopted) is not this client's own line.
+    const other = new ApiClient("", null);
+    const f2 = beginSignIn(other);
+    await loginAs(other, f2);
+    adoptSharedPair(other, { accessToken: "z-acc", refreshToken: "z-ref" }, false);
+    expect(other.holdsSessionOf("y-ref")).toBe(false);
+    expect(abandonSignIn(other, f2)).toBeNull();
+  });
+
+  it("every way out of a sign-in, a registration and a kit recovery on the screens goes through abandonSignIn with that flow's own record", () => {
+    // Every caller: the kit gate's time limit, the operator account found at the vault's entry, the sign-in's failures
+    // after login (kit rotation, keys not this account's, cost refused, operator, identity fault, refused, failed), the
+    // registration's stored and untold outcomes, and the kit recovery's (kitCommitScreen's endSession).
+    expect(welcomeTsx.split("void abandonSignIn(ctx.client, flow);").length - 1).toBe(10); // 6 + 2 + 1, and the kit gate's own flow
+    expect(welcomeTsx.split("void abandonSignIn(ctx.client, c.flow);").length - 1).toBe(1);
+    expect(welcomeTsx.split("void abandonSignIn(ctx.client, ").length - 1).toBe(11);
+    expect(welcomeTsx).not.toMatch(/abandonSignIn\(ctx\.client\)/);
+    // A refused answer of a sign-in the server took: its session is ended before the line is said.
+    expect(welcomeTsx.split("(await abandonSignIn(ctx.client, flow)) === true").length - 1).toBe(1);
+    // The registration and the kit recovery begin their flows here; the sign-in form at each submit (signInForm).
+    expect(welcomeTsx.split("const flow = beginSignIn(ctx.client);").length - 1).toBe(2);
+    expect(welcomeTsx.split("const { flow, replaces } = form.current.submit();").length - 1).toBe(1);
+    expect(welcomeTsx.split("const flow = beginUnlock();").length - 1).toBe(2);
+    // Each flow hands its record to its own login, registration or commit.
+    expect(welcomeTsx.split("installed: flow.installed").length - 1).toBe(3);
+    expect(welcomeTsx).not.toContain("pendingSignInBinding");
   });
 
   it("login() fires no onTokens; register's pair is installed without persisting either", async () => {
@@ -398,21 +567,29 @@ describe("W3 — the caller's saveSession is the only writer of a fresh login pa
   });
 
   it("Welcome binds the client and saves the CURRENT pair, for both sign-in and register", () => {
-    const signIn = welcomeTsx.slice(welcomeTsx.indexOf("function SignIn("), welcomeTsx.indexOf("const ADMIN_PIN_PENDING"));
-    // W-a: a placeholder between login() and Account.unlock; the server's userId only after unlock succeeded.
-    const login = signIn.indexOf("client.login(email, authKey, deviceName()");
-    const pending = signIn.indexOf("client.boundUserId = pendingSignInBinding();");
-    const unlock = signIn.indexOf("await Account.unlock(s.userId");
-    const bind = signIn.indexOf("client.boundUserId = s.userId;");
-    expect(login).toBeGreaterThan(0);
-    expect(pending).toBeGreaterThan(login);
-    expect(unlock).toBeGreaterThan(pending);
-    expect(bind).toBeGreaterThan(unlock);
+    const signIn = welcomeTsx.slice(welcomeTsx.indexOf("function SignIn("), welcomeTsx.indexOf("// ---- Unlock a session"));
+    // W-a: a placeholder before login (inside signIn) until the unlock checks passed; the account's userId is bound
+    // only by enterVault, which runs after them.
+    // beginSignIn binds the placeholder (and records the pair held now), before login.
+    const pending = signIn.indexOf("form.current.submit();"); // signInForm's submit runs beginSignIn
+    const login = signIn.indexOf("await signIn({");
+    expect(pending).toBeGreaterThan(0);
+    expect(login).toBeGreaterThan(pending);
     // The pre-existing leak: a sign-in that fails after login() revokes and drops the pair it got.
-    expect(signIn).toContain("if (signedIn && !saved) void abandonSignIn(client);");
-    expect(signIn).toContain("tokens: client.getTokens(),");
-    expect(welcomeTsx).toContain("client.useSessionTokens({ accessToken: s.accessToken, refreshToken: s.refreshToken });");
-    expect(welcomeTsx).not.toContain("client.setTokens({ accessToken: s.accessToken, refreshToken: s.refreshToken });");
+    expect(signIn).toContain("void abandonSignIn(ctx.client, flow);");
+    for (const flow of ["const register = async", "const commit = async"]) {
+      const at = welcomeTsx.indexOf(flow);
+      expect(welcomeTsx.slice(at, at + 700)).toContain("const flow = beginSignIn(ctx.client);");
+    }
+    const open = readFileSync(here("./opensession.ts"), "utf8");
+    const bind = open.indexOf("ctx.client.boundUserId = account.userId;");
+    const save = open.indexOf("tokens: ctx.client.getTokens() });");
+    expect(bind).toBeGreaterThan(open.indexOf("Account.fromOpened(opened"));
+    expect(save).toBeGreaterThan(bind);
+    // The pair is installed by the transport's useSessionTokens (WireApi), never by a raw setTokens.
+    const wire = readFileSync(here("../api/wireclient.ts"), "utf8");
+    expect(wire).toContain("this.transport.useSessionTokens({ accessToken: s.accessToken, refreshToken: s.refreshToken });");
+    expect(wire).not.toContain("setTokens(");
   });
 });
 

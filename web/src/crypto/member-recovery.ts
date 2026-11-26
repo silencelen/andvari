@@ -1,7 +1,8 @@
 import { adRecovery } from "./ad";
 import { ctEquals, fromB64, toB64, utf8 } from "./bytes";
-import { open, seal } from "./envelope";
+import { openKey, seal } from "./envelope";
 import { hkdfSha256 } from "./hkdf";
+import { allZero } from "./keyfloor";
 import { randomBytes } from "./provider";
 
 /**
@@ -83,7 +84,8 @@ export async function openUvk(
   userId: string,
 ): Promise<Uint8Array> {
   const wrapKey = await recoveryWrapKey(recoverySecret);
-  return open(wrapKey, fromB64(recoveryWrappedUvkB64), adRecovery(userId));
+  // Core Account.recover twin: a recovery copy that opens to zeros recovers nothing (DamagedKeyError, fail-closed).
+  return openKey(wrapKey, fromB64(recoveryWrappedUvkB64), adRecovery(userId), "the recovery copy");
 }
 
 /**
@@ -100,7 +102,9 @@ export const displayForm = (recoverySecret: Uint8Array): string => toB64(recover
  */
 export function parseSecret(typed: string): Uint8Array | null {
   try {
-    return fromB64(typed.replace(WHITESPACE_RE, ""));
+    // Spec 01 rule 4: a secret of zeros is no kit's (core MemberRecovery.parseSecret's twin).
+    const s = fromB64(typed.replace(WHITESPACE_RE, ""));
+    return allZero(s) ? null : s;
   } catch {
     return null;
   }

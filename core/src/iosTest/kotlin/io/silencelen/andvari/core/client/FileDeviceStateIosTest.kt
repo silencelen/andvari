@@ -19,4 +19,13 @@ class FileDeviceStateIosTest {
         fileDeviceState(dir).set("personal.last", null)
         assertNull(fileDeviceState(dir).get("personal.last"))
     }
+
+    /** Following a move needs the store to list its keys (design §4.4); null would refuse the move. */
+    @Test fun theStoreListsItsKeys() {
+        fileDeviceState(dir).set("ovh.pin|https://a.example", "p")
+        fileDeviceState(dir).set("ovh.links|https://a.example|x", "l")
+        assertEquals(setOf("ovh.pin|https://a.example", "ovh.links|https://a.example|x"), fileDeviceState(dir).keys())
+        fileDeviceState(dir).set("ovh.pin|https://a.example", null)
+        assertEquals(setOf("ovh.links|https://a.example|x"), fileDeviceState(dir).keys())
+    }
 }

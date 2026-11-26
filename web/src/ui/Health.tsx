@@ -8,7 +8,7 @@ import { Announcer, Msg } from "./Msg";
 import { ago } from "./format";
 import { clampClipboardClearSeconds } from "./policyclamp";
 import { safeSiteHref } from "./safeurl";
-import { Staleness } from "./Staleness";
+import { Staleness, useListedNow } from "./Staleness";
 import { stalenessRows, stalenessSummary } from "./staleness";
 import { Empty } from "./Empty";
 import { STRENGTH_LABELS, estimateStrength } from "./strength";
@@ -118,7 +118,9 @@ export function healthRows(items: VaultItem[]): Row[] {
 type HealthTab = "passwords" | "duplicates" | "staleness";
 
 /** Vault-wide password health: strength, reuse, duplicates, and (on demand) HIBP breach exposure. */
-export function Health({ items, client, userId, onOpenItem, store, onChanged, clipboardClearSeconds, lastUsedAt, onUsed }: Props) {
+export function Health({ items: given, client, userId, onOpenItem, store, onChanged, clipboardClearSeconds, lastUsedAt, onUsed }: Props) {
+  // Read through the store's guarded reader at each render (useListedNow), whatever re-renders this view.
+  const items = useListedNow(store, given);
   const [tab, setTab] = useState<HealthTab>("passwords");
   const rows = useMemo<Row[]>(() => healthRows(items), [items]);
   // audit F03: duplicates cluster ACROSS vaults (the app mints cross-vault twins itself), so the
@@ -174,7 +176,17 @@ export function Health({ items, client, userId, onOpenItem, store, onChanged, cl
       const result = new Map<string, number>();
       let done = 0;
       let failedRanges = 0;
-      for (const [prefix, passwords] of byPrefix) {
+      // A removal can land while the scan runs: a range is asked for only while one of its passwords belongs to an item
+      // the store's guarded reader still hands out, and the verdicts kept are only those of such items.
+      const itemsOf = new Map<string, string[]>(); // password → item ids
+      for (const r of rows) itemsOf.set(r.password, [...(itemsOf.get(r.password) ?? []), r.itemId]);
+      const handedOut = (pw: string) => (itemsOf.get(pw) ?? []).some((id) => store.get(id) !== undefined);
+      for (const [prefix, all] of byPrefix) {
+        const passwords = all.filter(handedOut);
+        if (passwords.length === 0) {
+          setProgress({ done: ++done, total: byPrefix.size });
+          continue;
+        }
         // H73: FAIL OPEN, PER RANGE — the Android twin's rule (AndvariViewModel.scanBreaches).
         // A vault of a few hundred distinct passwords is a few hundred sequential relay round
         // trips, so one transient failure late in the run used to throw away every verdict the
@@ -205,7 +217,7 @@ export function Health({ items, client, userId, onOpenItem, store, onChanged, cl
       // Rows whose range failed are ABSENT (not 0), so breachVerdict returns undefined for them
       // and the cell renders the same "—" an added-since-scan item gets.
       const byItem = new Map<string, BreachEntry>(
-        rows.filter((r) => result.has(r.password)).map((r) => [r.itemId, { count: result.get(r.password)!, rev: r.rev }]),
+        rows.filter((r) => result.has(r.password)).filter((r) => store.get(r.itemId) !== undefined).map((r) => [r.itemId, { count: result.get(r.password)!, rev: r.rev }]),
       );
       setBreachByItem(byItem);
       setScanIncomplete(failedRanges > 0);
@@ -404,7 +416,12 @@ export function clearBreachCache(): void {
  *  the confirm names both the vault kept and the vault emptied — a merge moves real items out of
  *  a real place, and this screen used to name neither. Cross-vault and view-only clusters carry
  *  a refusal from planMerge instead of a Merge button. */
-function Duplicates({ clusters, items, roleFor, store, vaultNameById, onOpenItem, onChanged }: { clusters: DuplicateCluster[]; items: VaultItem[]; roleFor: RoleFor; store: VaultStore; vaultNameById: Map<string, string>; onOpenItem: (itemId: string, opts?: { generate?: boolean }) => void; onChanged: () => void }) {
+function Duplicates({ clusters: givenClusters, items: given, roleFor, store, vaultNameById, onOpenItem, onChanged }: { clusters: DuplicateCluster[]; items: VaultItem[]; roleFor: RoleFor; store: VaultStore; vaultNameById: Map<string, string>; onOpenItem: (itemId: string, opts?: { generate?: boolean }) => void; onChanged: () => void }) {
+  // Read through the store's guarded reader at each render, whatever re-renders this view: a cluster with a member of a
+  // vault no longer listed is not drawn (Health derives the clusters again from the list it reads).
+  const items = useListedNow(store, given);
+  const shownIds = new Set(items.map((it) => it.itemId));
+  const clusters = givenClusters.filter((c) => c.members.every((m) => shownIds.has(m.itemId)));
   const [confirmId, setConfirmId] = useState<string | null>(null); // survivorId of the open confirm
   const [mergingId, setMergingId] = useState<string | null>(null);
   // The differs-resolution confirm: which cluster (by signature) and which member the user

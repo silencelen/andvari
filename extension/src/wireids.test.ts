@@ -64,12 +64,18 @@ test("A10: an item row with a hostile itemId or vaultId is dropped", async () =>
   }
 });
 
-test("A10: a member row with a hostile userId is dropped", async () => {
-  const h = `${good}|${"b".repeat(64)}`;
-  const row = (userId: string) => ({ userId, email: "e", displayName: "d", role: "writer" });
-  const { api, refused } = served([row(h), row(good)]);
-  assert.deepEqual((await api.vaultMembers(other)).map((m) => m.userId), [good]);
-  assert.equal(refused[0]!.endpoint, "members");
+test("the vaults an answer still grants: every vault its list names, a row refused for its userId included; none known without a list or with an unusable vault id", async () => {
+  const granted = async (body: unknown) => {
+    const ids = (await served(body).api.sync(0)).grantedVaultIds;
+    return ids === null ? null : [...ids].sort();
+  };
+  assert.deepEqual(await granted(sync({ grants: [grant(good, other), grant(other, other)] })), [other, good].sort());
+  assert.deepEqual(await granted(sync({ grants: [grant(good, "x"), grant(other, other)] })), [other, good].sort(), "a row refused for its userId still names its vault");
+  assert.deepEqual(await granted(sync({ grants: [] })), [], "a list sent empty is a list");
+  for (const h of hostile) assert.equal(await granted(sync({ grants: [grant(h, other), grant(good, other)] })), null, JSON.stringify(h));
+  assert.equal(await granted({ rev: 9, vaults: [], items: [item(good, good)] }), null, "no list");
+  assert.equal(await granted({ rev: 9, vaults: [], grants: null, items: [item("x", good)] }), null, "null, beside a refused item id");
+  assert.equal(await granted({ rev: 9, vaults: [], items: [item("x", good)] }), null, "no list, beside a refused item id");
 });
 
 test("A10: a served personal wrap with a hostile vault id is dropped (keys and login)", async () => {

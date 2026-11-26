@@ -1,8 +1,19 @@
-import { decodeItemHomes, decodePersonalChange, decodePersonalWrap, encodeItemHomes } from "./trustrecords";
-import { pickPersonal, type PersonalWrapWire } from "./personalpick";
-import { acceptGate, buildVaultKeysFromWraps, coHoldersLine, coHoldersOf, personalChangeNotice, personalProposalNotice, reopenStagedPersonalWrap, vaultNameFromMeta, waitingGrantCount } from "./grantkeys";
+import { decodeItemHomes, decodePersonalWrap, encodeItemHomes } from "./trustrecords";
+import { otherSiteConfirmation, otherSiteQuestion } from "./othersite";
+import { buildVaultKeys, vaultNameFromMeta, waitingGrantCount } from "./grantkeys";
+import { applyServedState, decodeStateMemory, openAccountState, type StateMemory } from "./accountstate";
+import { firstPin, MAX_FIRST_PIN_CARDS, verifyChain, verifyForward, type Card } from "./instancecard";
+import { confirmKindChange, confirmMove, decodeStoredPin, newStoredPin, PIN_KEY, refreshPinForward, type StoredPin } from "./pinstore";
+import { bakedRoot, PUBLIC_INSTANCE } from "./publicinstance";
+import { fetchInstanceChain, operatorShortFp } from "./cardfetch";
+import { nameText } from "./statement";
+import { ownKeysFromSeed, verifyGenesis } from "./genesis";
+import { addressNorm, addressRecordName, judgeServed, keyRecordName, readRecord, recordsFor } from "./accountmemory";
+import { personalVaultKey, type WrapRecords } from "./wraps";
+import { decodeDeviceRecord, deviceKey, deviceObject, emailNorm, LAST_EMAIL_KEY, newDeviceRecord, rememberableEmail, type DeviceRecord } from "./device";
+import { wipeOldFormatOnce } from "./formatwipe";
 import { admitRows, sealGate, serverItemDecision } from "./itemhome";
-import { AndvariApi, ApiError, clampAutoLockSeconds, clampClipboardClearSeconds, type MutationResult, type SessionResponse, type SyncResponse } from "./api";
+import { AndvariApi, ApiError, clampAutoLockSeconds, clampClipboardClearSeconds, type AccountKeys, type MutationResult, type SessionResponse, type SyncResponse } from "./api";
 import type { BioReq, BioResult } from "./bioprotocol";
 import { brand, cardSubtitle, composeShortExpiry, digitsOnly, luhnValid, padMonth, yearTo4 } from "./card";
 import {
@@ -38,6 +49,9 @@ import { CARD_FILL_OFF } from "./cardfillflag";
 /** In-page card fill in this build (build.mjs defines it for every target; cardfillflag.ts). Read here as the define
  *  itself, never through a constant, so that esbuild drops the card path's handlers from a build without it. */
 declare const __ANDVARI_CARDFILL__: boolean;
+/** The test server's origin in a person's test build (build.mjs TESTBUILD=1), null in every other build (folded away by
+ *  esbuild there); undefined where the source runs unbundled. Read as the define itself, like the one above. */
+declare const __ANDVARI_TEST_SERVER__: string | null | undefined;
 import { cardFillPlan, choicesSpanForms, chosenCardFrames, frameOriginOf, framesWithChoices, kindsOfferedTwice, mayReceiveCard, mayRedeem, pageCardFormsOnly, providerCardFrames, sameFrames, supersededChoices, type CardFrameRecord, type CardGrant } from "./cardrelease";
 import type {
   CardFillFields,
@@ -47,6 +61,7 @@ import type {
   MatchItem,
   PendingCardSave,
   PendingSave,
+  QuickUnlockNotice,
   Req,
   Res,
   SaveErrorCode,
@@ -56,27 +71,26 @@ import type {
   UnlockCode,
 } from "./messages";
 import { currentCode, isValidTotp, normalizeTotp } from "./totp";
-import { matchLogins, normalizeHost, parseSavedUri, type FillTarget } from "./urimatch";
+import { isPlainHttp, matchLogins, matchLoginsAt, matchLoginsOnPage, normalizeHost, offeredUris, parseSavedUri } from "./urimatch";
 import { itemDocProblem } from "./itemdocshape";
 import { revealGate } from "./revealgate";
 import { pslResolve } from "./psl"; // A8: the SW is the ONLY bundle that carries the PSL blob
 import { resolveSaveAction, saveTargetFor, stepUsernameFor, type StepUsername } from "./savetarget";
 import { capturedSiteUri } from "./siteurl";
-import { captureBinding, derivedPageOrigin, requestHost, webOriginOfUrl, type OriginSource } from "./senderorigin";
+import { captureBinding, derivedPageOrigin, requestPage, webOriginOfUrl, type OriginSource } from "./senderorigin";
 import { senderGate, senderMaySend } from "./sendergate";
 import { buildKnownLoginDigests, knownLoginDigest, LOCKED_PENDING_TTL_MS, reofferDecision, siteKeyOfHost, type KnownLoginsRecord } from "./knownlogins";
-import { QuickUnlock, PIN_KDF_MIN_MEM_BYTES, PIN_KDF_MIN_OPS, type BeginRedeemOk, type QuBiometric, type QuCoKey, type QuRecord, type QuStore } from "./quickunlock";
-import { canonicalizeServerUrl, DEFAULT_SERVER_URL, nsKey, originKeyFor, SERVER_URL_KEY, setServerUrl } from "./serverurl";
+import { QuickUnlock, PIN_KDF_MIN_MEM_BYTES, PIN_KDF_MIN_OPS, type BeginRedeemOk, type QuBiometric, type QuCoKey, type QuDeps, type QuRecord, type QuStore } from "./quickunlock";
+import { canonicalizeServerUrl, NO_SERVER_ORIGIN, nsKey, originKeyFor, originMatchPattern, setServerUrl, SERVER_URL_KEY } from "./serverurl";
 import { idbKv, openBoundedIdb, trustedStore, type KvArea } from "./trustedkv";
 import { plainSessionArea, SEAL_DB_NAME, SessionSeal } from "./sessionseal";
-import { A15_OWED_KEY, attestsPreA15Upgrade, LAST_EMAIL_KEY, LEGACY_SERVER_KEY, migrateTrustState, rememberableEmail, UNATTESTED_SERVER_KEY, type InstallSignal, type MigrationOutcome } from "./trustmigrate";
-import { autofillExcludeMatches, dialRefusal, forgetPendingServer, loadServerState, type ServerBlock } from "./serverstate";
+import { autofillExcludeMatches, dialRefusal, loadServerState, type ServerBlock } from "./serverstate";
 import { offerDownloadUrl, readUpdateOffer } from "./updateoffer";
 import { quickUnlockCompartment, restrictStorageAccess, type StorageAccessAreas, type StorageAccessVerdict } from "./storageaccess";
 import { armGate, withRedeemInFlight } from "./locksequence";
 import { conflictCopyId, conflictCopyName } from "./conflictcopy";
 import { FLUSH_DEBOUNCE_MS, TEARDOWN_FLUSH_TIMEOUT_MS, mergeUsage, parseUsage, planFlush, recordUse, serializeUsage, type ServerLedger, type UsageMap } from "./usage";
-import { applyServerSwitch, purgeOriginRecords, purgeServerDataFor } from "./serverswitch";
+import { applyServerSwitch, isTrustRecord, moveNamespaceRecords, purgeOriginRecords, purgeServerDataFor } from "./serverswitch";
 import { BUILD_TARGET, selfUpdateChannelAllowed } from "./buildtarget";
 import { appServerToAdopt, appServerToForget, askAppServerDetailed, nativeSender, parseAppServerReply, type AppServerAnswer } from "./appserver";
 import { queueSaveToApp, savesThroughApp } from "./appsave";
@@ -105,12 +119,14 @@ import { AppVault, vaultFromApp, type AppVaultCardFields, type CardFieldName } f
  * Unlock flow (mirrors web Account.unlock): prelogin → Argon2id → login (authKey) → unwrap UVK
  * from accountKeys → sync → unwrap each vault key from its grant → decrypt items under the VK.
  */
-// ---- server endpoint + per-origin namespace (design 2026-07-15 §5.1/§4.2) ----
-// The baked tailnet constant is GONE: the origin is a per-device choice in the trusted store
-// (serverurl.ts), preconfigured for DEFAULT_SERVER_URL. `serverReady` below loads it before any
-// network/namespace use; the `setServerUrl` message (commitServerUrl) is the only switch (§4.1, A15).
-let serverUrl = DEFAULT_SERVER_URL;
-let currentOriginKey = originKeyFor(DEFAULT_SERVER_URL);
+// ---- server endpoint + per-origin namespace (design 2026-07-15 §5.1/§4.2; 2026-11-15 §4.4, §12.2) ----
+// No build has a default server: the origin is a per-device choice in the trusted store (serverurl.ts), made only with
+// a verified card pin (the baked public instance, or a typed address behind the Trust Gate). `serverReady` below loads
+// it before any network/namespace use; chooseServer/confirmServer (and Safari's app adoption) are the only switches.
+let serverUrl = NO_SERVER_ORIGIN;
+let currentOriginKey = originKeyFor(NO_SERVER_ORIGIN);
+/** The current origin's card pin (pinstore.ts), as last read or written. Null while no server, or Safari. */
+let currentPin: StoredPin | null = null;
 /** A storage key under the CURRENT origin's namespace (§4.2/B2-7): quick-unlock/PIN co-key
  *  material and cached per-origin state live under `ns.<originKey>.<key>`, so a server switch can
  *  never read, mint, or wipe another origin's material. Computed at CALL time — the switch path
@@ -132,7 +148,22 @@ const sessionRaw = chrome.storage.session as unknown as KvArea;
  *  new browser session (browserSessionReported, below); at any other worker start it is kept only if a record in
  *  storage.session opens under it — for the two global slots that needs the origin, hence `originKey`. Set up now,
  *  beside serverReady: `sessionSeal.ready` settles once worker start found or made the key, or found no key store. */
-const sessionSeal = new SessionSeal({ session: sessionRaw, keys: idbKv(() => (globalThis as { indexedDB?: IDBFactory }).indexedDB, SEAL_DB_NAME), originKey: () => serverReady.then(() => currentOriginKey) });
+/** The first-launch wipe (§12.4) clears the seal's key database too, so the seal touches
+ *  that database only once the wipe settled (afterFormatWipe): it can never make a key the wipe then deletes. */
+let formatWipeSettled: () => void = () => {};
+const formatWipeDone = new Promise<void>((resolve) => (formatWipeSettled = resolve));
+function afterFormatWipe(area: KvArea): KvArea {
+  return {
+    get: (keys) => formatWipeDone.then(() => area.get(keys)),
+    set: (items) => formatWipeDone.then(() => area.set(items)),
+    remove: (keys) => formatWipeDone.then(() => area.remove(keys)),
+  };
+}
+const sealKeyDb = idbKv(() => (globalThis as { indexedDB?: IDBFactory }).indexedDB, SEAL_DB_NAME);
+/** The quick-unlock co-key database (the Tier B engine below). */
+const IDB_NAME = "andvari-qu";
+const IDB_STORE = "cokey";
+const sessionSeal = new SessionSeal({ session: sessionRaw, keys: afterFormatWipe(sealKeyDb), originKey: () => serverReady.then(() => currentOriginKey) });
 const plainSession = plainSessionArea(sessionRaw);
 /** A read where a failure means "absent" (the safe default for every value read this way). Once worker start found no
  *  trusted store, it is not asked again for a best-effort read (a store that timed out would cost every caller the
@@ -150,7 +181,12 @@ async function trustedGet(key: string): Promise<unknown> {
 // records ("tabs": Record<tabId, TabState>), and per origin the quick-unlock record ("quickUnlock", QKEY) and the
 // known-logins digest ("knownLogins", KLKEY) — read and written only through the seal, which owns their slot names; and
 // three plain ones (NKEY, ULAST, UQUIET), through plainSession. sessionseal.ts says why each is sealed or plain.
-const NKEY = "lockNotice"; // storage.session, plain: { kind:"idle"; seconds } — F26 reason line (E1-7)
+const NKEY = "lockNotice"; // storage.session, plain: { kind:"idle"; seconds } — F26 reason line (E1-7); { kind:"operator" } — §12.2 rule 7; { kind:"not_confirmed" } — a quick unlock that found the session unconfirmed
+// storage.session, plain: a number. Design §4.4 (decided on 2026-11-17): how many captured logins and cards a lock or a
+// sign-out nobody asked for deleted unsaved (the idle lock; the full sign-out after a session the server ended for good,
+// or after the card named the account as the operator). Only the number, never a page's password; the popup says it
+// the next time it opens, once (the status read takes it).
+const LOST_KEY = "capturesLost";
 // Extension quick-unlock Tier B (spec 01 §8.4). QKEY is a DISTINCT storage.session key (breaker B3):
 // ensureLoaded MUST NOT hydrate `session` from it, so a locked-armed record leaves every `!session`
 // gate reporting fully locked. DKEY is the durable, NON-secret offer-card dismissed-once flag (breaker
@@ -187,6 +223,10 @@ const DEFAULT_AUTOLOCK_SECONDS = 15 * 60; // policy fetch failed/absent — neve
 const DEFAULT_CLIPBOARD_CLEAR_SECONDS = 30; // spec 01 §8 policy default; clearing is safety-positive
 const CLIPBOARD_CLEAR_ALARM = "clipboardclear"; // SW backstop clear (E1-4); survives idle doLock
 const RESYNC_PERIOD_MIN = 5;
+/** chrome.alarms floors a delay at 30 s; the deadline keeps the same floor, so it locks exactly when the alarm would. */
+const AUTOLOCK_FLOOR_SECONDS = 30;
+/** The snapshot's copy of the deadline is rewritten when the live one has moved at least this far past it. */
+const LOCK_AT_SAVE_SLACK_MS = 60_000;
 const UPDATE_ALARM = "updatecheck";
 const UPDATE_PERIOD_MIN = 1440; // ~daily; the SW also opportunistically checks on wake (throttled)
 const UPDATE_MIN_GAP_MS = 20 * 60 * 60 * 1000; // floor between real fetches — SWs wake constantly
@@ -262,6 +302,28 @@ class IdentityMismatchError extends Error {
   }
 }
 
+/** The served account is another one than the account this extension knows the address as (accountmemory.ts): code
+ *  "remade_account", whose line says both possibilities. Nothing of the served account is opened or kept. */
+class RemadeAccountError extends Error {
+  /** The account this extension knows the address as (the one "Forget the earlier account on this device" forgets). */
+  readonly earlier: string;
+  constructor(earlier: string) {
+    super("this address is known here as another account");
+    this.name = "RemadeAccountError";
+    this.earlier = earlier;
+  }
+}
+
+/** The records of which account an address is and of each account's key could not be read at a sign-in or a quick
+ *  unlock (a store that worked at start failed on this read): code "memory_unreadable". Nothing is taken, nothing is
+ *  written; a record that cannot be read is never taken as no record. */
+class KnownAccountUnreadableError extends Error {
+  constructor() {
+    super("the records of this server's accounts could not be read");
+    this.name = "KnownAccountUnreadableError";
+  }
+}
+
 /** Local sentinel for audit H67 (core `VaultKeyDamagedException` / web `VaultKeyDamagedError`
  *  parity): the server-stored `wrappedUvk` is not a well-formed envelope at all — undecodable
  *  base64url, too short, or an envelope version/AEAD alg this build does not know. Those refusals
@@ -332,18 +394,20 @@ interface Session {
   /** Security review 2026-10, branch A11 (q14): vaultId → the vault's meta CIPHERTEXT from the last full sync, so the
    *  save banner can name the destination vault (decrypted on demand under a HELD key, never a server label). */
   vaultMeta?: Map<string, string>;
-  /** Rescue-issued temporary password in effect (E1-6) — surfaced in `status` for the popup nudge. */
-  mustChangePassword: boolean;
   /** UVK custody, MEMORY-ONLY (breaker B1) — retained for the unlocked lifetime so quick-unlock enroll
    *  can wrap it; NEVER written to storage.session/local. Absent on a snapshot-restored session (SW was
    *  evicted) → enroll must trigger a fresh full unlock. */
   uvk?: Uint8Array;
-  /** Root cause A §1.7 (A6): grant rows with no UVK wrap (a seal or signed grant only) — waiting for a full
-   *  client to verify and self-wrap. Shown in the popup; recomputed by resync() without the UVK. */
+  /** §12.2 rule 1: shared vaults whose key the extension does not open (no UVK wrap yet, or no `accept` decision in
+   *  the account state) — waiting for a full client. Shown in the popup; recomputed by resync() without the UVK. */
   waitingGrants?: number;
   /** Root cause A §5.1 INV-HOME (A1b): itemId → the vault of the FIRST row this browser applied for it. Durable in
    *  storage.local (per origin and user) and in the snapshot; a later row under another vault is never applied. */
   homes: Map<string, string>;
+  /** Design §4.4 "a trust record that cannot be read is not an empty one": false when the durable homes record could
+   *  not be read at this session's unlock. Then `homes` is this session's memory only: rows outside the personal vault
+   *  are not admitted (nothing can be checked against their homes), and the record is never written back. */
+  homesKnown: boolean;
   /** A1b: rows the last snapshot sent under the wrong vault (refused); the popup says so while it is > 0. */
   wrongVault?: number;
   /** How this session was opened. `enroll` COPIES the surviving full-password stamp regardless, but the
@@ -352,6 +416,17 @@ interface Session {
   /** The last full-master-password unlock time. A quick unlock carries the blob's COPIED stamp (never
    *  `now`), so re-enrolling from a QUICK session cannot extend the 24 h quick-unlock window (breaker A4). */
   lastFullUnlockAt: number;
+  /** Design §4.4 "A session the server ends does not delete the device's copy": the server ended this session (a
+   *  refused refresh, a revoked frame). Its tokens and the quick-unlock record are gone; what it holds stays readable,
+   *  with the notice in view; nothing is dialed and nothing is written until the person signs in again. */
+  serverEnded?: true;
+  /** With serverEnded: no server ended it. A refresh whose answer never came had no try left, so the extension sent
+   *  nothing again and ended it itself (api.ts doRefresh); the popup says that end, never "the server signed out". */
+  endedUnconfirmed?: true;
+  /** The lock's deadline (wall clock, ms). Past it, the session is locked at the next way into the worker
+   *  before anything is served (lockIfDue), whether or not the "autolock" alarm fired; the alarm is only what normally
+   *  locks it on time. Set at the install, moved by user activity (armAutoLock), kept in the snapshot. */
+  lockAt: number;
 }
 
 /** What survives SW death (JSON-safe: keys as b64 — Uint8Array doesn't cross chrome.storage). The UVK
@@ -369,7 +444,6 @@ interface SessionSnapshot {
   personalVaultId: string;
   autoLockSeconds: number;
   clipboardClearSeconds: number;
-  mustChangePassword: boolean;
   provenance: "PASSWORD" | "QUICK";
   lastFullUnlockAt: number;
   vaultKeys: Record<string, string>;
@@ -380,9 +454,18 @@ interface SessionSnapshot {
   waitingGrants?: number;
   /** A1b: the item homes (ids only, no key material); absent in an older snapshot = reloaded from storage.local. */
   homes?: Record<string, string>;
+  /** Set when the session's homes record could not be read (Session.homesKnown false); absent = known. */
+  homesUnknown?: true;
   wrongVault?: number;
   /** A11 (q14): vault meta ciphertext (no key material); absent in an older snapshot = names refill at the next sync. */
   vaultMeta?: Record<string, string>;
+  /** Session.serverEnded: the snapshot then carries no tokens, and a worker restart keeps the session ended. */
+  serverEnded?: true;
+  /** Session.endedUnconfirmed, kept across a worker restart with the end itself. */
+  endedUnconfirmed?: true;
+  /** Session.lockAt as last written (the write is skipped while the deadline moved less than LOCK_AT_SAVE_SLACK_MS, so
+   *  it is at most that much earlier than the live one). Absent (a snapshot no deadline was kept for) = past. */
+  lockAt?: number;
   items: DecryptedItem[];
 }
 
@@ -412,7 +495,7 @@ interface TabState {
    *  locked re-offers to one per REOFFER_MIN_GAP_MS (knownlogins.ts reofferDecision owns the
    *  ordering). All three are cleared when the unlock re-offer hands the pending to a live
    *  session, and none ride publicPending. */
-  pending?: (PendingSave & { password: string; frameId: number; uri?: string; updatesVaultId?: string | null; approvedAt?: number; lockedAt?: number; quiet?: boolean; offeredAt?: number }) | undefined;
+  pending?: (PendingSave & { password: string; frameId: number; uri?: string; updatesVaultId?: string | null; approvedAt?: number; lockedAt?: number; quiet?: boolean; offeredAt?: number; lost?: LostPut }) | undefined;
   /** S3 per-frame card-form registry: frameId → { the origin the browser reports for the frame (cardrelease.ts
    *  frameOriginOf), ALL its card forms' kinds in document order (Tier 2 §2), the form holding the field the person
    *  chose there and when }. METADATA ONLY (never card values). Only a frame whose origin is a payment provider's
@@ -460,7 +543,7 @@ const cardReports = new Map<number, { top: boolean; origins: Set<string>; hints:
  *  Cleared in doLock ([X2-A2b]), the onUpdated "loading" handler, and onRemoved. */
 const pendingCardSave = new Map<
   number,
-  { host: string; number: string; expMonth: string; expYear: string; cardholderName: string; postalCode?: string; frameId: number; updatesItemId?: string; updatesItemName?: string }
+  { host: string; number: string; expMonth: string; expYear: string; cardholderName: string; postalCode?: string; frameId: number; updatesItemId?: string; updatesItemName?: string; lost?: LostPut }
 >();
 /** C1 [S2] — tabs whose recorded `topOrigin` is KNOWN-STALE but not yet erased. The onUpdated
  *  "loading" handler can only `delete st.topOrigin` AFTER `await ensureLoaded()`, so between
@@ -477,6 +560,14 @@ const CARD_CAPTURE_DEDUPE_MS = 1500;
 /** In-flight write count — resync must not replace session.items out from under a landing put. */
 let writesInFlight = 0;
 let loadPromise: Promise<void> | null = null;
+/** The idle lock in flight (the auto-lock alarm's, or one the deadline started), so the two are one lock. */
+let dueLock: Promise<void> | null = null;
+/** Session.lockAt as the snapshot last carried it (persistSession); armAutoLock rewrites it once it lags too far. */
+let lockAtSaved = 0;
+/** Alarms the browser refused twice in this worker life, for the popup's one line (status.timerNotice). */
+const timerRefused = { autolock: false, resync: false };
+/** The last alarm request (each is short: a create, once more on a refusal), so the popup's status reads it settled. */
+let alarmWork: Promise<void> = Promise.resolve();
 /** Live dirty-bell socket handle (events.ts) — held ONLY while a session exists; locked or
  *  logged out = no socket (doLock tears it down first thing). Dies with the SW; T1/T3 revive. */
 let events: EventsHandle | null = null;
@@ -489,7 +580,17 @@ function makeApi(url: string): AndvariApi {
   // A16 review R4: while a server is pending (or unknown: dialBlock) the api sends nothing at all — not a session's sync
   // or save, not a refresh, not the socket's ticket. Before, only the sign-in lanes were refused (at dispatch), so a
   // session hydrated under a block (the trusted store timed out while the seal's key answered) still dialed.
-  a.mayDial = () => dialBlock === null;
+  // §4.4: while a session the server ended stands, nothing is sent either (endSessionByServer).
+  a.mayDial = () => dialBlock === null && session?.serverEnded !== true;
+  // §4.4 "A session the server ends does not delete the device's copy": a definitive refusal of this session's refresh
+  // ends the session (endSessionByServer), never deletes what it holds. A redeem's refusal is the redeem's own (it
+  // holds no session yet, and wipes the quick-unlock record itself).
+  // A refresh whose answer never came and had no try left (`not_confirmed`) ends the session the same way, as an end of
+  // its own (never said as the server's), and its token is kept for the next sign-in of that address to name.
+  a.onRefreshRefused = (why) => {
+    if (why === "not_confirmed" && a.keptUnconfirmed !== null && session !== null) keptUnconfirmed = { email: session.email, refreshToken: a.keptUnconfirmed };
+    if (a === api && session !== null && redeemClient !== a) void endSessionByServer(why === "not_confirmed");
+  };
   // A10: served rows with malformed ids were refused at the wire (wireids.ts); the full clients raise the notice,
   // the worker logs it (no popup surface for key-state anomalies, see personalChangeText).
   a.onRefusedIds = (endpoint, refused) => console.warn(`[andvari] refused ${refused.length} malformed id(s) on ${endpoint}`);
@@ -497,7 +598,10 @@ function makeApi(url: string): AndvariApi {
   // refresh POST (a stale persisted pair resurrected on SW wake = revoked device). While unlocked it
   // lands in the full SessionSnapshot; DURING a quick-unlock redeem (session still null) it lands in the
   // locked-token stash so a mid-refresh SW death never resurrects a spent token (breaker A5, AM1 parity).
-  a.onTokensChanged = () => persistTokens();
+  // A client the server was switched away from keeps its pair to its own server's record (persistStaleTokens).
+  const originKey = originKeyFor(url);
+  a.onTokensChanged = () => (a === api ? persistTokens() : persistStaleTokens(a, originKey));
+  a.onLateRefresh = (consumed, pair) => followLateRefresh(a, originKey, consumed, pair);
   // A 426 min-version pin (spec 03 §1) surfaces via checkForUpdate → the existing update banner is
   // the download surface. checkForUpdate hits the static /downloads route (not api.ts), so it can
   // never itself 426 — no re-entry loop (AM4).
@@ -532,10 +636,11 @@ const custodyReady: Promise<void> = Promise.all([storageAccess, sessionSeal.read
   decideCompartment();
 });
 
-/** A15 review F1: while set, the worker dials NO server (serverstate.ts): a previous server awaits the user's confirm,
- *  or the trusted store did not answer. Set by serverReady; cleared only by a Trust-Gate commit (commitServerUrl) or
- *  "Not mine" (forgetLegacyServer). A16 review R4: every request the api makes refuses while it stands (makeApi), and
- *  the resync, the socket and sign-out's revoke do not even start. */
+/** While set, the worker dials NO server (serverstate.ts): none chosen, no store, the store did not answer, or the
+ *  origin's pin forked or is damaged (design 2026-11-15 §4.4). Set by serverReady and by a fork found at a refresh
+ *  (ensureCardFresh); cleared only by a kept pin (switchToPinned) or Safari's app adoption (commitServerUrl). A16
+ *  review R4: every request the api makes refuses while it stands (makeApi), and the resync, the socket and
+ *  sign-out's revoke do not even start. */
 let dialBlock: ServerBlock | null = null;
 /** Safari Details (serverDiag): the step worker start is at, and the migration's outcome. Display only. */
 let startStage = "storage-access";
@@ -554,39 +659,27 @@ const LOCK_EPOCH_WAIT_MS = 1500;
  *  value installs nothing it read: the lock erased first, and its own copy decides the arm. */
 let hydrateGen = 0;
 
-/** A15 review F2: the browser's install event for this worker life, which says whether the A15 migration is owed.
- *  `runtime.onInstalled` is registered below at top level, and the event is delivered right after this script first
- *  runs; worker start waits for it at most INSTALL_SIGNAL_WAIT_MS, and only when the trusted store holds neither the
- *  migration flag nor the owed mark. A later event is handled by lateInstallSignal. */
-const INSTALL_SIGNAL_WAIT_MS = 5000;
-let installSignalSeen: (d: InstallSignal) => void = () => {};
-const installSignal = new Promise<InstallSignal>((r) => (installSignalSeen = r));
-/** True when worker start gave up waiting for the install event and set the flag without reading storage.local. */
-let installWaitTimedOut = false;
-/** A16 review R3: worker start could not record an attested upgrade as owed (the store refused or did not answer), so
- *  nothing outside this worker life remembers it: the install event (handled after start, lateInstallSignal) records
- *  it again, with retries. */
-let startOwedUnrecorded = false;
-/** A16 review R3: the retry delays for recording an attested upgrade as owed within one worker life. */
-const OWED_RETRY_DELAYS_MS = [2000, 10_000, 30_000];
-let owedRecording = false;
-
-/** Apply the server state worker start (or a late migration) computed. The url changes only at start. */
-async function applyServerState(outcome: MigrationOutcome, atStart: boolean): Promise<void> {
-  const st = await loadServerState(outcome, trusted, legacyLocal);
-  if (atStart && st.url !== serverUrl) {
+/** Apply the server state worker start computed (serverstate.ts). */
+async function applyServerState(storeOutcome: "ok" | "unavailable" | "timedOut"): Promise<void> {
+  const st = await loadServerState(storeOutcome, trusted, BUILD_TARGET !== "safari");
+  if (st.url !== serverUrl) {
     serverUrl = st.url;
     currentOriginKey = originKeyFor(st.url);
     api = makeApi(st.url);
   }
-  // A16 review: a later application never moves the dialed origin, so one that names another origin than the one this
-  // worker dials leaves the server unknown in this worker life (unsettled) instead of lifting the block onto the wrong one.
-  dialBlock = !atStart && st.url !== serverUrl ? { kind: "unsettled" } : st.block;
-  // Safari: the store build has no default server (build.mjs). Until the app names one, nothing is dialed and no
-  // autofill is registered, since the exclusion of the person's own vault origin cannot be written yet.
+  currentPin = st.pin;
+  dialBlock = st.block;
+  // A fork seen earlier in this browser session whose durable write failed still stops the origin, and the
+  // write is tried again.
+  if (st.pin !== null && !st.pin.fork && st.block === null && (await forkMarked(st.url))) {
+    void recordFork(st.url, st.pin, { ...st.pin, fork: true, pending: null });
+  }
+  // Safari: until the app names a server, nothing is dialed and no autofill is registered, since the exclusion of the
+  // person's own vault origin cannot be written yet.
   if (dialBlock === null && noServerChosen()) dialBlock = { kind: "unsettled" };
+  if (BUILD_TARGET === "safari" && dialBlock?.kind === "no_server") dialBlock = { kind: "unsettled" };
   trustedStoreOk = st.trustedStore;
-  // A16 review R4: a block that stands from now on dials nothing — a live socket included.
+  // A block that stands from now on dials nothing — a live socket included.
   if (dialBlock) {
     events?.close();
     events = null;
@@ -600,80 +693,31 @@ async function applyServerState(outcome: MigrationOutcome, atStart: boolean): Pr
  *  A lock waits for it only within LOCK_STORE_WAIT_MS (doLock, A15 review S1). Never rejects. */
 const serverReady: Promise<void> = (async () => {
   await storageAccess;
-  startStage = "migration";
+  startStage = "format";
   try {
-    // A15: move the trust state out of storage.local once (trustmigrate.ts) — and since the A15 review (F2) only when
-    // the browser attested an upgrade from a pre-A15 build. A planted pre-A15 serverUrl is NEVER adopted: a
-    // non-default one becomes a pending server that blocks every dial until the user confirms it or says "Not mine".
-    const outcome = await migrateTrustState(legacyLocal, trusted, () =>
-      Promise.race([installSignal, delay(INSTALL_SIGNAL_WAIT_MS).then(() => null)]),
-    );
-    installWaitTimedOut = outcome.kind === "skipped" && outcome.signal === "none";
-    startOwedUnrecorded = outcome.kind === "failed" || (outcome.kind === "unavailable" && outcome.timedOut);
-    startMigration = outcome.kind === "unavailable" && outcome.timedOut ? "unavailable (timed out)" : outcome.kind;
+    // Design 2026-11-15 §12.4: the first start of a new-format build deletes every pre-cut-over local store, once.
+    // The quick-unlock co-key database and the session-seal key database are old stores too.
+    const coKeyDb = idbKv(() => (globalThis as { indexedDB?: IDBFactory }).indexedDB, IDB_NAME, { storeName: IDB_STORE });
+    const storeOutcome = await wipeOldFormatOnce(trusted, [legacyLocal, sessionRaw], [coKeyDb, sealKeyDb]);
+    formatWipeSettled();
+    startMigration = storeOutcome;
     startStage = "server-state";
-    await applyServerState(outcome, true);
+    await applyServerState(storeOutcome);
   } catch {
     dialBlock = { kind: "unsettled" }; // unreachable in practice (both leaves never throw) — dial nothing
+  } finally {
+    formatWipeSettled();
   }
-  startStage = "legacy-namespace";
-  if (trustedStoreOk) await adoptLegacyNamespaceOnce();
   startStage = "ready";
 })();
 /** A16: what a lock needs before it can arm or wipe in the right namespace: the origin (serverReady), the access levels
  *  and the seal's key (custodyReady). doLock waits for it at most LOCK_STORE_WAIT_MS. Never rejects. */
 const custodyLoaded: Promise<unknown> = Promise.all([serverReady, custodyReady]);
 
-/** A15 review F2: the install event landed after worker start stopped waiting for it, and it attests an upgrade from a
- *  pre-A15 build — or (A16 review R3) worker start saw it but could not record it. Record the migration as owed and run
- *  it now (it reads storage.local only because of that record). */
-async function lateInstallSignal(d: InstallSignal): Promise<void> {
-  if (!(installWaitTimedOut || startOwedUnrecorded) || !attestsPreA15Upgrade(d) || owedRecording) return;
-  installWaitTimedOut = false;
-  await recordOwedMigration();
-}
-
-/** A16 review R3: record the attested upgrade as owed, then migrate. A store that refuses or does not answer is tried
- *  again a few times in this worker life — the browser's event lives only in its memory, and before this a start whose
- *  write failed left nothing behind, so the next start set the flag without reading and dialed the default while
- *  storage.local still named the self-hoster's server (that start now blocks instead: serverstate.ts). The first try is
- *  awaited (the install event's update check and autofill reconcile then see its pending server); retries are not. */
-async function recordOwedMigration(): Promise<void> {
-  owedRecording = true;
-  if (await recordOwedOnce()) {
-    owedRecording = false;
-    return;
-  }
-  void (async () => {
-    try {
-      for (const ms of OWED_RETRY_DELAYS_MS) {
-        await delay(ms);
-        if (await recordOwedOnce()) return;
-      }
-    } finally {
-      owedRecording = false;
-    }
-  })();
-}
-
-async function recordOwedOnce(): Promise<boolean> {
-  try {
-    await trusted.set({ [A15_OWED_KEY]: true }); // recorded BEFORE storage.local is read
-  } catch {
-    return false; // no store to record it in (yet): nothing migrates now (the store-unavailable case, trustmigrate.ts)
-  }
-  startOwedUnrecorded = false;
-  const outcome = await migrateTrustState(legacyLocal, trusted, async () => null);
-  await applyServerState(outcome, false);
-  await registerAutofillScripts();
-  return true; // recorded: a run cut short is finished at the next start (owed alone, no event needed)
-}
-
 // ---- quick-unlock Tier B engine (spec 01 §8.4) ----
 // The non-extractable co-key (breaker A1) persists in IndexedDB — a service worker CAN open IDB, and
-// IDB round-trips a non-extractable CryptoKey via structured clone without ever exposing its bytes.
-const IDB_NAME = "andvari-qu";
-const IDB_STORE = "cokey";
+// IDB round-trips a non-extractable CryptoKey via structured clone without ever exposing its bytes. (IDB_NAME and
+// IDB_STORE are declared above, beside the session seal: the first-launch wipe clears this database too.)
 const IDB_KEY = "k_nonexp";
 
 /** A15 review S1: bounded like the trusted store's opens (the same IndexedDB) — an open that never settles rejects,
@@ -708,7 +752,7 @@ function idbRun<T>(mode: IDBTransactionMode, fn: (store: IDBObjectStore) => IDBR
 // Both quick-unlock stores key by the CURRENT origin's namespace at CALL time (§4.2/B2-7): a
 // server switch leaves the old origin's record + co-key standing under its own keys — redeemable
 // again on return, bounded by the staleness ceiling — and every wipe-class event (sign-out,
-// exhausted attempts, policy-forbid) erases ONLY the origin it happened under.
+// exhausted attempts) erases ONLY the origin it happened under.
 const quCoKey: QuCoKey = {
   async generate() {
     const k = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, /* extractable */ false, ["encrypt", "decrypt"]);
@@ -737,51 +781,39 @@ const quCoKey: QuCoKey = {
  *  without waiting for the key. A write that was not kept (no key store, or a wipe landed first) throws, so an arm or a
  *  reserved attempt that did not reach storage fails closed. A16 review R1: a record read before the seal's key was
  *  replaced (a browser-start report) is never written back under the new key — an arm or a reserved attempt that read
- *  it before and writes after throws the same way; an enrollment's fresh record was never read, and is kept. */
-const quReadUnder = new WeakMap<object, number>();
-const quStore: QuStore = {
-  async read() {
-    const rec = ((await sessionSeal.get("quickUnlock", currentOriginKey)) as QuRecord | undefined) ?? null;
-    if (rec !== null && typeof rec === "object") quReadUnder.set(rec, sessionSeal.generation());
-    return rec;
-  },
-  async write(rec) {
-    const readUnder = quReadUnder.get(rec);
-    if (readUnder !== undefined && readUnder !== sessionSeal.generation()) throw new Error("the quick-unlock record was read under a replaced key");
-    if (!(await sessionSeal.set("quickUnlock", currentOriginKey, rec))) throw new Error("the quick-unlock record was not kept");
-  },
-  remove: () => sessionSeal.remove("quickUnlock", currentOriginKey),
-};
-
-/** §4.2 adoption one-shot: pre-namespacing builds kept this material under BARE keys. Move it into
- *  the CURRENT origin's namespace once — for every fielded install the current origin IS the new
- *  default, and the tailnet front + the public origin are two fronts of the SAME instance (§6.4),
- *  so the adopted quick-unlock blob/co-key stay redeemable. Idempotent + retried: the flag is
- *  stamped only after all moves succeed; a partial move re-runs and no-ops the already-moved keys.
- *  A15: the bare storage.local keys (the offer flag, the update channel) are no longer adopted — the A15 migration
- *  drops them — and the flag lives in the trusted store (a content script could reset a storage.local one). Without a
- *  trusted store the adoption simply runs again at each start; every step is idempotent. */
-const NS_ADOPTED_KEY = "nsAdoptedOnce";
-async function adoptLegacyNamespaceOnce(): Promise<void> {
-  try {
-    if ((await trustedGet(NS_ADOPTED_KEY)) === true) return;
-    // (A16: a bare pre-namespacing quick-unlock record in storage.session is no longer adopted — it is plaintext, and
-    // the seal's start sweep drops it. storage.session does not survive an update anyway.)
-    // IndexedDB: the non-extractable co-key moves to its per-origin record key.
-    try {
-      const k = await idbRun<CryptoKey | undefined>("readonly", (s) => s.get(IDB_KEY));
-      if (k) {
-        await idbRun<void>("readwrite", (s) => s.put(k, nsk(IDB_KEY)));
-        await idbRun<void>("readwrite", (s) => s.delete(IDB_KEY));
+ *  it before and writes after throws the same way; an enrollment's fresh record was never read, and is kept.
+ *  The same for a record REMOVED after it was read (a wipe — a disable, a sign-out, an exhausted counter —
+ *  landing while an arm, a re-stamp, a token change or a redeem's completion had it in hand) and for one read under
+ *  another server: the engine changes the record it read and writes it back, and before, that write put a wiped
+ *  record back (with its co-key gone), or wrote one server's record into another's slot. The write now throws, as
+ *  for a record that was not kept. */
+const quReadUnder = new WeakMap<object, { gen: number; originKey: string; removals: number }>();
+/** The store for the record of the server [originKeyOf] names when it is asked: the current one ([quStore]), or one fixed
+ *  server's (the client of a server switched away from: persistStaleTokens). */
+function quStoreAt(originKeyOf: () => string): QuStore {
+  return {
+    async read() {
+      const originKey = originKeyOf();
+      const removals = sessionSeal.removalCount("quickUnlock", originKey); // taken before the read: a removal during it counts
+      const rec = ((await sessionSeal.get("quickUnlock", originKey)) as QuRecord | undefined) ?? null;
+      if (rec !== null && typeof rec === "object") quReadUnder.set(rec, { gen: sessionSeal.generation(), originKey, removals });
+      return rec;
+    },
+    async write(rec) {
+      const originKey = originKeyOf();
+      const readUnder = quReadUnder.get(rec);
+      if (readUnder !== undefined) {
+        if (readUnder.gen !== sessionSeal.generation()) throw new Error("the quick-unlock record was read under a replaced key");
+        if (readUnder.originKey !== originKey) throw new Error("the quick-unlock record was read under another server");
+        if (sessionSeal.removalCount("quickUnlock", originKey) !== readUnder.removals) throw new Error("the quick-unlock record was removed after it was read");
       }
-    } catch {
-      /* IDB unavailable — a missing co-key reads as a corrupt blob at redeem and self-wipes */
-    }
-    await trusted.set({ [NS_ADOPTED_KEY]: true });
-  } catch {
-    /* best-effort: legacy keys + unset flag remain, so the next SW start retries the adoption */
-  }
+      if (!(await sessionSeal.set("quickUnlock", originKey, rec))) throw new Error("the quick-unlock record was not kept");
+    },
+    remove: () => sessionSeal.remove("quickUnlock", originKeyOf()),
+    removals: () => sessionSeal.removalCount("quickUnlock", originKeyOf()),
+  };
 }
+const quStore: QuStore = quStoreAt(() => currentOriginKey);
 
 /** One-shot enroll bench (breaker B8). Pure-JS Argon2id is ~linear in memBytes at fixed ops (and 64 MiB
  *  is multi-second), so a 4-candidate scan would cost ~15 s. Instead: measure ONE derive at the FLOOR
@@ -833,7 +865,7 @@ const EXTENSION_BASE = chrome.runtime.getURL("");
  *  cancelled — try again when you're ready." A capability that CANNOT work, reported forever as if
  *  the user had dismissed a prompt. The probe turns it into the honest bio_unsupported line, which
  *  also points at the PIN. Same literal as connector.ts's RP_ID: one origin, derived in both. */
-const BIO_RP_ORIGIN_PATTERN = `${DEFAULT_SERVER_URL}/*`;
+const BIO_RP_ORIGIN_PATTERN = `${PUBLIC_INSTANCE.origin}/*`;
 async function bioRpPermissionHeld(): Promise<boolean> {
   try {
     return await chrome.permissions.contains({ origins: [BIO_RP_ORIGIN_PATTERN] });
@@ -981,7 +1013,7 @@ async function clearBioCred(): Promise<void> {
   }
 }
 
-const quickUnlock = new QuickUnlock({
+const quDeps: QuDeps = {
   store: quStore,
   coKey: quCoKey,
   deriveKPin: (pin, params, salt) => deriveMasterKeyAsync(pin, params, salt),
@@ -989,11 +1021,37 @@ const quickUnlock = new QuickUnlock({
   benchPinParams,
   now: () => Date.now(),
   randomBytes: (n) => crypto.getRandomValues(new Uint8Array(n)),
-});
+};
+const quickUnlock = new QuickUnlock(quDeps);
 
-/** True only while a quick-unlock redeem is between its forced refresh and the session rebuild — the
- *  window where api token mutations must land in the locked-token stash, not the (absent) session. */
-let redeemInFlight = false;
+/** Set only while a quick-unlock redeem is between its forced refresh and the session rebuild — the
+ *  window where api token mutations must land in the locked-token stash, not the (absent) session.
+ *  It names the client the redeem runs on, not a flag for the whole worker. After a server
+ *  switch the old server's redeem may still be on the wire, and the flag routed the NEW client's token changes (a
+ *  password sign-in's refresh there) into the new server's record, which then held another account's pair. */
+let redeemClient: AndvariApi | null = null;
+/** Whose pair each client holds — set wherever a client is given a pair (a sign-in, a
+ *  redeem, a hydrated snapshot). A client the server was switched away from keeps its pair to its own server's record
+ *  only where that record is the same account's (persistStaleTokens). */
+const pairUser = new WeakMap<AndvariApi, string>();
+/** The open session whose quick-unlock record still holds a token stash, because the
+ *  write that clears it at the unlock failed (a redeem's update, a sign-in's re-stamp). That pair is live while the
+ *  vault is open, against the record's rule (null while unlocked), and it goes stale at the session's next refresh: a
+ *  worker that then stops with no snapshot would come back with a record armed on a spent token, whose PIN unlock
+ *  would present it to the server. The clear is tried again at every token change of that session (before the old
+ *  refresh token is spent: the change is persisted before the refresh is sent) and after every sync. */
+let stashOwed: Session | null = null;
+
+/** Clears the stash [s]'s record still holds (see [stashOwed]); never throws. Only while [s] is the session in front
+ *  (a lock arms the record itself), only a stash (never arms one) and only the same account's record. */
+async function clearOwedStash(s: Session): Promise<void> {
+  try {
+    await quickUnlock.setLockedTokens({ access: null, refresh: null }, { onlyIfStashed: true, forUser: s.userId, stillCurrent: () => session === s });
+    if (stashOwed === s && session === s) stashOwed = null;
+  } catch {
+    /* still owed: tried again at the next token change or sync */
+  }
+}
 /** Single-flight for the quick-unlock redeem (mirrors AndvariApi.refreshInFlight) — two racing popups
  *  submitting a PIN must not each start a redeem and double-spend the attempt counter (breaker A5⊕B4). */
 let pinUnlockInFlight: Promise<Res<"unlockWithPin">> | null = null;
@@ -1011,7 +1069,7 @@ let bioUnlockInFlight: Promise<Res<"unlockWithBio">> | null = null;
  *  evicted (popup closed >~30 s while grabbing the code), it's gone → status reports no challenge →
  *  the popup shows the full form → a fresh sign-in. Origin-bound + 5-min fused; every read re-checks. */
 const PENDING_TOTP_TTL_MS = 5 * 60 * 1000;
-let pendingTotp: { origin: string; email: string; authKey: Uint8Array; wrapKey: Uint8Array; expiresAt: number } | null = null;
+let pendingTotp: { origin: string; email: string; authKey: Uint8Array; wrapKey: Uint8Array; device: { rec: DeviceRecord; key: string | null }; replaces: string | null; expiresAt: number } | null = null;
 let totpUnlockInFlight: Promise<Res<"unlockTotp">> | null = null;
 /** Read the live challenge, dropping it if it has expired or the server was switched under it (the
  *  §4.1 origin guard, applied at READ like ensureLoaded does for the session snapshot). */
@@ -1027,18 +1085,54 @@ function clearPendingTotp(): void {
 /** owns() generation (breaker A5⊕B4): bumped by every lock / sign-out / full unlock. A redeem that
  *  reads a different value after its async KDF/network discards itself rather than clobber new state. */
 let redeemGen = 0;
-/** Bumped whenever a sign-in, a redeem or a snapshot restore puts its own pair into the module `api`: one that gives
- *  way clears the api's pair only while it is still its own (another that set its pair since owns it). */
-let tokenOwner = 0;
 
 /** onTokensChanged custodian. Unlocked → the full SessionSnapshot. Mid-redeem (session still null) →
  *  the quick-unlock locked-token stash (breaker A5/AM1). Otherwise (locked, not redeeming) → nothing:
  *  there is no live session to attach a stray mutation to. */
 function persistTokens(): Promise<void> {
+  if (session && stashOwed === session) return Promise.all([persistSession(), clearOwedStash(session)]).then(() => {});
   if (session) return persistSession();
-  if (redeemInFlight) return quickUnlock.setLockedTokens(api.getTokens());
+  if (redeemClient !== null && redeemClient === api) return quickUnlock.setLockedTokens(api.getTokens());
   return Promise.resolve();
 }
+
+/** A token change from a client that is no longer the current one — the server was switched while its
+ *  refresh was on the wire (a quick unlock's, say). Before, it went through persistTokens, which reads the CURRENT
+ *  client's pair into the CURRENT server's record: the new server's armed record took the new client's empty pair (and
+ *  was disarmed), while the old server's kept the pair the refresh had just spent, so its next quick unlock was refused
+ *  and wiped. Now the client's own pair goes to its own server's record, and only where that record holds a stash (it
+ *  is locked-armed: never arms one), and never while that server is the current one again (its current client is in
+ *  charge there). A write that fails leaves the old server's record as it was before this fix: its next quick unlock is
+ *  refused as a session that ended and sends the person to the master password, which is where this failure shows. */
+function persistStaleTokens(a: AndvariApi, originKey: string): Promise<void> {
+  if (originKey === currentOriginKey) return Promise.resolve();
+  // And only into a record of the account whose pair the client holds. A password sign-in of
+  // another account at that server, left behind by the switch, refreshed its pair into the record of the account whose
+  // quick unlock was armed there, and that account's PIN then opened nothing (or spent the other account's token).
+  const forUser = pairUser.get(a);
+  if (forUser === undefined) return Promise.resolve();
+  const atOrigin = new QuickUnlock({ ...quDeps, store: quStoreAt(() => originKey) });
+  return atOrigin.setLockedTokens(a.getTokens(), { onlyIfStashed: true, forUser }).catch(() => {});
+}
+/**
+ * A lock waits for a refresh on the wire at most LOCK_STORE_WAIT_MS, and past that it
+ * arms the record on the consumed pair (no refresh token) and clears the client, so the refresh's answer was dropped and
+ * the next quick unlock, holding no refresh token, was taken for a revoked session and wiped. Now the answer follows the
+ * record: the client hands it here (AndvariApi.onLateRefresh), and it replaces exactly the stash armed on that consumed
+ * pair, of the same account, at the client's own server; the next quick unlock waits for it (lockRefreshSettled). Never
+ * throws.
+ */
+async function followLateRefresh(a: AndvariApi, originKey: string, consumed: string, pair: { access: string; refresh: string | null }): Promise<void> {
+  const forUser = pairUser.get(a);
+  if (forUser === undefined) return;
+  const atOrigin = originKey === currentOriginKey ? quickUnlock : new QuickUnlock({ ...quDeps, store: quStoreAt(() => originKey) });
+  await atOrigin.setLockedTokens(pair, { onlyIfStashed: true, forUser, replacingConsumed: consumed }).catch(() => {});
+}
+/** The refresh a lock stopped waiting for (settled at once when there was none): a quick unlock waits for it, bounded by
+ *  REDEEM_FOLLOWS_REFRESH_MS, before it reads the record. */
+let lockRefreshSettled: Promise<void> = Promise.resolve();
+const REDEEM_FOLLOWS_REFRESH_MS = 15_000;
+
 // ---- one-time per SW life; listeners MUST register synchronously (MV3 wake requirement) ----
 
 /**
@@ -1104,9 +1198,13 @@ try {
 atLoad("runtime.onMessage", () => chrome.runtime.onMessage.addListener((msg: Req, sender, sendResponse) => {
   // 0.17.0 biometric connector RPC — a PRIVATE protocol (not part of Req), handled before the normal
   // dispatch and gated on a same-extension connector-page sender inside handleBioConnector.
+  // A session past the lock's deadline is locked before anything here is served (handle() checks it again
+  // after the load, for a worker that has just restored one).
+  const due = lockIfDue();
   const bio = msg as unknown as { __bio?: unknown };
   if (bio && typeof bio.__bio === "string") {
-    handleBioConnector(bio as { __bio: string } & Record<string, unknown>, sender)
+    due
+      .then(() => handleBioConnector(bio as { __bio: string } & Record<string, unknown>, sender))
       .then(sendResponse)
       .catch((e: unknown) => sendResponse({ error: String(e) }));
     return true;
@@ -1116,7 +1214,7 @@ atLoad("runtime.onMessage", () => chrome.runtime.onMessage.addListener((msg: Req
     sendResponse(senderMaySend("serverDiag", sender, EXTENSION_BASE) ? serverDiag() : null);
     return false;
   }
-  handle(msg, withPageOrigin(sender))
+  handle(msg, withPageOrigin(sender), due)
     .then(sendResponse)
     .catch((e: unknown) => sendResponse({ ok: false, error: String(e) }));
   return true; // keep the channel open for the async response
@@ -1145,12 +1243,16 @@ function withPageOrigin(sender: chrome.runtime.MessageSender): chrome.runtime.Me
 }
 
 atLoad("alarms.onAlarm", () => chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "autolock") void doLock("idle");
+  // Every way in checks the lock's deadline first (lockIfDue); the auto-lock alarm is one lock with it.
+  if (alarm.name === "autolock") void idleLock();
   else if (alarm.name === "resync") {
     void resync(); // the ≤5-min staleness floor…
     void ensureSocket(true); // …and the guaranteed live-socket revival after SW death (T3)
-  } else if (alarm.name === UPDATE_ALARM) void checkForUpdate();
-  else if (alarm.name === CLIPBOARD_CLEAR_ALARM) void clearClipboardBackstop();
+  } else {
+    void lockIfDue(); // the other alarms serve no vault content, but a worker woken by one locks a session past its time
+    if (alarm.name === UPDATE_ALARM) void checkForUpdate();
+    else if (alarm.name === CLIPBOARD_CLEAR_ALARM) void clearClipboardBackstop();
+  }
 }));
 
 // The self-update check runs on its OWN daily schedule, independent of lock state (it reads only
@@ -1158,17 +1260,12 @@ atLoad("alarms.onAlarm", () => chrome.alarms.onAlarm.addListener((alarm) => {
 // re-checks against the NEW installed version and so clears a now-satisfied signal immediately.
 // Both hooks also reconcile the dynamic autofill registration (B2-5) — install/update is exactly
 // when a stale or missing registration is most likely.
-atLoad("runtime.onInstalled", () => chrome.runtime.onInstalled.addListener((details) => {
+atLoad("runtime.onInstalled", () => chrome.runtime.onInstalled.addListener(() => {
   // A16 review R1: an install, update, reload or browser update — storage.session is the browser's fresh one.
   browserSessionReported();
-  // A15 review F2: the browser's own word on whether this start follows an upgrade from a pre-A15 build — the ONLY
-  // thing that lets the one-time migration read storage.local (trustmigrate.ts). Worker start is waiting for it.
-  const sig: InstallSignal = { reason: String(details.reason), previousVersion: details.previousVersion };
-  installSignalSeen(sig);
-  // A late attesting event migrates first, so the forced update check and the reconcile below see its pending server.
-  const late = serverReady.then(() => lateInstallSignal(sig)).catch(() => {});
-  void late.then(() => checkForUpdate(true));
-  void late.then(registerAutofillScripts);
+  const ready = serverReady.catch(() => {});
+  void ready.then(() => checkForUpdate(true));
+  void ready.then(registerAutofillScripts);
 }));
 atLoad("runtime.onStartup", () => chrome.runtime.onStartup.addListener(() => {
   browserSessionReported(); // A16 review R1: a browser start — storage.session is the browser's fresh one
@@ -1221,13 +1318,15 @@ async function reconcileAutofillScripts(): Promise<void> {
   // The dialed origin, the shipped default, and (A15 review F1) a pending server awaiting its confirm. Null = fail
   // CLOSED to "no autofill anywhere" rather than inject into a vault UI we failed to exclude: an origin that cannot be
   // expressed as a match pattern (an IPv6-literal host), or a store that did not answer (the vault origin is unknown).
-  const excludeMatches = autofillExcludeMatches(serverUrl, dialBlock);
+  const excludeMatches = autofillExcludeMatches(serverUrl, dialBlock, PUBLIC_INSTANCE.origin);
   if (excludeMatches === null) {
     await unregisterAutofillScripts();
     return;
   }
   const desired: chrome.scripting.RegisteredContentScript = {
     id: AUTOFILL_SCRIPT_ID,
+    // Plain http included on purpose (loopback, intranet boxes): the browser injects only where a host permission is
+    // held, and on a plain-http page only an address saved as http matches (F4, spec 05 autofill (e); grantflow.ts).
     matches: ["http://*/*", "https://*/*"],
     excludeMatches,
     js: ["content.js"],
@@ -1282,50 +1381,522 @@ try {
 let switchChain: Promise<void> = Promise.resolve();
 
 /**
- * A15: commit a server origin (the options page's Trust-Gate Connect). Canonicalize (anything that is not a plain
- * http(s) origin is refused), persist to the trusted store FIRST — a choice that cannot be kept (no IndexedDB: Firefox
- * private browsing) changes nothing — then retire the pre-A15 suggestion and run the origin-clean switch on the chain,
- * answering only once it applied, so the page's next serverInfo shows the new origin.
+ * Safari only: commit the andvari app's server origin (adoptAppAnswer). The app ran its own Trust Gate and card checks,
+ * and the Safari extension inherits them through the app's snapshot (design §12.2), so no pin is made here.
+ * Canonicalize, persist to the trusted store FIRST — a choice that cannot be kept changes nothing — then run the
+ * origin-clean switch on the chain, answering only once it applied.
  */
-async function commitServerUrl(raw: unknown): Promise<Res<"setServerUrl">> {
+async function commitServerUrl(raw: unknown): Promise<{ ok: boolean; url?: string; code?: "invalid" | "storage" }> {
   const canonical = typeof raw === "string" ? canonicalizeServerUrl(raw) : null;
-  if (canonical === null) return { ok: false, code: "invalid" };
+  if (canonical === null || canonical === NO_SERVER_ORIGIN) return { ok: false, code: "invalid" };
   try {
     await setServerUrl(canonical, trusted);
   } catch {
     return { ok: false, code: "storage" };
   }
-  await trusted.remove([LEGACY_SERVER_KEY, UNATTESTED_SERVER_KEY]).catch(() => {}); // a server is chosen: no suggestion, no unattested block
   trustedStoreOk = true;
   switchChain = switchChain.then(() => applyServerChange(canonical)).catch(() => {});
   await switchChain;
-  // A15 review F1: the user confirmed a server through the gate and it is kept, so a pending one no longer blocks —
-  // lifted only once the switch took effect (an unlock that slipped in earlier would have gone to the old api's origin);
-  // a switch that did not apply leaves the server unknown in this worker life (the store names the new one at the next).
+  // Lifted only once the switch took effect; a switch that did not apply leaves the server unknown in this worker life.
   if (serverUrl === canonical) dialBlock = null;
   else if (dialBlock !== null) dialBlock = { kind: "unsettled" };
-  await registerAutofillScripts(); // a pending origin's exclusion goes (the switch re-registers only on a change)
+  await registerAutofillScripts();
   return { ok: true, url: canonical };
 }
 
-/** Safari: the worker's origin is the build's placeholder, so no server has been chosen (the app has named none yet). */
+/** No server has been chosen: the worker holds the never-resolving placeholder (serverurl.ts). */
 function noServerChosen(): boolean {
-  return BUILD_TARGET === "safari" && serverUrl === DEFAULT_SERVER_URL;
+  return serverUrl === NO_SERVER_ORIGIN;
 }
 
-/** A15: what the pages show — the origin this worker's api is built for (what is in effect, not a store read), whether
- *  a server choice can be kept here at all, and (A15 review F1) a block: while one stands, no server is dialed. */
+/** What the pages show — the origin this worker's api is built for (what is in effect, not a store read), whether a
+ *  server choice can be kept here at all, and a block: while one stands, no server is dialed. */
 function serverInfo(): Res<"serverInfo"> {
-  return { url: serverUrl, trustedStore: trustedStoreOk, block: dialBlock };
+  return { url: noServerChosen() ? "" : serverUrl, trustedStore: trustedStoreOk, block: dialBlock, name: currentPin === null ? null : nameText(currentPin.pin.name) };
 }
 
-/** A15 review F1: "Not mine" — drop the pending server and lift the block; the default is then the server. */
-async function forgetLegacyServer(): Promise<Res<"forgetLegacyServer">> {
-  if (!(await forgetPendingServer(dialBlock, trusted, legacyLocal))) return { ok: false };
-  // Safari has no default to fall back to: the server stays unknown until the app names one.
-  dialBlock = noServerChosen() ? { kind: "unsettled" } : null;
+// ---- the server choice and its card pin (design 2026-11-15 §4.4, §12.2 rule 3, §12.3) ----
+
+const pinKeyFor = (origin: string): string => nsKey(originKeyFor(origin), PIN_KEY);
+const clientHeader = (): string => `extension/${chrome.runtime.getManifest().version}`;
+
+/** The stored pin for [origin], or null when the trusted store cannot be read (never "no pin"). */
+async function readPin(origin: string): Promise<ReturnType<typeof decodeStoredPin> | null> {
+  const k = pinKeyFor(origin);
+  try {
+    return decodeStoredPin((await trusted.get(k))[k], origin);
+  } catch {
+    return null;
+  }
+}
+
+/** The Trust Gate's verified candidate for a typed origin, in memory only, until the person connects or goes. */
+let gateCandidate: { origin: string; record: StoredPin; at: number } | null = null;
+const GATE_TTL_MS = 10 * 60_000;
+/** The last refresh found the chain ending below the pin (a state, shown; not a stop). Memory only. */
+let cardWithheld = false;
+/** The last refresh of the current origin found a chain that does not verify forward from the pin (a card after it with
+ *  a bad signer or signature, a broken link). Not a stop: the pin stays at the last card checked, and the popup says so
+ *  (before, a session's refresh swallowed this and nothing reached the popup). */
+let cardInvalid = false;
+/** "Not now" at a `kind` change (approved wording, entry 10): the notice for this card at this origin stays closed until
+ *  the next unlock, and the old `kind` stays in force. Memory only: a worker restart shows the notice again, which is the
+ *  side to err on. */
+let kindDeferred: { origin: string; hash: string } | null = null;
+
+/** Asked with the same match pattern the popup requests and autofill excludes
+ *  (serverurl.ts originMatchPattern, no port): Firefox match patterns cannot carry a port, so a pattern with one never
+ *  matched there and a server on a non-default port always answered `no_permission`. Not run in Firefox. */
+async function hostPermitted(origin: string): Promise<boolean> {
+  const pattern = originMatchPattern(origin);
+  if (pattern === null) return false;
+  try {
+    return await chrome.permissions.contains({ origins: [pattern] });
+  } catch {
+    return false;
+  }
+}
+
+/** Fetch [origin]'s chain and verify it whole, for a FIRST pin: a chain longer than MAX_FIRST_PIN_CARDS is refused
+ *  before anything is verified (one long chain froze the worker for ~19 s). */
+async function servedCards(origin: string): Promise<{ ok: true; cards: readonly Card[] } | { ok: false; code: "unavailable" | "card_invalid" | "chain_too_long" } | { ok: false; code: "redirected"; to: string | null }> {
+  const fetched = await fetchInstanceChain(origin, clientHeader());
+  if (!fetched.ok) return fetched;
+  if (fetched.frames.length > MAX_FIRST_PIN_CARDS) return { ok: false, code: "chain_too_long" };
+  const chain = verifyChain(fetched.frames);
+  return chain.ok ? { ok: true, cards: chain.cards } : { ok: false, code: "card_invalid" };
+}
+
+/** Fetch [origin]'s chain and verify it forward from [stored]'s pin: the prefix by hash, then only the cards
+ *  after the pin. A refresh's verdict, or why there is none. */
+async function servedAgainstPin(origin: string, stored: StoredPin): Promise<{ ok: true; refreshed: ReturnType<typeof refreshPinForward> } | { ok: false; code: "unavailable" | "card_invalid" } | { ok: false; code: "redirected"; to: string | null }> {
+  const fetched = await fetchInstanceChain(origin, clientHeader());
+  if (!fetched.ok) return fetched;
+  const fwd = verifyForward(fetched.frames, stored.pin);
+  return fwd.ok ? { ok: true, refreshed: refreshPinForward(stored, fwd) } : { ok: false, code: "card_invalid" };
+}
+
+/** A chain that could not be had, as `chooseServer` answers it: a redirect carries where it points, when that is known. */
+function refusedServe(r: { code: "unavailable" | "card_invalid" | "chain_too_long" } | { code: "redirected"; to: string | null }): Res<"chooseServer"> {
+  if (r.code === "redirected") return r.to === null ? { ok: false, code: "redirected" } : { ok: false, code: "redirected", redirectTo: r.to };
+  return { ok: false, code: r.code };
+}
+
+/** Make [origin] the server, with its stored pin [stored] already written: persist the choice, switch, lift the block. */
+async function switchToPinned(origin: string, stored: StoredPin): Promise<Res<"confirmServer">> {
+  try {
+    await setServerUrl(origin, trusted);
+  } catch {
+    return { ok: false, code: "storage" };
+  }
+  switchChain = switchChain.then(() => applyServerChange(origin)).catch(() => {});
+  await switchChain;
+  if (serverUrl !== origin) return { ok: false, code: "storage" };
+  currentPin = stored;
+  cardWithheld = false;
+  cardInvalid = false;
+  dialBlock = stored.fork ? { kind: "fork", origin } : null;
+  await registerAutofillScripts();
+  await refuseHeldOperator(); // §12.2 rule 7: a refreshed or followed card may name this account the operator
+  return { ok: true, url: origin };
+}
+
+/**
+ * The first popup's two choices (§12.2): "andvari" pins the baked public instance from its `card0Hash`; "Your own
+ * server" verifies the typed origin's chain and returns the Trust Gate's card line. A server this device already pinned
+ * is refreshed against that pin and never re-pinned (a root never replaces an existing pin, §4.4). The public origin
+ * typed by hand takes the baked root too. Nothing is sent but the unauthenticated `GET /instance`.
+ */
+async function chooseServer(msg: Extract<Req, { type: "chooseServer" }>): Promise<Res<"chooseServer">> {
+  if (BUILD_TARGET === "safari") return { ok: false, code: "not_allowed" };
+  await serverReady;
+  if (!trustedStoreOk) return { ok: false, code: "storage" };
+  const origin = msg.choice === "public" ? PUBLIC_INSTANCE.origin : canonicalizeServerUrl(typeof msg.origin === "string" ? msg.origin : "");
+  if (origin === null || origin === NO_SERVER_ORIGIN) return { ok: false, code: "invalid" };
+  // A test build knows no card 0 of the test server (publicinstance.ts): its "andvari" choice is refused as a build
+  // without the public instance's card 0 refuses it, and the test server typed as one's own goes through the Trust Gate.
+  const baked = (typeof __ANDVARI_TEST_SERVER__ !== "string" || msg.choice === "public") && origin === PUBLIC_INSTANCE.origin;
+  const root = baked ? bakedRoot() : ({ root: "typed" } as const);
+  if (root === null) return { ok: false, code: "no_public_instance" };
+  if (!(await hostPermitted(origin))) return { ok: false, code: "no_permission" };
+  const existing = await readPin(origin);
+  if (existing === null) return { ok: false, code: "storage" };
+  if (existing.kind === "damaged") return { ok: false, code: "pin_damaged" };
+  if (existing.kind === "pin" && existing.stored.fork) return { ok: false, code: "fork" };
+  if (existing.kind === "pin") {
+    const served = await servedAgainstPin(origin, existing.stored);
+    if (!served.ok) return refusedServe(served);
+    const r = served.refreshed;
+    if (r.verdict === "fork") {
+      // The one fork routine: re-choosing the current server stops it at once, like a refresh does.
+      await recordFork(origin, existing.stored, r.stored);
+      return { ok: false, code: "fork" };
+    }
+    try {
+      await trusted.set({ [pinKeyFor(origin)]: r.stored });
+    } catch {
+      return { ok: false, code: "storage" };
+    }
+    const out = await switchToPinned(origin, r.stored);
+    cardWithheld = r.verdict === "withheld";
+    return out;
+  }
+  const served = await servedCards(origin);
+  if (!served.ok) return refusedServe(served);
+  const first = firstPin(served.cards, root, origin);
+  // Entry 8's wording names both addresses: the one dialed, and the one the newest card of the chain that just verified
+  // names (never one from the page or an unverified answer).
+  if (first.verdict === "origin_mismatch") return { ok: false, code: "origin_mismatch", mismatch: { dialed: origin, named: first.cardOrigin } };
+  if (first.verdict !== "ok") return { ok: false, code: first.verdict };
+  if (root.root === "baked") {
+    // Store builds never follow a kind change of the baked public instance (§4.4), not even into a first pin.
+    if (first.pin.kind !== PUBLIC_INSTANCE.kind) return { ok: false, code: "changed" };
+    const stored = newStoredPin("baked", first.pin);
+    try {
+      await trusted.set({ [pinKeyFor(origin)]: stored });
+    } catch {
+      return { ok: false, code: "storage" };
+    }
+    return switchToPinned(origin, stored);
+  }
+  gateCandidate = { origin, record: newStoredPin("typed", first.pin), at: Date.now() };
+  return {
+    ok: true,
+    gate: {
+      origin,
+      name: nameText(first.pin.name) ?? "",
+      operatorShortFp: operatorShortFp(first.pin.operatorSignKey),
+      hash: first.pin.hash,
+      switching: !noServerChosen(),
+    },
+  };
+}
+
+/** The Trust Gate's Connect (§4.4 typed-address root): keep the candidate the gate showed, named by its card hash. */
+async function confirmServer(msg: Extract<Req, { type: "confirmServer" }>): Promise<Res<"confirmServer">> {
+  if (BUILD_TARGET === "safari") return { ok: false, code: "not_allowed" };
+  const c = gateCandidate;
+  if (c === null || c.origin !== msg.origin || c.record.pin.hash !== msg.hash || Date.now() - c.at > GATE_TTL_MS) return { ok: false, code: "stale" };
+  gateCandidate = null;
+  const existing = await readPin(c.origin);
+  if (existing === null) return { ok: false, code: "storage" };
+  if (existing.kind !== "none") return { ok: false, code: "stale" }; // a pin appeared meanwhile: choose again (refresh, never replace)
+  try {
+    await trusted.set({ [pinKeyFor(c.origin)]: c.record });
+  } catch {
+    return { ok: false, code: "storage" };
+  }
+  return switchToPinned(c.origin, c.record);
+}
+
+/** "Forget this server" (§12.3): remove the current server's pin and data, and choose none. The way out of a fork.
+ *  The remembered email goes too (decided on 2026-11-16): after it, nothing in the browser names the account.
+ *  It is one key for the whole browser, not one per server, so it goes whichever account it names; a sign-out keeps it
+ *  (spec 05 A15 (c), a kept convenience). */
+async function forgetServer(): Promise<Res<"forgetServer">> {
+  if (BUILD_TARGET === "safari") return { ok: false };
+  await serverReady;
+  if (noServerChosen()) return { ok: true };
+  const originKey = currentOriginKey;
+  // A sign-in or a quick unlock in flight is left from here, before the first removal is
+  // dispatched, not only from the switch below: one answered while the removal is under way would otherwise pass its
+  // generation checks and write the device record or the remembered email back after it.
+  redeemGen++;
+  try {
+    await trusted.remove([SERVER_URL_KEY, LAST_EMAIL_KEY]);
+  } catch {
+    return { ok: false };
+  }
+  switchChain = switchChain.then(() => applyServerChange(NO_SERVER_ORIGIN)).catch(() => {});
+  await switchChain;
+  await purgeOriginNamespace(originKey).catch(() => {});
+  currentPin = null;
+  cardWithheld = false;
+  cardInvalid = false;
+  dialBlock = { kind: "no_server" };
   await registerAutofillScripts();
   return { ok: true };
+}
+
+/** The person confirmed the pending move or `kind` change of a non-baked instance (§4.4). */
+async function followServerChange(msg: Extract<Req, { type: "followServerChange" }>): Promise<Res<"followServerChange">> {
+  if (BUILD_TARGET === "safari") return { ok: false, code: "not_allowed" };
+  const stored = currentPin;
+  const origin = serverUrl;
+  if (stored === null || dialBlock !== null || stored.pending === null || stored.pending.card.hash !== msg.hash) return { ok: false, code: "none" };
+  if (stored.pending.change === "kind") {
+    const next = confirmKindChange(stored);
+    if (next === null) return { ok: false, code: "none" };
+    try {
+      await trusted.set({ [pinKeyFor(origin)]: next });
+    } catch {
+      return { ok: false, code: "storage" };
+    }
+    currentPin = next;
+    await refuseHeldOperator(); // §12.2 rule 7
+    // §4.4: a card that also moved leaves the pin at its card with the accepted kind; the move is its own prompt, so
+    // re-judge the served chain now rather than at the next refresh (CardTrust.kt acceptKindChange). Its failures are
+    // the refresh's own (a fork blocks and locks there); the accepted kind stands either way.
+    if (next.pin.hash !== stored.pending.card.hash) await ensureCardFresh().catch(() => {});
+    return { ok: true, url: origin };
+  }
+  const moved = confirmMove(stored);
+  if (moved === null) return { ok: false, code: "none" };
+  // §4.4: the target is checked before either pin is touched — its origin grammar (a card's origin passed the
+  // statement grammar, but the placeholder origin must never become a server), that a pin can be kept for it (a store,
+  // and no pin there already: a move never replaces one, `pin_conflict`), and the host permission.
+  if (canonicalizeServerUrl(moved.origin) !== moved.origin || moved.origin === NO_SERVER_ORIGIN) return { ok: false, code: "invalid" };
+  if (!trustedStoreOk) return { ok: false, code: "storage" };
+  const there = await readPin(moved.origin);
+  if (there === null) return { ok: false, code: "storage" };
+  if (there.kind !== "none") return { ok: false, code: "pin_conflict" };
+  if (!(await hostPermitted(moved.origin))) return { ok: false, code: "no_permission" };
+  // §4.4 "A namespace's trust records move with its pin": the marks, vault records, homes, device records and the rest
+  // go to the new namespace with the new pin, in one write; the choice follows; the old namespace goes last, once the
+  // switch took. A failure before the choice is kept takes the copy back, so the old origin stays as it was.
+  const fromKey = currentOriginKey;
+  let written: string[];
+  try {
+    written = await moveNamespaceRecords(trusted, fromKey, originKeyFor(moved.origin), { [pinKeyFor(moved.origin)]: moved.stored });
+  } catch {
+    return { ok: false, code: "storage" };
+  }
+  try {
+    await setServerUrl(moved.origin, trusted);
+  } catch {
+    await trusted.remove(written).catch(() => {});
+    return { ok: false, code: "storage" };
+  }
+  const out = await switchToPinned(moved.origin, moved.stored);
+  if (out.ok) await purgeOriginNamespace(fromKey).catch(() => {});
+  return out;
+}
+
+/** "Not now" at the `kind` change notice (entry 10; §4.4 "until the person confirms, the client keeps using the old
+ *  kind"): the notice for that pending card closes until the next unlock. Nothing is written; the pin is untouched. */
+function deferServerChange(msg: Extract<Req, { type: "deferServerChange" }>): Res<"deferServerChange"> {
+  if (BUILD_TARGET === "safari") return { ok: false };
+  const p = currentPin;
+  if (p === null || dialBlock !== null || p.pending?.change !== "kind" || p.pending.card.hash !== msg.hash) return { ok: false };
+  kindDeferred = { origin: serverUrl, hash: msg.hash };
+  return { ok: true };
+}
+
+/** The plain storage.session marker of a fork seen at [origin] (sessionseal.ts `forkSeen`). */
+const forkMarkKey = (origin: string): string => nsKey(originKeyFor(origin), "forkSeen");
+/** Waits between the tries of a fork's durable write. */
+const FORK_WRITE_RETRY_MS = [0, 250, 1000] as const;
+
+/**
+ * Design §4.4: the ONE routine for a fork, wherever one is seen (a refresh, re-choosing a
+ * server). It stops all traffic to the origin at once when it is the current one — the block (every api call refuses,
+ * makeApi), the socket, any sign-in or redeem in flight — and keeps the fork durably: the pin record with `fork` set,
+ * with a retried write, and a storage.session marker that keeps the origin stopped across worker restarts in this
+ * browser session should every try fail. It does not lock: a fork stops traffic, not reading (§4.4), so what this
+ * browser already holds stays readable; nothing is written (putItem) and nothing from the origin is accepted (resync).
+ */
+async function recordFork(origin: string, judged: StoredPin, forked: StoredPin): Promise<void> {
+  // The mark is compare-and-set. It is written only while the pin that was
+  // judged is still the one held — in memory for the current origin, and in the store before every try — so a judgement
+  // that comes back late (a refresh or a re-choice whose fetch waited across "Forget this server" and a new Trust Gate,
+  // or a retried write after a Forget) never replaces a newer pin, nor brings a forgotten one back.
+  if (origin === serverUrl && !samePinPosition(currentPin, judged)) return;
+  if (origin === serverUrl) {
+    currentPin = forked;
+    dialBlock = { kind: "fork", origin };
+    cardWithheld = false;
+    events?.close();
+    events = null;
+    redeemGen++; // a sign-in or quick redeem in flight sends nothing more and installs nothing
+    clearPendingTotp();
+  }
+  const kFork = forkMarkKey(origin);
+  await plainSession.set({ [kFork]: true }).catch(() => {});
+  for (const wait of FORK_WRITE_RETRY_MS) {
+    if (wait > 0) await delay(wait);
+    if (origin === serverUrl && currentPin !== forked) return; // a newer pin, or none (Forget), since: write nothing
+    const held = await readPin(origin);
+    if (held === null) continue; // the store did not answer: tried again below
+    if (held.kind !== "pin" || !samePinPosition(held.stored, judged)) return; // the store holds a newer pin, or none
+    try {
+      await trusted.set({ [pinKeyFor(origin)]: forked });
+      return;
+    } catch {
+      /* tried again below */
+    }
+  }
+  console.warn("andvari: a fork could not be stored; it holds for this browser session only");
+}
+
+/** Whether [a] is the pin [b] at the same card of the same chain (a fork mark or a pending change aside). */
+function samePinPosition(a: StoredPin | null, b: StoredPin): boolean {
+  return a !== null && a.pin.card0Hash === b.pin.card0Hash && a.pin.seq === b.pin.seq && a.pin.hash === b.pin.hash && a.pin.origin === b.pin.origin;
+}
+
+/** At worker start: a fork this browser session saw at [origin] whose durable write never landed (recordFork). */
+async function forkMarked(origin: string): Promise<boolean> {
+  try {
+    return (await plainSession.get(forkMarkKey(origin)))[forkMarkKey(origin)] === true;
+  } catch {
+    return false;
+  }
+}
+
+/** Thrown before anything password-derived leaves when the card check stops a sign-in (§4.4). */
+class CardStopError extends Error {
+  readonly code: "server_fork" | "card_invalid" | "confirm_server";
+  constructor(code: "server_fork" | "card_invalid" | "confirm_server") {
+    super(code);
+    this.code = code;
+    this.name = "CardStopError";
+  }
+}
+
+/**
+ * "On every policy probe or sync" (§4.4): fetch the chain and verify it forward from the pin. A fork is stored (durable),
+ * blocks the origin and locks any session; a withheld chain is a state; a rename, handover or rotation advances the pin;
+ * a move or kind change waits for the person (or, for the baked instance, is never followed). Throws [CardStopError] for
+ * a stop and a TypeError (network) when the chain cannot be fetched; resync swallows both, a sign-in does not.
+ */
+async function ensureCardFresh(): Promise<void> {
+  if (BUILD_TARGET === "safari") return;
+  await serverReady;
+  const origin = serverUrl;
+  const stored = currentPin;
+  if (dialBlock !== null || stored === null) throw new CardStopError(dialBlock?.kind === "fork" ? "server_fork" : "confirm_server");
+  const served = await servedAgainstPin(origin, stored);
+  if (!served.ok) {
+    if (served.code === "card_invalid") {
+      if (serverUrl === origin && currentPin === stored) cardInvalid = true;
+      throw new CardStopError("card_invalid");
+    }
+    throw new TypeError("the server's identity card could not be fetched");
+  }
+  if (serverUrl !== origin || currentPin !== stored) throw new CardStopError("confirm_server"); // switched meanwhile
+  cardInvalid = false;
+  const r = served.refreshed;
+  if (r.verdict === "fork") {
+    await recordFork(origin, stored, r.stored); // blocks and stops traffic; the session stays readable (§4.4)
+    throw new CardStopError("server_fork");
+  }
+  if (r.stored !== stored) {
+    currentPin = r.stored;
+    await trusted.set({ [pinKeyFor(origin)]: r.stored }).catch(() => {}); // an advance not kept is re-derived next time
+  }
+  cardWithheld = r.verdict === "withheld";
+  await refuseHeldOperator(); // §12.2 rule 7: at every card refresh, not only at unlock
+}
+
+/**
+ * §12.2 rule 7: whether the newest verified card this browser holds for the current origin names [userId] as the
+ * instance's operator. That is the pin, or a verified move or `kind` change still waiting for the person (it is the
+ * newest verified card too, and a handover can ride on it). A forked record is not read: nothing on it is trusted.
+ */
+function cardNamesOperator(userId: string): boolean {
+  const p = currentPin;
+  if (p === null || p.fork) return false;
+  return p.pin.operator === userId || p.pending?.card.operator === userId;
+}
+
+/**
+ * §12.2 rule 7, by the card: a handover made after sign-in that names the signed-in account as the operator signs it
+ * out, as the phone apps do (a full sign-out: the session is revoked, the quick-unlock record wiped), and the popup
+ * says why with the sentence the sign-in refusal uses. Run wherever the pin can change under a live session: every
+ * card refresh (ensureCardFresh), a server (re)chosen or a move followed (switchToPinned), an accepted `kind` change.
+ *
+ * What stays open, and why the extension cannot close it alone: between a handover and this browser's next card refresh
+ * (every resync, at most RESYNC_PERIOD_MIN apart while the browser is awake, at once on a server bell, and before every
+ * sign-in and quick unlock) the browser holds a live session of an account the server now treats as the operator, a
+ * token with the operator's powers in a client that must not hold one. The extension never calls an operator route, so
+ * refreshing the card more often would narrow the time it is held, not end it: only the server knows the moment of the
+ * handover. The server closes it by ending, at the handover, the incoming operator's sessions on clients that refuse
+ * that account (it knows them from the client name each sign-in carried), or by ringing every socket when it serves a
+ * new card, which makes this browser refresh its card within a second (events.ts bell, then resync).
+ */
+async function refuseHeldOperator(): Promise<boolean> {
+  const s = session;
+  if (s === null || !cardNamesOperator(s.userId)) return false;
+  await doSignOut(true);
+  await plainSession.set({ [NKEY]: { kind: "operator" } }).catch(() => {});
+  return true;
+}
+
+/** The card notice the popup shows beside a working server (status). */
+function cardNotice(): Res<"status">["cardNotice"] {
+  const p = currentPin;
+  if (BUILD_TARGET !== "safari" && dialBlock?.kind === "fork") return { kind: "fork", origin: dialBlock.origin };
+  if (BUILD_TARGET === "safari" || p === null || dialBlock !== null) return null;
+  if (p.changed) return { kind: "changed" };
+  if (p.pending?.change === "move") return { kind: "move", name: nameText(p.pin.name) ?? "", from: p.pin.origin, to: p.pending.card.origin, hash: p.pending.card.hash };
+  if (p.pending?.change === "kind" && !(kindDeferred !== null && kindDeferred.origin === serverUrl && kindDeferred.hash === p.pending.card.hash)) return { kind: "kind", name: nameText(p.pin.name) ?? "", origin: p.pin.origin, to: p.pending.card.kind, hash: p.pending.card.hash };
+  if (cardInvalid) return { kind: "invalid" };
+  return cardWithheld ? { kind: "withheld" } : null;
+}
+
+/** The device record for a sign-in as [email] here (device.ts), written BEFORE the login so the secret the server hashes
+ *  is one this browser keeps. Null `key`: nothing can be kept (no store), so this sign-in is a new device. */
+/**
+ * The session a password sign-in replaces, named in its login (spec 03 §2 `replacesRefreshToken`): the refresh token of
+ * the pair a lock stashed on this server for quick unlock, when that record is the same account's (its email) and this
+ * browser's row for the email is known (has a deviceId). Null otherwise: nothing else is named, and a record that
+ * cannot be read names nothing. On the extension's row the server ends every earlier session of the row at a sign-in
+ * anyway; the name adds which session this one replaces, and whether its token had been replaced since (a lost refresh
+ * answer, or someone else's use of the token).
+ */
+async function replacedRefreshToken(email: string, device: DeviceRecord): Promise<string | null> {
+  const n = emailNorm(email);
+  if (device.deviceId === null || n === null) return null;
+  try {
+    const kept = keptUnconfirmed !== null && emailNorm(keptUnconfirmed.email) === n ? keptUnconfirmed.refreshToken : null;
+    const rec = await quStore.read();
+    if (rec === null || emailNorm(rec.email) !== n) return kept;
+    return rec.lockedTokens?.refresh ?? kept;
+  } catch {
+    return null;
+  }
+}
+
+/** The token of a session that ended here with no try left (api.ts noTryLeft), with the address it was for: kept in this
+ *  worker's memory for one use, the next sign-in's name for the session it replaces. Never sent as a refresh. */
+let keptUnconfirmed: { email: string; refreshToken: string } | null = null;
+
+/**
+ * A person's own sign-out of an account (the session's, or while locked the address the extension remembers): nothing
+ * that may still be a live credential of that account stays here after it. Its kept token goes, and so does a token
+ * whose refresh got no answer and is still held (the sign-out never spends either). True when there was one: the
+ * sign-out then says that the end of that session could not be confirmed with the server, and how to end it. Another
+ * account's kept token stays.
+ */
+async function dropKeptAtSignOut(): Promise<boolean> {
+  const who = session?.email ?? (await readRememberedEmail());
+  const email = who === null ? null : emailNorm(who);
+  const kept = keptUnconfirmed !== null && email !== null && emailNorm(keptUnconfirmed.email) === email;
+  if (kept) keptUnconfirmed = null;
+  return kept || (session !== null && api.unansweredRefreshToken() !== null);
+}
+
+async function deviceRecordFor(email: string, current: () => boolean = () => true): Promise<{ rec: DeviceRecord; key: string | null }> {
+  const n = emailNorm(email);
+  if (n === null) return { rec: newDeviceRecord(), key: null };
+  const key = nsk(deviceKey(n));
+  try {
+    const held = decodeDeviceRecord((await trusted.get(key))[key]);
+    if (held !== null) return { rec: held, key };
+    const fresh = newDeviceRecord();
+    // [current] is the sign-in's own check (the attempt and its server). A sign-in left behind while the
+    // store was read (a lock, a switch, "Forget this server") writes no record into a namespace that may be gone.
+    if (!current()) return { rec: fresh, key: null };
+    await trusted.set({ [key]: fresh });
+    return { rec: fresh, key };
+  } catch {
+    return { rec: newDeviceRecord(), key: null };
+  }
+}
+
+/** After a login: remember the device row the server created or reused, so the next sign-in is a known device. */
+async function rememberDevice(dev: { rec: DeviceRecord; key: string | null }, deviceId: string): Promise<void> {
+  if (dev.key === null || dev.rec.deviceId === deviceId) return;
+  await trusted.set({ [dev.key]: { deviceSecret: dev.rec.deviceSecret, deviceId } }).catch(() => {});
 }
 
 // ---- Safari: the andvari app's server (appserver.ts) ----
@@ -1370,27 +1941,30 @@ async function adoptAppServerUnkept(canonical: string): Promise<boolean> {
 
 /**
  * Safari: the app has no server now, so the one this extension adopted from it goes too (spec 03 §13: an account deleted
- * in the app leaves the device as a fresh install, with nothing of the account's server). The kept choice goes FIRST: if
- * the store holds it and will not let it go, nothing changes and the next ask tries again. Then the worker returns to
- * the build's placeholder origin through the origin-clean switch, whatever it kept under the old origin is removed
- * (purgeOriginNamespace), the app's vault is closed, and the block a first install starts with stands again until the
- * app names a server. True when no server is in effect afterwards.
+ * in the app leaves the device as a fresh install, with nothing of the account's server). The kept choice goes FIRST,
+ * with the remembered email (as "Forget this server" does: nothing here names the account afterwards): if the store
+ * holds them and will not let them go, nothing changes and the next ask tries again. Then the app's vault is closed, the
+ * worker returns to the placeholder origin through the origin-clean switch, whatever it kept under the old origin is
+ * removed, and the block a first install starts with stands again until the app names a server. True when no server is
+ * in effect afterwards.
  */
 async function forgetAppServer(): Promise<boolean> {
   const oldKey = currentOriginKey;
+  // A sign-in or a quick unlock in flight is left from here, as "Forget this server" leaves it.
+  redeemGen++;
   try {
-    await trusted.remove([SERVER_URL_KEY]);
+    await trusted.remove([SERVER_URL_KEY, LAST_EMAIL_KEY]);
   } catch {
     if (trustedStoreOk) return false;
-    // No store in this worker life: the server was never kept, only used ([adoptAppServerUnkept]).
+    // No store in this worker life: the server was never kept, only used (adoptAppServerUnkept).
   }
   APP_VAULT?.close();
-  switchChain = switchChain.then(() => applyServerChange(DEFAULT_SERVER_URL)).catch(() => {});
+  switchChain = switchChain.then(() => applyServerChange(NO_SERVER_ORIGIN)).catch(() => {});
   await switchChain;
   if (!noServerChosen()) return false;
   await purgeOriginNamespace(oldKey).catch(() => {});
   dialBlock = { kind: "unsettled" };
-  // A block that stands dials nothing, a live socket included (as at worker start, applyServerState).
+  // A block that stands dials nothing, a live socket included (as at worker start).
   events?.close();
   events = null;
   await registerAutofillScripts();
@@ -1515,8 +2089,8 @@ void serverReady.then(async () => {
  *  (PRESERVED per B2-7, never wiped: an A→B→A round trip keeps A's PIN, bounded by the staleness
  *  ceiling) — then swap in a FRESH api (a new instance carries no tokens, so no Authorization
  *  header can cross the change) + the new namespace key, then recompute the autofill exclusions.
- *  Old-origin namespaces are wiped ONLY via that origin's own policy-forbid or the explicit
- *  wave-3 "remove data for this server" action (purgeOriginNamespace). */
+ *  Old-origin namespaces are wiped ONLY through purgeOriginNamespace: "Forget this server", a followed move's old
+ *  namespace, the Safari retirement, and (trust records kept) "Remove data for this server". */
 async function applyServerChange(nextUrl: string): Promise<void> {
   await ensureLoaded();
   clearPendingTotp(); // a challenge belongs to the OLD origin — never carry its authKey across a switch
@@ -1544,13 +2118,13 @@ async function applyServerChange(nextUrl: string): Promise<void> {
   });
 }
 
-/** Wave-3 hook (§4.2): the ONLY destructive per-origin path. The options page's explicit "remove
- *  data for this server" action — and an origin's own policy-forbid — call this with THAT origin's
- *  key. Removes that origin's namespaced keys everywhere (the trusted store + storage.local's pre-A15
+/** Wave-3 hook (§4.2): the ONLY destructive per-origin path. "Forget this server", a followed move (the old namespace),
+ *  the Safari retirement and, with `keepTrust`, the options page's "Remove data for this server" call this with THAT
+ *  origin's key. Removes that origin's namespaced keys everywhere (the trusted store + storage.local's pre-A15
  *  leftovers + storage.session + the IDB co-key) and touches nothing else; safe for current and
  *  non-current origins alike. A15: by prefix as well as by the fixed list, so the per-user records
  *  (item homes, the personal wrap, a pending change) go too — the fixed list never had them. */
-export async function purgeOriginNamespace(originKey: string): Promise<void> {
+export async function purgeOriginNamespace(originKey: string, opts: { keepTrust?: boolean } = {}): Promise<void> {
   // H59 (2026-09-13 audit): KLKEY belongs on this list and was missing from it — the classic
   // "control written for the set of keys that existed at the time, reopened by an addition"
   // (the known-logins digest landed 2026-08-18, after this purge path). The record is exactly
@@ -1581,8 +2155,8 @@ export async function purgeOriginNamespace(originKey: string): Promise<void> {
   // Guarded on the current origin because the cache only ever holds THAT origin's key.
   if (originKey === currentOriginKey) knownLoginsKey = null;
   // A15: every `ns.<originKey>.` record in every store, per-user ones included (serverswitch.purgeOriginRecords).
-  await purgeOriginRecords(originKey, [trusted, legacyLocal, sessionSeal.purgeArea()]);
-  if (originKey === currentOriginKey) stagedChangeFallback = null;
+  // "Remove data for this server" (keepTrust) keeps the trust records (isTrustRecord).
+  await purgeOriginRecords(originKey, [trusted, legacyLocal, sessionSeal.purgeArea()], opts.keepTrust === true ? isTrustRecord : null);
   try {
     await idbRun<void>("readwrite", (s) => s.delete(nsKey(originKey, IDB_KEY)));
   } catch {
@@ -1709,36 +2283,52 @@ function ensureLoaded(): Promise<void> {
     // A1b item homes: a snapshot persisted before they existed carries none; the durable record (trusted store) is
     // reloaded then (A9: an empty map here would have been taken as authoritative and overwritten it). Read before the
     // install below, so nothing is awaited between the hydrateGen check and the install.
+    // A record that cannot be read (null) installs nothing: the session stays locked rather than guess its homes.
     const snapHomes = snap && !session ? (snap.homes ? new Map(Object.entries(snap.homes)) : await loadHomes(snap.userId)) : null;
     if (gen !== hydrateGen) return; // a lock or a browser-start report ran meanwhile: install nothing read before it
-    if (snap && !session && snapHomes) {
-      tokenOwner++; // the restored session's pair now owns the api
+    // Design §4.4: under a fork what this browser holds stays readable, so the session is restored (it dials nothing:
+    // the block refuses every request). Under any other block — a damaged pin above all, where nothing it holds can be
+    // checked against anything, or a pin that could not be read — no session is restored.
+    const readable = dialBlock === null || dialBlock.kind === "fork";
+    // §12.2 rule 7: a session of the account the pin names as operator is never restored (the refresh that stored such
+    // a pin signed it out; a worker that stopped half-way through that sign-out restores nothing either).
+    if (snap && !session && snapHomes && readable && !cardNamesOperator(snap.userId)) {
+      tokenOwner++; // the restored session's pair now owns the api (endAbandonedSignIn)
       api.setTokens(snap.access || null, snap.refresh);
+      pairUser.set(api, snap.userId);
+      const vaultKeys = new Map(Object.entries(snap.vaultKeys).map(([id, b]) => [id, fromB64(b)]));
       session = {
         userId: snap.userId,
         email: snap.email,
         personalVaultId: snap.personalVaultId,
-        // mustChangePassword joined the snapshot in 0.10.0 — a ≤0.9.0 snapshot lacks it; false is
-        // the safe default (a real rescue re-nudges on the next fresh login anyway).
-        mustChangePassword: snap.mustChangePassword ?? false,
         // uvk is intentionally absent here (breaker B1 — never persisted): a snapshot-restored session
         // has no UVK, so enroll on it must trigger a fresh full unlock.
         provenance: snap.provenance ?? "PASSWORD",
         lastFullUnlockAt: typeof snap.lastFullUnlockAt === "number" ? snap.lastFullUnlockAt : 0,
-        vaultKeys: new Map(Object.entries(snap.vaultKeys).map(([id, b]) => [id, fromB64(b)])),
+        vaultKeys,
         // vaultRoles joined the snapshot with G21 (2026-08-30) — a pre-G21 snapshot lacks it;
         // empty = every vault treated writable, exactly the pre-fix behavior (the server still refuses).
         vaultRoles: new Map(Object.entries(snap.vaultRoles ?? {})),
         waitingGrants: typeof snap.waitingGrants === "number" ? snap.waitingGrants : 0,
         homes: snapHomes,
+        homesKnown: snap.homesUnknown !== true,
         wrongVault: typeof snap.wrongVault === "number" ? snap.wrongVault : 0,
         vaultMeta: new Map(Object.entries(snap.vaultMeta ?? {}).filter(([, b]) => typeof b === "string")),
         // formatVersion joined the snapshot in 0.7.0 — a session persisted by ≤0.6.1 lacks it,
         // and that client's read gate only admitted fv≤1, so defaulting 1 is exact, not a guess.
         // spec 02 §3.2: a snapshot persisted by a pre-check build may hold a malformed doc — the
         // restore applies the same shape check decryptItems does (security review 2026-10).
-        items: snap.items.filter((i) => itemDocProblem(i.doc) === null).map((i) => ({ ...i, formatVersion: i.formatVersion ?? 1 })),
+        items: itemsUnderHeldKeys(
+          snap.items.filter((i) => itemDocProblem(i.doc) === null).map((i) => ({ ...i, formatVersion: i.formatVersion ?? 1 })),
+          vaultKeys,
+        ),
+        // §4.4: a session the server ended stays ended across a worker restart (its snapshot carries no tokens).
+        ...(snap.serverEnded === true ? { serverEnded: true as const } : {}),
+        ...(snap.serverEnded === true && snap.endedUnconfirmed === true ? { endedUnconfirmed: true as const } : {}),
+        // A snapshot that carries no deadline is past it (fail closed): it is locked at once, below.
+        lockAt: typeof snap.lockAt === "number" && Number.isFinite(snap.lockAt) ? snap.lockAt : 0,
       };
+      lockAtSaved = session.lockAt;
       // Re-clamp on restore (§2.3/B1-1 defense-in-depth): a snapshot persisted by a pre-clamp
       // build could carry a server value the ceilings would have refused.
       autoLockSeconds = clampAutoLockSeconds(snap.autoLockSeconds, DEFAULT_AUTOLOCK_SECONDS);
@@ -1759,8 +2349,20 @@ function ensureLoaded(): Promise<void> {
         if (Object.keys(reg).length === 0) delete st.cardForms;
       }
     }
+    // A restored session past its deadline is locked here, in the install's own step (the tab records are in,
+    // so the lock keeps only their page-known half), exactly as the alarm would have locked it; one before it gets its
+    // alarm set again for the deadline (a browser that refused it before is asked again, and the popup says if not).
+    if (session !== null && Date.now() >= session.lockAt) void idleLock();
+    else if (session !== null) {
+      void setLockAlarm(session.lockAt);
+      if (session.serverEnded !== true) void ensureResyncAlarm();
+    }
   })();
-  return loadPromise;
+  // Every caller, in a warm worker too, has the deadline checked before it goes on to serve anything.
+  return loadPromise.then(
+    () => lockIfDue().then(() => {}),
+    (e: unknown) => lockIfDue().then(() => Promise.reject(e)),
+  );
 }
 
 /** Persist the live session to storage.session, sealed (A16). RETURNS the write's promise so
@@ -1781,17 +2383,21 @@ function persistSession(): Promise<void> {
     personalVaultId: session.personalVaultId,
     autoLockSeconds,
     clipboardClearSeconds,
-    mustChangePassword: session.mustChangePassword,
     provenance: session.provenance,
     lastFullUnlockAt: session.lastFullUnlockAt,
     vaultKeys: Object.fromEntries([...session.vaultKeys].map(([id, vk]) => [id, toB64(vk)])),
     vaultRoles: Object.fromEntries(session.vaultRoles),
     waitingGrants: session.waitingGrants ?? 0,
     homes: Object.fromEntries(session.homes),
+    ...(session.homesKnown ? {} : { homesUnknown: true as const }),
     wrongVault: session.wrongVault ?? 0,
     vaultMeta: Object.fromEntries(session.vaultMeta ?? []),
+    ...(session.serverEnded ? { serverEnded: true as const } : {}),
+    ...(session.endedUnconfirmed ? { endedUnconfirmed: true as const } : {}),
+    lockAt: session.lockAt, // the deadline is kept with the session; a worker that restores it checks it
     items: session.items,
   };
+  lockAtSaved = session.lockAt;
   // The known-logins digest tracks the items it is derived from: every persist of the session
   // is exactly "items changed or were (re)installed", so this is the one rebuild choke point.
   void refreshKnownLogins();
@@ -1808,17 +2414,18 @@ let knownLoginsKey: Uint8Array | null = null;
  *  pre-digest behavior, never a wrong suppression. */
 async function refreshKnownLogins(): Promise<void> {
   const s = session;
-  if (!s) return;
+  if (!s || s.serverEnded) return; // an ended session keeps no digest (endSessionByServer wiped it)
   const ok = currentOriginKey;
   try {
     if (!knownLoginsKey) {
       const rec = (await sessionSeal.get("knownLogins", ok)) as KnownLoginsRecord | undefined;
       // A16: the read can wait for the seal's key; a lock (a sign-out's wipe) or another unlock that landed meanwhile
       // must not see this rebuild mint the digest back.
-      if (session !== s) return;
+      if (session !== s || s.serverEnded) return;
       knownLoginsKey = rec?.key ? fromB64(rec.key) : crypto.getRandomValues(new Uint8Array(16));
     }
     const digests = buildKnownLoginDigests(knownLoginsKey, s.items, pslResolve);
+    if (session !== s || s.serverEnded) return; // ended while the stored key was read: its wipe stands
     await sessionSeal.set("knownLogins", ok, { key: toB64(knownLoginsKey), digests } satisfies KnownLoginsRecord);
   } catch {
     /* storage hiccup — the stale (or absent) set stands; fail toward the banner, never silence */
@@ -1863,6 +2470,14 @@ function gateReoffer(tabId: number, st: TabState): (PendingSave & { password: st
   return p;
 }
 
+/** Design §4.4 (decided on 2026-11-17): the captures not saved to the vault (Res<"status">.unsavedCaptures): every
+ *  tab's pending login save, captured while unlocked or while locked, and every tab's pending card save. */
+function unsavedCaptures(): number {
+  let n = pendingCardSave.size;
+  for (const st of tabs.values()) if (st.pending !== undefined) n++;
+  return n;
+}
+
 function persistTabs(): void {
   // A16: sealed (a pending save holds a page's password); the value is captured now, and writes land in call order.
   void sessionSeal.set("tabs", currentOriginKey, Object.fromEntries([...tabs].map(([id, st]) => [String(id), st]))).catch(() => {});
@@ -1885,7 +2500,7 @@ function persistTabs(): void {
  *  a PIN. `signout` (an explicit user action / revocation) NEVER arms and full-wipes the blob + co-key.
  *  When quick unlock is not enrolled, an idle/manual lock stays byte-identical to today's full erase.
  *  [seen] (doSignOut) receives the token pair the lock saw, for the revoke that follows the erase. */
-async function doLock(reason: "idle" | "manual" | "signout" = "manual", seen?: { tokens?: TokenPair }): Promise<void> {
+async function doLock(reason: "idle" | "manual" | "signout" = "manual", seen?: { tokens?: TokenPair }, sayLost: boolean = reason === "idle"): Promise<void> {
   // ---- one synchronous step: the erase and the in-memory teardown, before any await ----
   hydrateGen++; // a load in flight installs nothing it read before this erase (ensureLoaded)
   const sealGen = sessionSeal.generation();
@@ -1909,12 +2524,29 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual", seen?: {
   // explicitly-captured context, the session and keys drop on the next line, and only the token
   // pair waits — at most TEARDOWN_FLUSH_TIMEOUT_MS; a flush that outlives the bound is abandoned.
   const teardownFlush = flushUsageForTeardown();
+  const userAtLock = session?.userId ?? null; // whose session this lock ends: the arm checks the record is that account's
+  // With no session, the pair in the client is the record's own only while a quick unlock is
+  // under way on this client; otherwise it may be a password sign-in's, between its login and its install, and of
+  // another account. Taken in this synchronous step, with the session: the redeem clears its mark when it gives way.
+  const redeemAtLock = redeemClient !== null && redeemClient === api;
+  const ownerAtLock = tokenOwner; // whose pair the client holds as this lock begins (endAbandonedSignIn's token)
+  // A refresh of the session's pair got no answer and its mark stands: the record armed below holds no token (the client
+  // hides it), and the lock earns no further try. The token is kept for the next sign-in's name, as a living worker's
+  // "no try left" keeps it; the quick unlock then ends as that end does (finishRedeem). A sign-out keeps nothing.
+  const unansweredAtLock = session !== null && reason !== "signout" ? api.unansweredRefreshToken() : null;
+  if (unansweredAtLock !== null && session !== null) keptUnconfirmed = { email: session.email, refreshToken: unansweredAtLock };
   session = null; // in-memory vault material — INCLUDING the memory-only uvk (breaker B1) — is dropped
-  personalChangeDescribed = null; // A6: a co-holder describe step never outlives the session it was shown in
+  stashOwed = null; // the arm below rewrites (or the wipe removes) any stash an unlock could not clear
+  timerRefused.autolock = timerRefused.resync = false; // the next session's alarms are asked for afresh
   clearPendingUsage(); // behavioral records must not outlive the session that produced them
   clearPendingTotp(); // and any in-flight TOTP challenge (covers sign-out; a normal lock has none)
   autoLockSeconds = DEFAULT_AUTOLOCK_SECONDS;
   clipboardClearSeconds = DEFAULT_CLIPBOARD_CLEAR_SECONDS;
+  // Design §4.4 (decided on 2026-11-17): which captures this lock deletes unsaved, counted before they go (only which
+  // tabs held one, and how many cards: nothing of what they held).
+  const capturedTabs = new Set<number>();
+  for (const [tabId, st] of tabs) if (st.pending !== undefined) capturedTabs.add(tabId);
+  const cardsAtLock = pendingCardSave.size;
   // [S3-lock] Retain ONLY the two PAGE-KNOWN facts across a lock; drop everything else.
   // Rationale (chip review #1): a bare tabs.clear() erased `topOrigin`+`cardForms`, so the chip
   // vanished at the instant of lock and returned a beat later with the locked copy — a page
@@ -1960,11 +2592,25 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual", seen?: {
   const { tokens: toks, attempt: attemptArm } = custodyKnown
     ? await armGate({
         hydrate: async () => {
+          // A refresh of the locked session's pair on the wire (a sync's 401) has
+          // consumed the refresh token; the pair sampled now would be {access, null}, the answer would then be dropped
+          // (the pair is cleared below), and the record armed on no refresh token, so its next quick unlock was taken
+          // for a revoked session and wiped. A server switch locks first, so it did the same to the old server's
+          // record. The arm waits for the answer, bounded like the waits above; past the bound it goes on as before.
+          // Past the bound, the answer follows the record when it comes (followLateRefresh), and the next
+          // quick unlock waits for it (lockRefreshSettled).
+          if (reason !== "signout") {
+            lockRefreshSettled = api.refreshSettled();
+            await Promise.race([lockRefreshSettled, delay(LOCK_STORE_WAIT_MS)]);
+          }
           // Only where there is no live pair (a cold worker): a warm one holds the pair and the tab records in memory.
           // Bounded like the wait above (the key is in hand by now, unless a browser-start report is replacing it).
           if (!api.getTokens().access) copy = await Promise.race([erase.opened(currentOriginKey), delay(LOCK_STORE_WAIT_MS).then(() => ({}))]);
         },
         readTokens: () => {
+          // A sign-in or a quick unlock that put its own pair into the client since this lock began owns it;
+          // that pair is not this lock's to stash (it may be another account's).
+          if (tokenOwner !== ownerAtLock) return { access: null, refresh: null };
           const live = api.getTokens();
           return live.access ? live : snapshotTokens(copy.session);
         },
@@ -1976,9 +2622,12 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual", seen?: {
   // [S3-lock], cold worker: the tab records were not in memory, so their page-known half comes from the lock's copy (a
   // record added since, by a handler, is fresher and wins). Without the origin and the key they go whole.
   const copiedTabs = copy.tabs;
+  let lostCaptures = capturedTabs.size + cardsAtLock;
   if (copiedTabs !== null && typeof copiedTabs === "object") {
     for (const [id, st] of Object.entries(copiedTabs as Record<string, TabState>)) {
       const tabId = Number(id);
+      // A cold worker: a login captured in an earlier worker life is in the lock's copy only.
+      if (!capturedTabs.has(tabId) && st !== null && typeof st === "object" && st.pending !== undefined) lostCaptures++;
       if (tabs.has(tabId) || st === null || typeof st !== "object" || (st.topOrigin === undefined && st.cardForms === undefined)) continue;
       tabs.set(tabId, { topOrigin: st.topOrigin, cardForms: st.cardForms });
     }
@@ -2005,7 +2654,10 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual", seen?: {
     // unlocked vault on the next SW wake; since A16 the erase is dispatched before the arm).
     // toks.access is non-null here (attemptArm ⇒ shouldAttemptArm required it); the `!` restates that
     // the extracted gate can't narrow across the armGate call the way an inline `&& toks.access` would.
-    const armed = await quickUnlock.arm({ access: toks.access!, refresh: toks.refresh }).catch(() => "declined" as const);
+    // And only a record of the account whose session this is (a warm worker's session, or a cold one's copy).
+    // And declined (the record wiped) when the lock knows no account and no quick unlock is under way here.
+    const armUser = userAtLock ?? snapshotUserId(copy.session);
+    const armed = armUser === null && !redeemAtLock ? "declined" : await quickUnlock.arm({ access: toks.access!, refresh: toks.refresh }, armUser).catch(() => "declined" as const);
     if (armed === "declined") {
       await quickUnlock.wipe(); // stale/ineligible/fail-closed → erase the residue
     }
@@ -2017,7 +2669,9 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual", seen?: {
   // H33/R43: the tokens are what the teardown PUT rides on — the ONE thing the flush still needs
   // once the session is gone — so they are forgotten only after the bounded await.
   await Promise.race([teardownFlush, delay(TEARDOWN_FLUSH_TIMEOUT_MS)]);
-  api.setTokens(null, null); // the api forgets the pair; while armed it lives ONLY in QKEY.lockedTokens
+  // The api forgets the pair; while armed it lives ONLY in QKEY.lockedTokens. Only the pair this lock took
+  // over; a sign-in that set its own since (the lock waits, above) keeps it.
+  if (tokenOwner === ownerAtLock) api.setTokens(null, null);
   await erase.erased; // the full vault snapshot was erased above — locked reports locked
   // A16 review R2: the custody epoch this lock advanced to reaches the key store before the lock returns, so a copy of
   // the snapshot from before it cannot open at the next start (bounded; past the bound the write goes on, and a failed
@@ -2035,8 +2689,10 @@ async function doLock(reason: "idle" | "manual" | "signout" = "manual", seen?: {
   } else {
     await plainSession.remove(NKEY);
   }
-  void chrome.alarms.clear("autolock");
-  void chrome.alarms.clear("resync");
+  // Design §4.4 (decided on 2026-11-17): a lock or sign-out nobody was asked about says what it deleted unsaved.
+  if (sayLost && lostCaptures > 0) await addLostCaptures(lostCaptures);
+  clearAlarm("autolock");
+  clearAlarm("resync");
   try {
     // Quiet toolbar while locked — stale counts would claim matches we can no longer serve.
     for (const t of await chrome.tabs.query({})) {
@@ -2057,17 +2713,32 @@ function snapshotTokens(raw: unknown): TokenPair {
   return { access: s.access, refresh: typeof s.refresh === "string" ? s.refresh : null };
 }
 
+/** The account of the lock's copy of the session snapshot, read like [snapshotTokens] (the current server's only); null
+ *  when there is no such copy. */
+function snapshotUserId(raw: unknown): string | null {
+  const s = raw as Partial<SessionSnapshot> | undefined;
+  if (!s || typeof s !== "object" || s.origin !== serverUrl || typeof s.userId !== "string" || s.userId === "") return null;
+  return s.userId;
+}
+
 /** Explicit sign-out / definitive revocation → a FULL wipe of the quick-unlock blob + co-key + tokens,
  *  never the armed-retaining lock (breaker A3⊕B2). Routed here from onRevoked, the popup "Sign out"
- *  action, and every definitive-401 during a quick-unlock redeem. */
-async function doSignOut(): Promise<void> {
+ *  action, and every definitive-401 during a quick-unlock redeem. [sayLost]: nobody asked for this sign-out (every caller
+ *  but the popup's Sign out, which asked first with the count), so the captures it deletes unsaved are said at the next
+ *  popup (LOST_KEY). */
+async function doSignOut(sayLost = false): Promise<void> {
   // A16 review R4: the local erase comes FIRST. Before, sign-out waited on the load (handle()'s ensureLoaded) and then on
   // the network — the usage flush and the logout POST, up to 7 s — before doLock erased anything. Now doLock("signout")
   // erases at once; its teardown flush still lands, bounded, before the pair is forgotten (Audit G03 → H33: the flush
   // must precede the revoke, which kills the session its GET+PUT ride on); and the revoke follows, on the pair the lock
   // saw.
   const seen: { tokens?: TokenPair } = {};
-  await doLock("signout", seen);
+  // The origin whose pair the lock collects: the revoke goes there or nowhere. The lock waits on stores and a flush, so a
+  // server switch can land meanwhile; before, the revoker was built on the origin current AFTER the lock, so the old
+  // origin's pair could be sent to the new one (a token only to its own origin, and only
+  // with that origin's pin in force).
+  const origin = serverUrl;
+  await doLock("signout", seen, sayLost);
   void clearBioCred(); // 0.17.0: explicit sign-out tears down the amendment-4 reuse record too
   // Server-session revocation (Android/desktop parity: both AWAIT a bounded logout with the same 5 s ceiling — without
   // it "Sign out" leaves the refresh token valid server-side for ~30 days). Best-effort + bounded: on the already-revoked
@@ -2075,8 +2746,17 @@ async function doSignOut(): Promise<void> {
   // session so quick unlock can re-arm. Not while a server is pending (A16 review R4: nothing is dialed then). A fresh
   // api carries only this pair and persists nothing, so whatever the revoke does with it ends here.
   const pair = seen.tokens;
-  if (dialBlock !== null || !pair?.access) return;
-  const revoker = new AndvariApi(serverUrl, chrome.runtime.getManifest().version);
+  if (!pair?.access) return;
+  await revokePair(origin, pair); // nothing when the origin changed or its pin is not in force (forked, damaged, gone)
+}
+
+/** A bounded logout of [pair] at [origin] through a client of its own, sent only while [origin] is the dialed origin
+ *  with its pin in force (dialBlock null); the module `api` and its pair are untouched. Sign-out, the operator refusal
+ *  and an abandoned sign-in revoke through it. */
+async function revokePair(origin: string, pair: TokenPair): Promise<void> {
+  if (origin !== serverUrl || dialBlock !== null || pair.access === null) return;
+  const revoker = new AndvariApi(origin, chrome.runtime.getManifest().version);
+  revoker.mayDial = () => origin === serverUrl && dialBlock === null;
   revoker.setTokens(pair.access, pair.refresh);
   await Promise.race([revoker.logout(), delay(5000)]);
   revoker.setTokens(null, null);
@@ -2104,8 +2784,6 @@ function browserSessionReported(): void {
   events = null;
   session = null;
   api.setTokens(null, null);
-  personalChangeDescribed = null;
-  stagedChangeFallback = null;
   dropEnrollSecretCache();
   clearPendingUsage();
   clearPendingTotp();
@@ -2122,14 +2800,144 @@ function browserSessionReported(): void {
   const rotated = sessionSeal.rotate();
   decideCompartment(); // undecided while the key is replaced: nothing arms or enrolls meanwhile
   void rotated.then(decideCompartment);
-  void chrome.alarms.clear("autolock");
-  void chrome.alarms.clear("resync");
+  clearAlarm("autolock");
+  clearAlarm("resync");
 }
 
-/** Re-arm the policy idle lock. chrome.alarms floors at ~30 s; 0 = policy-disabled (web parity). */
+/**
+ * Design §4.4 "A session the server ends does not delete the device's copy". The server ended the live session (a
+ * definitive refusal of its refresh, or the socket's revoked frame). The session ends: its tokens are dropped, the
+ * quick-unlock record (PIN or biometric, which holds a refresh token and a UVK wrap) is wiped, the socket closes and the
+ * periodic sync stops; nothing is dialed while it stands so (makeApi's mayDial) and nothing is written (putItem). What
+ * the session holds stays: its items in memory and in the sealed snapshot (so a worker restart keeps it, still ended),
+ * and every trusted record (the pin, the marks, the homes, the device record). It is read, copied from and filled
+ * from with the notice in view, until the person locks (the extension keeps no copy across a lock, by its own rule)
+ * or signs out. Signing in again, after a lock, restores a session. A session this browser ended itself is not this.
+ */
+async function endSessionByServer(unconfirmed = false): Promise<void> {
+  const s = session;
+  if (s === null || s.serverEnded) return;
+  s.serverEnded = true;
+  if (unconfirmed) s.endedUnconfirmed = true;
+  events?.close();
+  events = null;
+  clearAlarm("resync");
+  api.setTokens(null, null);
+  clearPendingTotp();
+  dropEnrollSecretCache();
+  await quickUnlock.wipe().catch(() => {});
+  // Spec 01 §8.4: the known-logins digest is wiped at a definitive 401 with the quick-unlock material (before, it
+  // was kept, and rebuilt by the persist below, so the (site, username) digests of an account the server no longer
+  // serves outlived the session's own lock). refreshKnownLogins writes none for an ended session.
+  knownLoginsKey = null;
+  await sessionSeal.remove("knownLogins", currentOriginKey).catch(() => {});
+  await persistSession();
+}
+
+/** Re-arm the policy idle lock: the deadline first, a fact kept with the session (in memory and, once it
+ *  has moved LOCK_AT_SAVE_SLACK_MS past the copy there, in the sealed snapshot, so a worker that restores the session
+ *  checks it), then the alarm that normally locks it on time. Before, the alarm was all there was, and its create was
+ *  fired and forgotten: a browser that refused it left the vault open for as long as it kept the session, unsaid. */
 function armAutoLock(): void {
-  if (autoLockSeconds <= 0) return;
-  void chrome.alarms.create("autolock", { delayInMinutes: Math.max(autoLockSeconds / 60, 0.5) });
+  const s = session;
+  if (s === null) return;
+  s.lockAt = Date.now() + lockWindowMs();
+  // A failed write leaves the snapshot's deadline earlier than the live one: a restored session then locks early, never late.
+  if (s.lockAt - lockAtSaved >= LOCK_AT_SAVE_SLACK_MS) void persistSession().catch(() => {});
+  void setLockAlarm(s.lockAt);
+}
+
+/** The idle window from now: the policy's, floored as chrome.alarms floors a delay (the clamp never leaves it at 0, and a
+ *  server cannot disable the lock, spec 03 §1.1). */
+function lockWindowMs(): number {
+  return Math.max(autoLockSeconds, AUTOLOCK_FLOOR_SECONDS) * 1000;
+}
+
+/**
+ * The deadline check every way into the worker makes before it serves anything (a message from the popup or a page, a
+ * fill, a save, a sync, a live update, a worker start: ensureLoaded, the message and alarm listeners, the socket's
+ * frames). Past the deadline the session is locked first, by the idle lock the alarm would have run, and the caller
+ * goes on locked. Answers whether such a lock ran (or was already running). The lock drops the session in its first,
+ * synchronous step, so nothing after this call sees it; the promise is for the rest of the lock (the arm, the erase).
+ */
+function lockIfDue(): Promise<boolean> {
+  const s = session;
+  if (dueLock === null && (s === null || Date.now() < s.lockAt)) return Promise.resolve(false);
+  return idleLock().then(() => true);
+}
+
+/** The one idle lock: the alarm's and the deadline's are the same lock, never two (a second, finding no session, would
+ *  wipe the quick-unlock record the first armed). */
+function idleLock(): Promise<void> {
+  dueLock ??= doLock("idle").then(
+    () => {
+      dueLock = null;
+    },
+    () => {
+      // The lock dropped the session in its first step; a later step that failed (the erase's write, the reason line)
+      // leaves at most a snapshot past its deadline, which the next worker start locks again. Nothing to answer here.
+      dueLock = null;
+    },
+  );
+  return dueLock;
+}
+
+/** chrome.alarms.create, caught: a refusal (a rejected promise, or a throw on an engine that answers synchronously) is
+ *  tried once more. Answers whether the alarm is set. */
+async function createAlarm(name: string, info: chrome.alarms.AlarmCreateInfo): Promise<boolean> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await chrome.alarms.create(name, info);
+      return true;
+    } catch {
+      /* refused: once more, then said (timerRefused) */
+    }
+  }
+  return false;
+}
+
+/** chrome.alarms.clear, caught: a refusal leaves at most a stale alarm. A stale resync finds no session and returns; a
+ *  stale auto-lock runs the idle lock on a vault already locked, as a second Lock does. */
+function clearAlarm(name: string): void {
+  try {
+    void Promise.resolve(chrome.alarms.clear(name)).catch(() => {});
+  } catch {
+    /* alarms unavailable here */
+  }
+}
+
+/** The auto-lock alarm, for the deadline. Refused twice, the popup says so in one line; the deadline keeps the promise. */
+function setLockAlarm(lockAt: number): Promise<void> {
+  const s = session;
+  const run = createAlarm("autolock", { when: lockAt }).then((ok) => {
+    if (session === s) timerRefused.autolock = !ok;
+  });
+  alarmWork = run;
+  return run;
+}
+
+/** The periodic resync (the ≤5-min staleness floor and the socket's revival). Refused twice, the popup says that changes
+ *  made elsewhere may arrive late; the live socket still rings while it is up. */
+function startResyncAlarm(): Promise<void> {
+  const run = createAlarm("resync", { periodInMinutes: RESYNC_PERIOD_MIN }).then((ok) => {
+    timerRefused.resync = !ok;
+  });
+  alarmWork = run;
+  return run;
+}
+
+/** A restored session's resync alarm, set again only when the browser holds none (a re-create would restart its period
+ *  at every worker start and starve it). */
+async function ensureResyncAlarm(): Promise<void> {
+  try {
+    if (await chrome.alarms.get("resync")) {
+      timerRefused.resync = false;
+      return;
+    }
+  } catch {
+    /* get unsupported here: create it */
+  }
+  await startResyncAlarm();
 }
 
 /** Periodic refresh while unlocked — new/changed items under keys we already hold. A grant to a
@@ -2138,9 +2946,10 @@ function armAutoLock(): void {
  *
  *  Removals (security review 2026-10, root cause A §6, branch A7): the extension never reads
  *  `removedGrants` / `removedGrantsInfo` and never verifies a removal or leave proof. It pulls a full
- *  snapshot (since=0) every time, so a vault whose grant was revoked simply stops contributing items
- *  and its role entry is dropped below (its key is forgotten at the next unlock, which rebuilds the key
- *  set from the live grants); it shows no removal banner, keeps no holding area, consumes
+ *  snapshot (since=0) every time, so a vault whose grant was revoked simply stops contributing items,
+ *  and its key and its role entry are dropped below in one step (the sealed snapshot with them). A vault
+ *  served again later opens only at the next unlock, which rebuilds the key set from the live grants
+ *  after its checks; it shows no removal banner, keeps no holding area, consumes
  *  no nonce and keeps no liveSince. Attributing a removal, refusing a replayed proof and the 30-day
  *  holding area are the FULL clients' job (core SyncEngine, web store). */
 async function resync(): Promise<void> {
@@ -2149,19 +2958,45 @@ async function resync(): Promise<void> {
   // items in memory and stays unsynced.
   if (dialBlock) return;
   if (!session || writesInFlight > 0) return; // a save is landing — don't race its rev
+  if (session.serverEnded) return; // §4.4: the server ended this session — nothing is dialed until a new sign-in
   try {
-    // Work that outlives its session: the feed belongs to the session that asked for it. A lock, a sign-out or another
-    // account's sign-in while it was on the wire ends that session, and the feed is then dropped: never decrypted with,
-    // nor installed into, the session that holds the worker now.
+    // §4.4 "on every policy probe or sync": a fork found here blocks the origin and locks the session.
+    await ensureCardFresh().catch((e) => {
+      if (e instanceof CardStopError && e.code === "server_fork") throw e;
+    });
+    if (!session || dialBlock) return;
+    // Work that outlives a lock: the feed belongs to the session that asked for it. A lock, a sign-out or
+    // another account's sign-in while it was on the wire ends that session, and the feed is then dropped: never
+    // decrypted with, nor installed into, the session that holds the worker now.
     const asker = session;
     const sync = await api.sync(0);
     if (writesInFlight > 0 || session !== asker) return; // a write started mid-sync — its result would be clobbered
-    // A1b INV-HOME: the snapshot's rows are admitted against this browser's homes BEFORE anything is decrypted.
-    const homed = await homeAndDecrypt(sync, session.vaultKeys, session.userId, session.homes);
-    if (writesInFlight > 0 || session !== asker) return;
-    session.items = homed.items;
-    session.wrongVault = homed.wrongVault;
-    session.vaultMeta = vaultMetaOf(sync.vaults); // A11 (q14)
+    // A shared vault this answer no longer grants loses its key here, before anything is decrypted, in the same step
+    // that drops its role entry and its opened items, and the sealed snapshot is written again at once without them
+    // (that write also rebuilds the known-logins digest from the items left). A vault the server serves
+    // again later (the person added again, the vault put back under the same id) then opens only through an unlock and
+    // its checks (buildUnlockKeys), never on the server's word inside this session; until then it counts as waiting.
+    // The personal vault's key comes from the personal wrap, not from a grant row, and is kept.
+    // A key goes only on a list of grants the server sent whole (api.ts sync, grantedVaultIds): an answer without one
+    // drops no key, a row refused as malformed still counts as a grant of the vault it names, and a row whose vault id
+    // is itself unusable means no key is dropped in this pull.
+    const granted = new Set(sync.grants.map((g) => g.vaultId));
+    const stillGranted = sync.grantedVaultIds;
+    let dropped = false;
+    if (stillGranted) {
+      for (const vaultId of [...session.vaultKeys.keys()]) {
+        if (vaultId !== session.personalVaultId && !stillGranted.has(vaultId)) {
+          session.vaultKeys.delete(vaultId);
+          dropped = true;
+        }
+      }
+    }
+    // The opened items go with their key, through itemsUnderHeldKeys, the one rule of every place that sets the list:
+    // from here on the session shows, fills and seals only items of vaults whose key it still holds, also when an older
+    // pull that opened such a vault's rows before this drop installs after it. A save still on the wire when this pull
+    // resumes from its homes write makes it stop before its install (writesInFlight below); one that already landed
+    // is overwritten by the install, until the next pull.
+    if (dropped) session.items = itemsUnderHeldKeys(session.items, session.vaultKeys);
     // H70 (2026-09-13 audit): refresh the G21 reader gate's input as well as the item projection.
     // A grant's `role` needs no key to read and the server re-delivers the grant row on every role
     // change (spec 03 §4), but this pull only ever rebuilt the items — so an owner demoting a
@@ -2174,15 +3009,23 @@ async function resync(): Promise<void> {
     // Scoped to vaults we hold a key for: a brand-new grant still needs uvk/identity to open and
     // lands at the next real unlock (this function's contract above), and a role for a vault whose
     // items we cannot decrypt would gate nothing. A grant that has VANISHED from the feed loses
-    // its role entry — that fails OPEN to the pre-G21 behaviour (the server still refuses the
-    // push, nothing new is exposed) and its items are gone from this feed anyway, so there is
-    // nothing left to offer a write against.
-    const granted = new Set(sync.grants.map((g) => g.vaultId));
+    // its role entry, and nothing is offered or sent because of that: this extension writes only
+    // to the personal vault (writableItem, putItem), so an item of a shared vault is read-only here
+    // whatever its role, and a role is read only for the vault a landed write was made to, before
+    // its conflict copy (materializeConflictCopy).
     for (const g of sync.grants) if (session.vaultKeys.has(g.vaultId)) session.vaultRoles.set(g.vaultId, g.role);
     for (const vaultId of [...session.vaultRoles.keys()]) if (!granted.has(vaultId)) session.vaultRoles.delete(vaultId);
+    if (dropped) void persistSession();
+    // A1b INV-HOME: the snapshot's rows are admitted against this browser's homes BEFORE anything is decrypted.
+    const homed = await homeAndDecrypt(sync, session.vaultKeys, session.userId, session.personalVaultId, { homes: session.homes, known: session.homesKnown });
+    if (writesInFlight > 0 || session !== asker) return;
+    session.items = itemsUnderHeldKeys(homed.items, session.vaultKeys);
+    session.wrongVault = homed.wrongVault;
+    session.vaultMeta = vaultMetaOf(sync.vaults); // A11 (q14)
     // A6 (§1.7): a new grant waits for a full client; the count needs no UVK, so it stays honest after an eviction.
-    session.waitingGrants = waitingGrantCount(sync.grants, new Set(session.vaultKeys.keys()));
+    session.waitingGrants = waitingGrantCount(sync.grants, new Set(session.vaultKeys.keys()), session.personalVaultId);
     persistSession();
+    if (stashOwed === session) void clearOwedStash(session); // a stash an unlock could not clear
     // G04: a landed full snapshot (cursor 0) is the one moment we hold the COMPLETE live item set,
     // so this is the only flush allowed to prune the usage ledger — never the debounce/lock flushes.
     // Built from the RAW sync feed (not session.items), so an item this SW can't decrypt (newer fv,
@@ -2218,7 +3061,7 @@ async function mintTicket(): Promise<string | null> {
  *  `reset` collapses a pending backoff so those known-good moments reconnect immediately. */
 async function ensureSocket(reset = false): Promise<void> {
   await ensureLoaded(); // session may not be hydrated yet on a fresh SW wake
-  if (!session) return;
+  if (!session || session.serverEnded) return; // §4.4: no socket for a session the server ended
   if (dialBlock) return; // A16 review R4: no socket while a server is pending (or unknown) — nothing is dialed
   if (!events || events.closed) {
     events = startEvents({
@@ -2228,9 +3071,11 @@ async function ensureSocket(reset = false): Promise<void> {
       // slots blocks the structural check — bridge it here, at the one real-socket seam.
       makeSocket: (u) => new WebSocket(u) as WebSocket & WsLike,
       onBell: () => void resync(), // debounced in events.ts; the EXISTING pull, nothing else
-      // Explicit server revocation frame — a FULL sign-out (wipes the quick-unlock blob + co-key too),
-      // never the armed-retaining lock: revocation is wipe-class in every path (breaker A3⊕B2).
-      onRevoked: () => void doSignOut(),
+      // Explicit server revocation frame: the server ended this session (§4.4). Its tokens and the quick-unlock record
+      // go (never the armed-retaining lock, breaker A3⊕B2); what it holds stays readable (endSessionByServer).
+      // A frame is a way in too: past the lock's deadline the session is locked first (a bell's pull checks
+      // it in resync's load), and an ended session is then not left readable.
+      onRevoked: () => void lockIfDue().then(() => endSessionByServer()),
     });
   } else {
     events.kick(reset);
@@ -2248,7 +3093,7 @@ interface UpdateInfo {
 }
 
 // The manifest's relative "/downloads/<basename>" paths become absolute links in updateoffer.offerDownloadUrl (A15
-// step 0): ONLY `${DEFAULT_SERVER_URL}/downloads/<basename>`, only while the current server is the default. The
+// step 0): ONLY `${UPDATE_ORIGIN}/downloads/<basename>`, only while the current server is the public instance. The
 // popup is a chrome-extension:// page, so a relative href would resolve against the EXTENSION origin.
 
 /**
@@ -2279,13 +3124,14 @@ async function checkForUpdate(force = false): Promise<void> {
     }
     // §M-D3: a build pinning only the placeholder sentinel has NO update path — do not even fetch.
     if (!updatesEnabled()) return;
-    // The Safari build updates through the App Store: no poll, no banner, no download links.
-    if (!selfUpdateChannelAllowed()) return;
+    // The Safari build updates through the App Store: no poll, no banner, no download links. Nor does a person's test
+    // build poll: it is replaced by hand with the next test build, never by a release.
+    if (typeof __ANDVARI_TEST_SERVER__ === "string" || !selfUpdateChannelAllowed()) return;
     // Reference-instance scope (2026-07-18 arming; multi-tenant §9): the pinned key signs OUR
     // `/downloads` only, so the channel runs solely against the shipped default origin. A
     // self-host/custom origin gets NO fetch and NO quiet marker — the exact fail-closed-quiet
     // "disabled" posture the un-armed build gave every origin. (Per-instance keys are later work.)
-    if (serverUrl !== DEFAULT_SERVER_URL) return;
+    if (serverUrl !== PUBLIC_INSTANCE.origin) return;
     // A15: the anti-rollback seq lives in the trusted store and was NOT migrated (a planted storage.local seq could only
     // suppress genuine offers); an absent record is the MIN_SEQ floor below. A15 review F3: a read that FAILS aborts
     // the check before anything is fetched — it is not "absent" (folding it into the floor let the write below lower a
@@ -2303,7 +3149,8 @@ async function checkForUpdate(force = false): Promise<void> {
     let sResp: Response;
     try {
       // §M-D6: the sig is a SECOND request over the same raw bytes — either fetch failing → quiet.
-      [mResp, sResp] = await Promise.all([fetch(base, { cache: "no-store" }), fetch(base + ".sig", { cache: "no-store" })]);
+      // No redirect is followed: a redirect is not ok, so it is stamped quiet below like any answer that is not the server's.
+      [mResp, sResp] = await Promise.all([fetch(base, { cache: "no-store", redirect: "manual" }), fetch(base + ".sig", { cache: "no-store", redirect: "manual" })]);
     } catch {
       return; // network (offline / DNS) — transient; keep any prior signal, don't stamp ULAST
     }
@@ -2360,7 +3207,7 @@ async function checkForUpdate(force = false): Promise<void> {
     // private browsing) must not turn every wake into another fetch.
     await plainSession.set({ [kLast]: Date.now() });
     if (latest && isNewerVersion(latest, current)) {
-      // A15 step 0: the links are built by the offer leaf only — `${DEFAULT_SERVER_URL}/downloads/<basename>` or none.
+      // A15 step 0: the links are built by the offer leaf only — `${UPDATE_ORIGIN}/downloads/<basename>` or none.
       const info: UpdateInfo = { latest, chromeUrl: offerDownloadUrl(ext.chromeUrl, serverUrl), firefoxUrl: offerDownloadUrl(ext.firefoxUrl, serverUrl) };
       await trusted.set({ [kInfo]: info, [kSeq]: decision.seq });
     } else {
@@ -2382,7 +3229,7 @@ async function updateStatus(): Promise<Res<"updateStatus">> {
   const kInfo = nsk(UKEY);
   const kQuiet = nsk(UQUIET);
   // A15 step 0: the stored offer is re-checked on EVERY read, not only when it was fetched — the current server is
-  // the default, the version is strictly newer, and each link is `${DEFAULT_SERVER_URL}/downloads/<basename>` again.
+  // the public instance, the version is strictly newer, and each link is `${UPDATE_ORIGIN}/downloads/<basename>` again.
   const offer = readUpdateOffer(await trustedGet(kInfo), current, serverUrl);
   if (offer) return { current, latest: offer.latest, chromeUrl: offer.chromeUrl, firefoxUrl: offer.firefoxUrl, quietReason: null };
   let quiet: { reason?: unknown } | undefined;
@@ -2400,10 +3247,14 @@ async function updateStatus(): Promise<Res<"updateStatus">> {
 
 // ---- message dispatch ----
 
-async function handle(msg: Req, sender: chrome.runtime.MessageSender): Promise<unknown> {
+async function handle(msg: Req, sender: chrome.runtime.MessageSender, due: Promise<boolean>): Promise<unknown> {
   // A15 review S1: a lock never waits on the trusted store through here — doLock bounds its own wait for the origin.
   // A16 review R4: nor does a sign-out wait on it to erase — doLock erases first, and its own copy supplies the pair.
+  // The load checks the lock's deadline (ensureLoaded). A lock or a sign-out past it waits for the idle lock
+  // the deadline started; a Lock is then answered by it (a second lock, finding no session, would wipe the record the
+  // idle lock armed), and a sign-out goes on to its full wipe.
   if (msg.type !== "lock" && msg.type !== "signOut") await ensureLoaded();
+  else if ((await due) && msg.type === "lock") return { ok: true } satisfies Res<"lock">;
   const res = await dispatch(msg, sender);
   // Policy idle window: only genuine user activity re-arms the lock. Automated traffic
   // (pageInfo on every load, the popup's 1 s TOTP poll) must not defer autolock while away —
@@ -2431,6 +3282,9 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
   }
   switch (msg.type) {
     case "ping": {
+      // Rendered run 2026-11-16: with no server in force the api refuses to dial and threw, so the popup got a bare
+      // error and called the server "unreachable"; the code it reads says "no server confirmed".
+      if (dialBlock !== null) return { ok: false, code: "confirm_server" } satisfies Res<"ping">;
       const p = await api.clientPolicy(); // host_permissions + reachability
       return { ok: true, serverTime: p.serverTime } satisfies Res<"ping">;
     }
@@ -2443,20 +3297,27 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       // can still succeed", so a cold-woken SW correctly reports none and the popup shows the full form.
       // Outranks the quick-unlock PIN view (a live challenge is the most-recent intent — see popup).
       const tp = livePendingTotp();
+      // An alarm the browser refused twice is said in one line while the vault is open (the auto-lock's
+      // first: the deadline still locks on time, at the next way in). Read once the last request settled (bounded).
+      await Promise.race([alarmWork, delay(LOCK_STORE_WAIT_MS)]);
+      const timerNotice = session === null ? null : timerRefused.autolock ? "autolock" : timerRefused.resync && !session.serverEnded ? "resync" : null;
       return {
+        timerNotice,
         unlocked: session !== null,
         count: loginItems().length,
         email: session?.email ?? null,
-        mustChangePassword: session?.mustChangePassword ?? false,
+        cardNotice: cardNotice(),
         lockNotice,
         quickUnlock: await quStateForStatus(),
         totpPending: tp ? { email: tp.email, expiresAt: tp.expiresAt } : null,
-        personalChange: session ? (await readPersonalChange(session.userId)) !== null : false,
-        personalChangeText: session ? await personalChangeText(session) : null,
-        personalProposal: session ? !session.personalVaultId && (await readPersonalChange(session.userId)) !== null : false,
         waitingGrants: session?.waitingGrants ?? 0,
+        serverEnded: session?.serverEnded === true,
+        serverEndedUnconfirmed: session?.endedUnconfirmed === true,
         wrongVault: session?.wrongVault ?? 0,
         rememberedEmail: session ? null : await readRememberedEmail(),
+        unsavedCaptures: unsavedCaptures(),
+        // Said above the unlock form, once: taken by the popup's render.
+        capturesLost: session === null && msg.takeLost === true ? await takeLostCaptures() : 0,
       } satisfies Res<"status">;
     }
     case "lock": {
@@ -2464,8 +3325,9 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       return { ok: true } satisfies Res<"lock">;
     }
     case "signOut": {
+      const notConfirmed = await dropKeptAtSignOut();
       await doSignOut(); // explicit full sign-out — wipes the quick-unlock blob + co-key too (breaker A3⊕B2)
-      return { ok: true } satisfies Res<"signOut">;
+      return (notConfirmed ? { ok: true, notice: "session_not_confirmed" } : { ok: true }) satisfies Res<"signOut">;
     }
     case "unlock":
       return unlockWithMapping(msg.email, msg.password);
@@ -2494,41 +3356,44 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
       // caller — 2026-07-18 review Finding 2). A content script's sender.url is the WEB page's ⇒
       // refused; canonicalize + originKey derivation stay in the serverswitch leaf (a non-origin
       // string yields no key ⇒ no-op; safe for the current origin, never touches another's).
+      // Cached state only — the pin, its fork mark, the high-water marks and the item homes
+      // stay ("Forget this server" is the only thing that removes a pin).
       return purgeServerDataFor(
         msg.origin,
         !(sender.url ?? "").startsWith(chrome.runtime.getURL("")),
-        purgeOriginNamespace,
+        (originKey) => purgeOriginNamespace(originKey, { keepTrust: true }),
       ) satisfies Promise<Res<"purgeServerData">>;
     case "serverInfo":
       return serverInfo();
-    case "setServerUrl":
-      // A15: the ONLY way the server choice changes (the options page, after the Trust Gate). The sender gate above
-      // already refused any sender that is not one of our pages; commitServerUrl canonicalizes and persists first.
-      return commitServerUrl(msg.url);
-    case "forgetLegacyServer":
-      return forgetLegacyServer();
+    // Design 2026-11-15 §4.4, §12.2: the ONLY ways the server choice changes (the popup and the options page). The sender
+    // gate above already refused any sender that is not one of our pages.
+    case "chooseServer":
+      return chooseServer(msg);
+    case "confirmServer":
+      return confirmServer(msg);
+    case "forgetServer":
+      return forgetServer();
+    case "forgetEarlierAccount":
+      return forgetEarlierAccount(msg.email);
+    case "followServerChange":
+      return followServerChange(msg);
+    case "deferServerChange":
+      return deferServerChange(msg);
     case "appServer":
       return syncAppServer();
     case "appServerAnswer":
       return adoptRelayedAppServer(msg);
     case "serverDiag":
       return serverDiag();
-    case "personalAcceptChange":
-      // A5b: only our own extension pages (the popup) may confirm a personal-vault change; a content
-      // script's sender.url is the web page's ⇒ refused (the purgeServerData gate, same reasoning).
-      if (!(sender.url ?? "").startsWith(chrome.runtime.getURL(""))) return { ok: false, code: "not_allowed" } satisfies Res<"personalAcceptChange">;
-      return acceptPersonalChange();
-    case "personalDescribeChange":
-      if (!(sender.url ?? "").startsWith(chrome.runtime.getURL(""))) return { ok: false, code: "not_allowed" } satisfies Res<"personalDescribeChange">;
-      return describePersonalChange();
     case "scheduleClipboardClear":
       return scheduleClipboardClear();
     case "matches": {
       if (!session) return { locked: true, matches: [] } satisfies Res<"matches">;
       // Security review 2026-10 (root cause E): a page frame's matches are its BROWSER-SET origin's
-      // (senderorigin.ts) — `msg.host` is the frame's own claim and named any host it liked.
-      const host = requestHost(sender.tab !== undefined, sender.origin, msg.host);
-      return { locked: false, matches: host === null ? [] : matchesFor(host).map((i) => toMatchItem(i, true)) } satisfies Res<"matches">;
+      // (senderorigin.ts) — `msg.host` is the frame's own claim and named any host it liked. The page is named by its
+      // origin, so its scheme decides (F4: a plain-http page matches only an address saved as http).
+      const page = requestPage(sender.tab !== undefined, sender.origin, msg.host);
+      return { locked: false, matches: page === null ? [] : matchesFor(page).map((i) => toMatchItem(i, true)) } satisfies Res<"matches">;
     }
     case "allItems": {
       // Popup ONLY (security review 2026-10): the in-page search-all that once needed the whole
@@ -2662,8 +3527,8 @@ async function dispatch(msg: Req, sender: chrome.runtime.MessageSender): Promise
     case "pageInfo": {
       const locked = session === null;
       // Security review 2026-10 (root cause E): the count is for the sender's browser-set origin.
-      const host = requestHost(sender.tab !== undefined, sender.origin, msg.host);
-      const matchCount = locked || host === null ? 0 : matchesFor(host).length;
+      const page = requestPage(sender.tab !== undefined, sender.origin, msg.host);
+      const matchCount = locked || page === null ? 0 : matchesFor(page).length;
       const tabId = sender.tab?.id;
       // V4: the badge is the tab's ONE authority now (refreshTabBadge — login count precedence, else
       // the card discovery dot). Top frame only — an iframe's load must not repaint the tab's signal.
@@ -2777,118 +3642,249 @@ function verifyServerIdentity(localPub: Uint8Array, identityPubB64: string): voi
   }
 }
 
-/** Key building lives in grantkeys.ts (security review 2026-10, root cause A, branch A6; DESIGN-A §1.7, owner
- *  decision Q8): the extension adopts ONLY keys that open under the UVK (personal wrap, owner wraps, member
- *  self-wraps) and never opens a grant seal, v1 or v2. Shared by the full unlock and the quick-unlock redeem.
- *  The A1 seal-vs-wrap "vault key mismatch" compare went with the seal opening; the full clients keep it. */
 /**
- * The personal vault (save target, and the VK the usage ledger is keyed from — crypto.ts `usageKey`).
- * Security review 2026-10, root cause A §4 (A5 review H-1): decided by `AccountKeys.personalWrap` alone, or —
- * when the server withholds it — by the wrap THIS device cached the last time it saw one (UVK-sealed, so the
- * cache is safe; flagged as an anomaly). Never by the server's `type` label or a `role`, and the extension
- * never mints a wrap. "" = no personal vault: the ledger paths treat that as "no ledger" and a save with no
- * explicit vault fails loudly. See personalpick.ts.
+ * The served account against what this extension knows at the current server (accountmemory.ts judgeServed): throws
+ * IdentityMismatchError for the same account under another key (no offer), RemadeAccountError for another account under
+ * a known address. A read that fails refuses (KnownAccountUnreadableError): taken as "no record", it let a substitution
+ * in and then wrote it over the kept key. (A browser with no store at all never reaches a sign-in: chooseServer refuses.)
+ * [email] null: the quick unlock, whose account id is the local record's, compares the served account's key record only.
  */
-export async function pickPersonalVaultId(
-  wrap: PersonalWrapWire | null | undefined,
-  uvk: Uint8Array,
-  userId: string,
-  vaultKeys: Map<string, Uint8Array>,
-  /** The sync's vault rows: only their (ciphertext) meta blobs are kept beside a pending change, so the popup
-   *  can name both vaults (A5b LOW-3) under keys the session holds. */
-  vaults: readonly { vaultId: string; metaBlob?: string }[] = [],
-): Promise<string> {
-  const key = nsk(`personalWrap:${userId}`);
-  let cached: PersonalWrapWire | null = null;
+async function checkKnownAccount(email: string | null, userId: string, verifiedPub: Uint8Array): Promise<void> {
+  const names = [nsk(keyRecordName(userId)), ...(email === null ? [] : [nsk(addressRecordName(email))])];
+  let got: Record<string, unknown>;
   try {
-    // A10: a strict decode (a UUID vault id and nothing else); a damaged record reads as absent and is cleared.
-    const d = decodePersonalWrap((await trusted.get(key))[key]);
-    cached = d.value;
-    if (d.rewrite) await trusted.remove(key).catch(() => {});
+    got = await trusted.get(names);
   } catch {
-    cached = null; // no trusted store: behaves like a device that never saw a wrap (a served wrap is a proposal)
+    throw new KnownAccountUnreadableError();
   }
-  const pick = pickPersonal(wrap, uvk, userId, vaultKeys, { cached });
-  const changeKey = nsk(`personalChange:${userId}`);
-  stagedChangeFallback = null;
+  const bound = email === null ? null : readRecord(got[names[1]!]);
+  // Keys are compared as their decoded bytes, in one canonical text: the served key is the one verifyServerIdentity has
+  // just tied to the seed (its 32 bytes, whatever text the server sent them in), and a kept record is read the same way.
+  const verdict = judgeServed({ boundUserId: bound, keyOfServed: canonicalKey(readRecord(got[names[0]!])) }, userId, toB64(verifiedPub));
+  if (verdict.ok) return;
+  throw verdict.code === "identity_mismatch" ? new IdentityMismatchError() : new RemadeAccountError(bound ?? "");
+}
+
+/** The account the last "another account under a known address" refusal named, for its address at its server: what
+ *  "Forget the earlier account on this device" may forget (decided on 2026-11-17). Memory only; set by no other refusal
+ *  (not the same account under another key, not a quick unlock, not records that could not be read). */
+let earlierOffer: { originKey: string; email: string; earlier: string; gen: number } | null = null;
+/** After a forgetting, the address whose next taken sign-in says once that the extension now remembers that account. */
+let rememberNotice: { originKey: string; email: string } | null = null;
+/**
+ * The same mark kept at rest, with the server's own records (so "Forget this server" removes it), so that a worker the
+ * browser stops between the forgetting and the next sign-in still says it: written only by the forgetting, removed when
+ * the notice has been said. Holds nothing but that the address's next sign-in says it.
+ */
+const rememberNoticeName = (email: string): string => nsk(`accountRemembered:${addressNorm(email)}`);
+/** The marks this worker has said (by name): one that could not be removed is not said again in this worker's life. */
+const rememberSaid = new Set<string>();
+
+/**
+ * "Forget the earlier account on this device" (decided on 2026-11-17; the person's own act, behind the popup's second
+ * confirmation). Only for the address and server of a refusal that named another account than the one served, and never
+ * while a session of the earlier account is open. Removes, at this server only: the address's record (which account the
+ * address is), the earlier account's own records (item homes, personal wrap, account-state memory), the device record
+ * kept under the address, the quick-unlock record and the biometric reuse record where they are that account's, and a
+ * token kept for that address's next sign-in. KEEPS the record of the earlier account's identity key, the server's pin
+ * and every other account's records: it is not "Forget this server" and does not purge the server's namespace. Writes
+ * nothing; the next sign-in writes the new account's records only where none is kept. Every read comes first: a read
+ * that fails forgets nothing, and a removal that fails is never answered "forgotten".
+ */
+async function forgetEarlierAccount(email: unknown): Promise<Res<"forgetEarlierAccount">> {
+  await ensureLoaded();
+  const n = typeof email === "string" ? addressNorm(email) : null;
+  const offer = earlierOffer;
+  if (offer === null || offer.gen !== redeemGen) earlierOffer = null; // a later attempt, lock or switch cleared it
+  if (offer === null || offer.gen !== redeemGen || n === null || offer.email !== n || offer.originKey !== currentOriginKey) return { ok: false, code: "not_offered" };
+  const u = offer.earlier;
+  if (session !== null && session.userId === u) return { ok: false, code: "open" };
+  // Every sign-in, code step and quick unlock under way is left from here, as "Forget this server" leaves them: none of
+  // them may record the earlier account again, or open it, after its records went. The offer goes with them.
+  redeemGen++;
+  offer.gen = redeemGen;
+  earlierOffer = offer;
+  const addressName = nsk(addressRecordName(n));
+  const device = emailNorm(n);
+  let qu: { userId: string } | null;
+  let bio: unknown;
+  let bound: string | null;
   try {
-    if (pick.source === "wrap" && wrap) {
-      await trusted.set({ [key]: { vaultId: wrap.vaultId, wrappedVk: wrap.wrappedVk } }); // ciphertext only
+    const got = await trusted.get([addressName, nsk(BKEY)]);
+    bound = readRecord(got[addressName]);
+    bio = got[nsk(BKEY)];
+    qu = await quStore.read();
+  } catch {
+    return { ok: false, code: "failed" };
+  }
+  // The address names the earlier account still (or nothing: a forgetting cut before it finished). Anything else: the
+  // records changed since the refusal, and nothing is forgotten on what was not offered.
+  if (bound !== null && bound !== u) return { ok: false, code: "not_offered" };
+  if (session !== null && session.userId === u) return { ok: false, code: "open" }; // opened while the reads were out
+  const names = [addressName, nsk(`itemHomes:${u}`), nsk(`personalWrap:${u}`), nsk(`accountStateMemory:${u}`), ...(device === null ? [] : [nsk(deviceKey(device))])];
+  if ((bio as { userId?: unknown } | undefined)?.userId === u) names.push(nsk(BKEY));
+  try {
+    // The quick unlock goes first: a failure after it leaves every protective record as it was (the line for a failure
+    // says that the quick unlock may already be gone); then the one removal in the trusted store, all of it or none.
+    if (qu !== null && qu.userId === u) await quickUnlock.wipe();
+    await trusted.remove(names);
+  } catch {
+    return { ok: false, code: "failed" };
+  }
+  if (keptUnconfirmed !== null && emailNorm(keptUnconfirmed.email) === device) keptUnconfirmed = null;
+  earlierOffer = null;
+  rememberNotice = { originKey: currentOriginKey, email: n };
+  rememberSaid.delete(rememberNoticeName(n)); // a new forgetting is said again
+  try {
+    await trusted.set({ [rememberNoticeName(n)]: true });
+  } catch {
+    /* not kept at rest: this worker still says it from memory; a stopped one does not */
+  }
+  return { ok: true };
+}
+
+/** A kept key record as its canonical text (the 32 bytes it decodes to, encoded as the record is written), or, where it
+ *  does not decode to 32 bytes, a value that never equals a served key. */
+function canonicalKey(record: string | null): string | null {
+  if (record === null) return null;
+  try {
+    const b = fromB64(record);
+    return b.length === 32 ? toB64(b) : "?";
+  } catch {
+    return "?";
+  }
+}
+
+/** Thrown when the account genesis fails §5.2 at an unlock: the identity fault (IDENTITY_MISMATCH copy). */
+class GenesisRefused extends Error {
+  readonly verdict: string;
+  constructor(verdict: string) {
+    super(`account genesis refused: ${verdict}`);
+    this.verdict = verdict;
+    this.name = "GenesisRefused";
+  }
+}
+
+/** Keys an unlock (full or quick) builds, from the AccountKeys, the UVK, the identity seed and a sync. */
+interface UnlockKeys {
+  vaultKeys: Map<string, Uint8Array>;
+  vaultRoles: Map<string, string>;
+  personalVaultId: string;
+  waiting: number;
+}
+
+/**
+ * The extension's reduced rule at every unlock (design 2026-11-15 §12.2 rules 1 and 2, §5.2, §5.3):
+ *  1. the account genesis is verified against the extension's own Ed25519 and X25519 keys from the identity seed, the
+ *     session's userId, the pinned card's instanceId and the served personal wrap's vaultId — any failure is the
+ *     identity fault, before any vault material is used;
+ *  2. the personal vault is the genesis's `personalVaultId`, its key the served personal wrap when it names that vault
+ *     and opens — or, when the server withholds it or it does not open, the wrap this browser cached the last time it
+ *     saw one (UVK-sealed, so the cache is safe; an anomaly is logged); otherwise there is no personal vault;
+ *  3. the account state is opened under the UVK and checked against the high-water mark (accountstate.ts); shared-vault
+ *     wraps open only under its records (grantkeys.ts buildVaultKeys).
+ */
+async function buildUnlockKeys(
+  keys: AccountKeys,
+  uvk: Uint8Array,
+  seed: Uint8Array,
+  userId: string,
+  grants: SyncResponse["grants"],
+): Promise<UnlockKeys> {
+  const instanceId = currentPin?.pin.instanceId;
+  if (instanceId === undefined) throw new CardStopError("confirm_server");
+  if (typeof keys.genesis !== "string" || keys.genesis === "") throw new GenesisRefused("absent");
+  let frame: Uint8Array;
+  try {
+    frame = fromB64(keys.genesis);
+  } catch {
+    throw new GenesisRefused("bad_frame");
+  }
+  const served = keys.personalWrap ?? null;
+  const g = verifyGenesis(frame, { own: ownKeysFromSeed(seed), sessionUserId: userId, pinnedInstanceId: instanceId, servedPersonalVaultId: served?.vaultId ?? null });
+  if (!g.ok) throw new GenesisRefused(g.verdict);
+  const personalVaultId = g.genesis.personalVaultId;
+  const vaultKeys = new Map<string, Uint8Array>();
+  const vaultRoles = new Map<string, string>();
+  const cacheKey = nsk(`personalWrap:${userId}`);
+  let personalVk = served === null ? null : personalVaultKey(served.wrappedVk, served.vaultId, personalVaultId, uvk, userId);
+  if (personalVk !== null && served !== null) {
+    await trusted.set({ [cacheKey]: { vaultId: served.vaultId, wrappedVk: served.wrappedVk } }).catch(() => {}); // ciphertext only
+  } else {
+    try {
+      const cached = decodePersonalWrap((await trusted.get(cacheKey))[cacheKey]).value;
+      if (cached !== null) personalVk = personalVaultKey(cached.wrappedVk, cached.vaultId, personalVaultId, uvk, userId);
+    } catch {
+      /* no trusted store: no cached wrap */
     }
-    // A5b M-2 / L-2: a served wrap naming another vault waits for the human (popup notice); the cache keeps
-    // the vault this device had. Anything else clears a stale pending change.
-    // A9 review MEDIUM-1: a served wrap on a browser with no cached wrap is a PROPOSAL staged the same way, with no
-    // current vault: the popup asks the human to confirm it (describe/accept) before anything is captured into it.
-    if (pick.source === "changed" || pick.source === "proposed") {
-      const metaOf = (id: string) => vaults.find((v) => v.vaultId === id)?.metaBlob ?? "";
-      const record: PersonalChangeRecord = {
-        ...pick.served,
-        currentVaultId: pick.vaultId,
-        currentMetaBlob: metaOf(pick.vaultId), // ciphertext only
-        servedMetaBlob: metaOf(pick.served.vaultId),
-      };
-      try {
-        await trusted.set({ [changeKey]: record });
-      } catch {
-        // No trusted store (Firefox private browsing): stage it in memory for this worker's life, so the popup can
-        // still ask the human. It is re-staged at every unlock, and accept re-opens it under the UVK either way.
-        stagedChangeFallback = { key: changeKey, record };
+    console.warn(
+      personalVk === null
+        ? "andvari: the personal-vault record was withheld or does not open; no personal vault this session"
+        : "andvari: the personal-vault record was withheld or does not open; using the one this device already authenticated",
+    );
+  }
+  if (personalVk !== null) {
+    vaultKeys.set(personalVaultId, personalVk);
+    vaultRoles.set(personalVaultId, "owner");
+  }
+  const records = await readAccountStateRecords(uvk, userId);
+  const shared = buildVaultKeys(grants, uvk, userId, personalVaultId, records);
+  for (const [id, vk] of shared.vaultKeys) vaultKeys.set(id, vk);
+  for (const [id, role] of shared.vaultRoles) vaultRoles.set(id, role);
+  warnKeyState(shared.keyUnreadable, shared.waiting);
+  return { vaultKeys, vaultRoles, personalVaultId: personalVk === null ? "" : personalVaultId, waiting: shared.waiting.size };
+}
+
+/**
+ * The account state's records for shared-vault wraps (§12.2 rule 1, §5.4): served, opened under the UVK, merged into
+ * this browser's memory of it (per origin and account: the high-water mark of the in-blob seq and the vaults records),
+ * and null — no shared-vault wrap opens — when nothing usable is served, the served copy is below the mark, the memory
+ * record is damaged, or the state cannot be read. The memory is written back; a rollback is logged.
+ */
+async function readAccountStateRecords(uvk: Uint8Array, userId: string): Promise<WrapRecords | null> {
+  const memKey = nsk(`accountStateMemory:${userId}`);
+  let memory: StateMemory | null = null;
+  try {
+    const raw = (await trusted.get(memKey))[memKey];
+    if (raw !== undefined) {
+      memory = decodeStateMemory(raw);
+      if (memory === null) {
+        console.warn("andvari: this browser's record of the account state is damaged; shared vaults stay closed");
+        return null;
       }
     }
-    else await trusted.remove(changeKey);
   } catch {
-    /* best effort */
+    // Design §4.4, §12.2 rule 6: a mark that cannot be read is unknown, never "no mark yet". Shared vaults stay closed,
+    // and nothing is written back from what the server serves (that once lowered a stored mark to a replayed state).
+    console.warn("andvari: this browser's record of the account state could not be read; shared vaults stay closed");
+    return null;
   }
-  if (pick.source === "withheld") console.warn("andvari: the server did not send the personal-vault record; using the one this device already authenticated");
-  if (pick.source === "unreadable") console.warn("andvari: the personal-vault record does not open; no personal vault this session");
-  if (pick.source === "unreadable-cached") console.warn("andvari: the personal-vault record does not open; using the one this device already authenticated");
-  if (pick.source === "changed") console.warn("andvari: the personal-vault record names another vault than this device's; keeping this device's until you confirm");
-  if (pick.source === "proposed") console.info("andvari: this browser has not confirmed a personal vault yet; captures wait for the confirmation in the popup");
-  return pick.vaultId;
-}
-
-/** A pending personal-vault change as stored: the served wrap plus the two vaults' meta CIPHERTEXT (for the
- *  names, A5b LOW-3). Nothing in it is trusted at accept time: the wrap is re-opened under the UVK (LOW-4). */
-interface PersonalChangeRecord extends PersonalWrapWire {
-  currentVaultId?: string;
-  currentMetaBlob?: string;
-  servedMetaBlob?: string;
-}
-
-/** A15: a pending change staged while the trusted store could not be written (Firefox private browsing). Memory
- *  only, keyed by its namespaced record key (origin + user); cleared by every re-stage, an accept, and the purge. */
-let stagedChangeFallback: { key: string; record: PersonalChangeRecord } | null = null;
-
-/** A5b M-2: the pending personal-vault change for the signed-in user, or null. */
-async function readPersonalChange(userId: string): Promise<PersonalChangeRecord | null> {
-  const k = nsk(`personalChange:${userId}`);
+  let servedState: Awaited<ReturnType<typeof api.accountState>>;
   try {
-    // A10: a strict decode (UUID served vault, UUID-or-empty current vault); a damaged record reads as none and is cleared.
-    const d = decodePersonalChange((await trusted.get(k))[k]);
-    if (d.rewrite) await trusted.remove(k).catch(() => {});
-    return d.value ?? (stagedChangeFallback?.key === k ? stagedChangeFallback.record : null);
+    servedState = await api.accountState();
   } catch {
-    return stagedChangeFallback?.key === k ? stagedChangeFallback.record : null;
+    return null; // not served this time: shared vaults stay closed (fail safe)
   }
-}
-
-/** A5b LOW-3 (closed in A6): the popup notice text, naming the current and the new vault (names decrypt under
- *  keys the session holds; a name that does not decrypt falls back to neutral words). Null when none pends. */
-async function personalChangeText(s: Session): Promise<string | null> {
-  const c = await readPersonalChange(s.userId);
-  if (!c) return null;
-  const currentId = c.currentVaultId ?? s.personalVaultId;
-  // A11 (q13): the served wrap's key is no longer in the session map while the change pends, so its NAME decrypts under
-  // a key re-opened (UVK, vk-personal AD) for this one read and dropped; nothing is installed. No UVK (an evicted SW's
-  // restored session) or a wrap that does not open: a key the grant table holds, else the neutral fallback.
-  const reopened = reopenStagedPersonalWrap(c, s.uvk, s.userId);
-  const servedVk = reopened.ok ? reopened.vk : s.vaultKeys.get(c.vaultId);
-  // A9 review MEDIUM-1: no current vault = a proposal on a browser that never confirmed one.
-  if (!currentId) return personalProposalNotice(vaultNameFromMeta(servedVk, c.vaultId, c.servedMetaBlob));
-  return personalChangeNotice(
-    vaultNameFromMeta(s.vaultKeys.get(currentId), currentId, c.currentMetaBlob),
-    vaultNameFromMeta(servedVk, c.vaultId, c.servedMetaBlob),
-  );
+  let state = null;
+  if (servedState.sealedState !== null) {
+    let blob: Uint8Array | null = null;
+    try {
+      blob = fromB64(servedState.sealedState);
+    } catch {
+      blob = null;
+    }
+    const opened = blob === null ? null : openAccountState(blob, uvk, userId);
+    if (opened === null || !opened.ok) {
+      console.warn("andvari: the account state does not open or is not this account's; shared vaults stay closed");
+      return null;
+    }
+    state = opened.state;
+  }
+  const applied = applyServedState(memory, state);
+  if (applied.rollback) console.warn("andvari: the server served an older account state than this browser has seen; shared vaults stay closed");
+  if (applied.genesisAnomalies.length > 0) console.warn(`andvari: ${applied.genesisAnomalies.length} vault record(s) name another genesis than this browser's; its own are kept`);
+  if (applied.memory !== null) await trusted.set({ [memKey]: applied.memory }).catch(() => {});
+  return applied.usable;
 }
 
 /** Key-state anomalies the popup does not render: the full clients raise those notices. */
@@ -2897,83 +3893,22 @@ function warnKeyState(keyUnreadable: ReadonlySet<string>, waiting: ReadonlySet<s
   if (waiting.size > 0) console.info(`andvari: ${waiting.size} shared vault(s) wait for a full client to verify them`);
 }
 
-/**
- * The co-holder describe step for a pending personal-vault change, held in SW MEMORY only: an evicted SW, a lock or
- * another account starts over. `acceptPersonalChange` refuses (`coholders_not_loaded`) unless it names the exact
- * served vault and this account (A5b review LOW-1 parity, A6 fix round).
- */
-let personalChangeDescribed: { vaultId: string; userId: string } | null = null;
-
-/**
- * Load who the SERVER reports on the NEW personal vault (GET /vaults/{id}/members). Success records the describe
- * step for that vaultId and returns the line the popup shows, labelled as server-reported (LOW-2). Failure clears
- * it: the popup then offers only "keep current" and says it cannot check who else holds that vault.
- */
-async function describePersonalChange(): Promise<Res<"personalDescribeChange">> {
-  personalChangeDescribed = null;
-  if (!session) return { ok: false, code: "locked" };
-  const userId = session.userId;
-  const staged = await readPersonalChange(userId);
-  if (!staged) return { ok: false, code: "none" };
-  try {
-    const members = await api.vaultMembers(staged.vaultId);
-    if (!session || session.userId !== userId) return { ok: false, code: "locked" };
-    personalChangeDescribed = { vaultId: staged.vaultId, userId };
-    return { ok: true, coHoldersLine: coHoldersLine(coHoldersOf(members, userId)) };
-  } catch {
-    return { ok: false, code: "coholders_unavailable" };
-  }
-}
-
-/**
- * A5b M-2: the human confirmed, in the popup, that the personal vault changed. Mints nothing. (Keeping the current
- * vault instead is a re-designation in a full client.)
- *
- * A5b review LOW-4 (closed in A6): the staged record sat in storage.local (since A15 the trusted store, or memory), which is not authenticated, so it is
- * RE-OPENED here under the session UVK with the vk-personal AD (reopenStagedPersonalWrap) and the key installed
- * is the one that re-open yields; a key merely present in the session map proves nothing about the blob. A
- * session restored after an MV3 eviction holds no UVK (breaker B1: memory-only custody), so it answers
- * `need_full_unlock` and the popup asks for a full unlock first; a blob that does not open is `unverified`.
- */
-async function acceptPersonalChange(): Promise<Res<"personalAcceptChange">> {
-  if (!session) return { ok: false, code: "locked" };
-  const staged = await readPersonalChange(session.userId);
-  if (!staged) return { ok: false, code: "none" };
-  const userId = session.userId;
-  // A5b LOW-1 parity (A6 fix round): only a vault whose co-holders the human was shown, in this SW lifetime.
-  const gate = acceptGate(personalChangeDescribed, staged.vaultId, userId);
-  if (gate) return { ok: false, code: gate };
-  const r = reopenStagedPersonalWrap(staged, session.uvk, userId);
-  if (!r.ok) return { ok: false, code: r.code };
-  const served: PersonalWrapWire = { vaultId: staged.vaultId, wrappedVk: staged.wrappedVk };
-  try {
-    await trusted.set({ [nsk(`personalWrap:${userId}`)]: served });
-    await trusted.remove(nsk(`personalChange:${userId}`));
-  } catch {
-    // A15: no trusted store (Firefox private browsing). The cache is only what spares a LATER unlock this confirmation;
-    // the human confirmed this one and the wrap re-opened under the UVK above, so it is adopted for this session.
-    console.warn("andvari: this browser cannot keep the personal-vault choice (no extension storage here); it applies to this session only");
-  }
-  stagedChangeFallback = null;
-  personalChangeDescribed = null;
-  session.vaultKeys.set(served.vaultId, r.vk);
-  session.personalVaultId = served.vaultId;
-  await persistSession();
-  return { ok: true };
-}
-
 /** Policy fetch — a failed fetch must never mean "no idle lock at all" (web resolveAutoLockSeconds
  *  falls back to a persisted value; here the conservative defaults stand in). Also captures the
  *  clipboard-clear window (E1-4). Shared by unlock + redeem (breaker B6 re-fetches autoLockSeconds
  *  on a quick unlock). Values pass the §2.3/B1-1 CEILINGS (api.ts clamps): with the server now an
  *  arbitrary self-host endpoint, a hostile policy's 0/oversized timer clamps into range — it can
  *  tighten the lock/clear windows but never disable them. */
-async function fetchPolicyInto(): Promise<void> {
+async function fetchPolicyInto(current: () => boolean = () => true): Promise<void> {
+  // [current] — the unlock that asked is still the one in front. A lock in the fetch reset both windows for
+  // the locked state, and a switch made them another server's; the late answer writes neither.
   try {
     const p = await api.clientPolicy();
+    if (!current()) return;
     autoLockSeconds = clampAutoLockSeconds(p.autoLockSeconds, DEFAULT_AUTOLOCK_SECONDS);
     clipboardClearSeconds = clampClipboardClearSeconds(p.clipboardClearSeconds, DEFAULT_CLIPBOARD_CLEAR_SECONDS);
   } catch {
+    if (!current()) return;
     autoLockSeconds = DEFAULT_AUTOLOCK_SECONDS;
     clipboardClearSeconds = DEFAULT_CLIPBOARD_CLEAR_SECONDS;
   }
@@ -3013,7 +3948,7 @@ function reofferPendingSaves(): void {
     // loop closes; capture-time ran this same check against an empty vault and couldn't). A changed
     // password falls through to the offer, which resolveSaveAction will land as an Update (A11: only of a
     // personal-vault item; a match the "Save" banner never named in another vault becomes a new personal item).
-    const target = saveTargetFor(matchesFor(st.pending.host), st.pending.username, st.pending.password, session?.personalVaultId);
+    const target = saveTargetFor(matchesFor(pendingPage(st.pending)), st.pending.username, st.pending.password, session?.personalVaultId);
     if (target && (target.doc.login?.password ?? "") === st.pending.password) {
       st.pending = undefined;
       persistTabs();
@@ -3061,7 +3996,7 @@ async function commitApprovedSave(
     const { res, wrote } = await commitPendingSave(tabId, st, pending);
     if (res.ok) {
       if (!wrote) return; // 2a suppress — pending cleared, nothing to toast
-      const m: TabMsg = { type: "pendingSaveCommitted" };
+      const m: TabMsg = res.otherAccount === true ? { type: "pendingSaveCommitted", otherAccount: true } : { type: "pendingSaveCommitted" };
       chrome.tabs.sendMessage(tabId, m, { frameId: 0 }).catch(() => {});
       return;
     }
@@ -3079,25 +4014,53 @@ async function unlock(email: string, password: string): Promise<Res<"unlock">> {
   redeemGen++; // a full unlock supersedes any in-flight quick-unlock redeem (owns() guard)
   clearPendingTotp(); // a fresh sign-in supersedes any prior TOTP challenge
   const gen = redeemGen; // owns() token: a server switch / lock mid-sign-in bumps this → we abort
-  const pre = await api.prelogin(email);
+  // Design 2026-11-15 §4.4: the chain is fetched and verified forward from the pin BEFORE anything derived from the
+  // password is sent; a fork stops here, durably. The pin itself is a password pin (baked or Trust Gate), so the
+  // password rule holds: prelogin, authKey and a TOTP code go only to this origin.
+  await ensureCardFresh();
+  if (gen !== redeemGen || session) return { ok: false, code: "aborted" };
+  // The api of the origin whose card was just checked, held for the whole sign-in. A
+  // switch replaces the module's `api` (and bumps redeemGen); the KDF takes seconds, so the generation is checked
+  // again after it, before the device record and before anything derived from the password is sent.
+  const dialer = api;
+  const from: SignInOrigin = { origin: serverUrl, owner: tokenOwner };
+  const pre = await dialer.prelogin(email);
   assertServerKdfParams(pre.kdfParams); // H1 (spec 05 T1): refuse a weakened/absurd KDF before deriving (also blocks a 4 GiB SW OOM)
   const mk = await deriveMasterKeyAsync(password, pre.kdfParams, fromB64(pre.kdfSalt));
+  if (gen !== redeemGen || session || dialer !== api) {
+    mk.fill(0);
+    return { ok: false, code: "aborted" };
+  }
   const ak = authKey(mk);
   const wk = wrapKey(mk); // needed by hydrateSession to open wrappedUvk; mk is otherwise done
+  mk.fill(0);
+  // The attempt and the server it started under, asked after every wait before anything is written.
+  const current = () => gen === redeemGen && !session && dialer === api;
+  const device = await deviceRecordFor(email, current);
+  if (!current()) return { ok: false, code: "aborted" };
+  const replaces = await replacedRefreshToken(email, device.rec);
+  if (!current()) return { ok: false, code: "aborted" };
   let s: SessionResponse;
   try {
-    s = await api.login(email, toB64(ak));
+    s = await dialer.login(email, toB64(ak), deviceObject(device.rec), undefined, replaces);
   } catch (e) {
+    // An answer that comes after the attempt was left (a lock, a switch, "Forget this server",
+    // another sign-in) is the attempt's no longer: it says "aborted", so nothing names the account afterwards (the
+    // caller remembers the email on a "totp_required"; before, a late one put it back after a forget).
+    if (!current()) return { ok: false, code: "aborted" };
     // Enrolled second factor: stash the ALREADY-DERIVED {authKey, wrapKey} (no second Argon2id) so
     // the code retry (unlockTotp) can finish; the popup renders a code field. Memory-only — see the
     // pendingTotp declaration for the B1 custody reason. Rethrow → unlockWithMapping → "totp_required".
-    // Only if still current (a mid-sign-in switch / lock owns the outcome — never strand foreign keys).
-    if (e instanceof ApiError && e.status === 401 && e.code === "totp_required" && gen === redeemGen && !session) {
-      pendingTotp = { origin: serverUrl, email, authKey: ak, wrapKey: wk, expiresAt: Date.now() + PENDING_TOTP_TTL_MS };
+    if (e instanceof ApiError && e.status === 401 && e.code === "totp_required") {
+      pendingTotp = { origin: serverUrl, email, authKey: ak, wrapKey: wk, device, replaces, expiresAt: Date.now() + PENDING_TOTP_TTL_MS };
     }
     throw e;
   }
-  return hydrateSession(email, s, wk, gen);
+  // The device record only for an attempt still current at its own server. Before, a login
+  // answered after "Forget this server" wrote it back (the email in its key, the device secret and id in its value).
+  // A sign-in left behind is ended by hydrateSession's first check. The record is written there, once the served account
+  // passed the checks: before, a refused sign-in had already replaced the row id the record named.
+  return hydrateSession(email, s, wk, gen, from, { dev: device, current });
 }
 
 /** Phase C — shared by the password unlock and the TOTP retry: open the UVK with the derived
@@ -3107,10 +4070,32 @@ async function unlock(email: string, password: string): Promise<Res<"unlock">> {
  *  origin — so we abort on a gen change, before any token/vault material is installed or POSTed.
  *  A throw here (identity mismatch, restricted-session 403, network) crosses to the caller's mapper;
  *  on ANY non-install exit the freshly-minted token pair is cleared so it never lingers while locked. */
-async function hydrateSession(email: string, s: SessionResponse, wk: Uint8Array, gen: number): Promise<Res<"unlock">> {
-  if (gen !== redeemGen || session) return { ok: false, code: "aborted" }; // superseded before we touched `api`
-  const mine = ++tokenOwner; // this sign-in's pair now owns the api
+async function hydrateSession(
+  email: string,
+  s: SessionResponse,
+  wk: Uint8Array,
+  gen: number,
+  from: SignInOrigin,
+  device: { dev: { rec: DeviceRecord; key: string | null }; current: () => boolean },
+): Promise<Res<"unlock">> {
+  if (gen !== redeemGen || session) {
+    await endAbandonedSignIn(from, { access: s.accessToken, refresh: s.refreshToken }, s.userId, from.owner, false); // superseded before we touched `api`
+    return { ok: false, code: "aborted" };
+  }
+  // §12.2 rule 7: the extension refuses the operator account. Its session is revoked at once (bounded, best effort)
+  // and nothing of it is opened, synced or kept. Anything but `member` is refused, as on the web (the field is always
+  // on the wire, spec 03 §0.1).
+  // The pinned card names the operator account too (a handover the server's role field may not show yet): the same
+  // refusal, decided on this browser's own pin, needing no signal from the server.
+  if (s.role !== "member" || cardNamesOperator(s.userId)) {
+    await revokePair(from.origin, { access: s.accessToken, refresh: s.refreshToken });
+    clearPendingTotp();
+    return { ok: false, code: "operator_account" };
+  }
+  const mine = ++tokenOwner;
+  const minted: TokenPair = { access: s.accessToken, refresh: s.refreshToken };
   api.setTokens(s.accessToken, s.refreshToken);
+  pairUser.set(api, s.userId);
   try {
     // H67: STRUCTURE first, secret second — a wrappedUvk that isn't a well-formed envelope is a
     // damaged/foreign account row, not a credentials failure (see VaultKeyDamagedError).
@@ -3137,63 +4122,169 @@ async function hydrateSession(email: string, s: SessionResponse, wk: Uint8Array,
     }
     const seedRefusal = envelopeStructuralRefusal(seedEnvelope);
     if (seedRefusal !== null) throw new VaultKeyDamagedError(`encryptedIdentitySeed: ${seedRefusal}`);
-    const identity = boxKeypairFromSeed(open(uvk, seedEnvelope, adIdkey(s.userId)));
+    const seed = open(uvk, seedEnvelope, adIdkey(s.userId));
+    const identity = boxKeypairFromSeed(seed);
     verifyServerIdentity(identity.publicKey, s.accountKeys.identityPub); // before ANY vault material is synced/persisted
+    // Decided on 2026-11-17: the account this extension knows the address as, and the key it knows the served account
+    // by, at this server. The same account under another key is the identity fault; another account under a known
+    // address is refused with both possibilities said. Before anything is synced or kept.
+    await checkKnownAccount(email, s.userId, identity.publicKey);
+    // Only once both checks made on this device passed (the seed's key, the kept records): a refused sign-in changes
+    // nothing here. Before the first request after the login: a sign-in that fails at the sync still names its row next
+    // time (a first sign-in otherwise left one more listed row per failure). Before, the row id was written before any check.
+    if (device.current()) await rememberDevice(device.dev, s.deviceId);
 
     const sync = await api.sync(0);
     if (gen !== redeemGen || session) {
-      // A switch/lock landed during sync: drop this sign-in's tokens (only its own: a quick unlock that superseded it
-      // owns the api now) and install nothing.
-      if (tokenOwner === mine) api.setTokens(null, null);
+      await endAbandonedSignIn(from, minted, s.userId, mine, true); // a switch/lock landed during sync — install nothing
       return { ok: false, code: "aborted" };
     }
-    const { vaultKeys, vaultRoles, keyUnreadable, waiting } = buildVaultKeysFromWraps(sync.grants, uvk, s.userId);
-    warnKeyState(keyUnreadable, waiting);
-    const personalVaultId = await pickPersonalVaultId(s.accountKeys.personalWrap, uvk, s.userId, vaultKeys, sync.vaults);
-    const homed = await homeAndDecrypt(sync, vaultKeys, s.userId);
+    // §12.2: the genesis verified, the personal wrap, the account state, the shared-vault wraps (buildUnlockKeys).
+    const { vaultKeys, vaultRoles, personalVaultId, waiting } = await buildUnlockKeys(s.accountKeys, uvk, seed, s.userId, sync.grants);
+    const homed = await homeAndDecrypt(sync, vaultKeys, s.userId, personalVaultId);
     if (gen !== redeemGen || session) {
-      if (tokenOwner === mine) api.setTokens(null, null); // a switch/lock landed meanwhile — install nothing (the sync-time rule above)
+      await endAbandonedSignIn(from, minted, s.userId, mine, true); // a switch/lock landed meanwhile — install nothing (the sync-time rule above)
       return { ok: false, code: "aborted" };
     }
-    const items = homed.items;
     // uvk RETAINED in memory (breaker B1) so enroll can wrap it; provenance PASSWORD + a fresh
     // lastFullUnlockAt stamp — the only place that mints `now` (breaker A4).
     session = {
       userId: s.userId,
       email,
-      items,
+      items: itemsUnderHeldKeys(homed.items, vaultKeys),
       vaultKeys,
       vaultRoles,
       personalVaultId,
-      mustChangePassword: s.mustChangePassword ?? false,
       uvk,
-      waitingGrants: waiting.size,
+      waitingGrants: waiting,
       homes: homed.homes,
+      homesKnown: homed.known,
       wrongVault: homed.wrongVault,
       vaultMeta: vaultMetaOf(sync.vaults),
       provenance: "PASSWORD",
       lastFullUnlockAt: Date.now(),
+      lockAt: Date.now() + lockWindowMs(), // the deadline starts at the install; armAutoLock below moves it
     };
     clearPendingTotp(); // a live session exists — the challenge (if any) is spent
 
-    await fetchPolicyInto();
+    // From here every write follows a wait (the policy fetch, the record, the snapshot), and a lock, a
+    // switch or "Forget this server" can land in any of them. Before, a lock in the policy fetch made the next line
+    // throw (the session was gone), and the sign-in answered "network"; a lock in the record's read would have seen
+    // the re-stamp disarm the record the lock had just armed. Each write is made only while the session installed
+    // above is still the one in front, and a sign-in left behind answers "aborted".
+    const installed = session;
+    const stillOpen = () => session === installed;
+    await fetchPolicyInto(stillOpen);
+    if (!stillOpen()) return { ok: false, code: "aborted" };
+    // Decided on 2026-11-17: the address now names this account, and the account's key is the one it was taken under
+    // (accountmemory.ts). Each only where none is kept: a kept key is never replaced by a sign-in (one transaction). A
+    // write that fails leaves the records as they were (the next sign-in writes them again).
+    const records = recordsFor(email, s.userId, toB64(identity.publicKey)); // the verified 32 bytes, canonical: not the served text
+    await trusted.setWhereAbsent(Object.fromEntries(Object.entries(records).map(([k, v]) => [nsk(k), v]))).catch(() => {});
+    if (!stillOpen()) return { ok: false, code: "aborted" };
     // breaker A6 + A11: a full unlock as a DIFFERENT user strands any prior quick-unlock blob → wipe;
     // a surviving same-user blob gets its 24 h window re-stamped to now (the fail-closed "a successful
     // full unlock re-stamps" rule) and its attempt budget refreshed to full.
-    await quickUnlock.onFullUnlock(s.userId, session.lastFullUnlockAt);
+    const recordUpdated = await quickUnlock.onFullUnlock(s.userId, installed.lastFullUnlockAt, stillOpen);
 
-    await persistSession();
-    void plainSession.remove(NKEY); // a fresh unlock clears the F26 idle-lock notice (E1-7)
-    void chrome.alarms.create("resync", { periodInMinutes: RESYNC_PERIOD_MIN });
+    // The vault is open from the line that installed the session. A snapshot
+    // write that fails (a full or failing storage) threw into the catch below, which answered an error ("unknown") over
+    // an open vault and started no resync and no socket. It is said as what it is, and the vault stays open in this
+    // worker; one that stops before the next lock comes back locked. Likewise a record the re-stamp above could not
+    // write, which before was not said at all.
+    if (!stillOpen()) return { ok: false, code: "aborted" };
+    const sessionSaved = await persistSession().then(
+      () => true,
+      () => false,
+    );
+    if (!stillOpen()) return { ok: false, code: "aborted" };
+    if (!recordUpdated) stashOwed = installed; // the record may still hold the stash of the session before this one
+    void plainSession.remove(NKEY).catch(() => {}); // a fresh unlock clears the F26 idle-lock notice (E1-7)
+    kindDeferred = null; // entry 10: a deferred kind change asks again at the next unlock
+    void startResyncAlarm();
     void ensureSocket(true); // T2: live bell up within ~1 s of unlock
     armAutoLock();
     reofferPendingSaves();
+    if (!sessionSaved) return { ok: true, notice: "session_not_saved" };
+    if (!recordUpdated) return { ok: true, notice: "quick_unlock_not_updated" };
+    // After "Forget the earlier account on this device": said once, at the first sign-in taken under that address.
+    const remembered = rememberNotice;
+    const inMemory = remembered !== null && remembered.originKey === currentOriginKey && remembered.email === addressNorm(email);
+    const markName = rememberNoticeName(email);
+    let atRest = false;
+    try {
+      atRest = (await trusted.get(markName))[markName] !== undefined && !rememberSaid.has(markName);
+    } catch {
+      /* unreadable: said from memory only */
+    }
+    if (inMemory || atRest) {
+      rememberNotice = null;
+      // Said now: the mark goes, also where it could not be read (it may still be there), and this worker remembers that
+      // it was said, so that a mark that could not be read or removed does not say it a second time.
+      rememberSaid.add(markName);
+      await trusted.remove(markName).catch(() => {});
+      return { ok: true, notice: "account_remembered" };
+    }
     return { ok: true };
   } catch (e) {
-    // Never leave live tokens in the api while locked (doUnlockWithPin:1597 parity), but only this sign-in's own pair.
+    // A sign-in refused for an identity reason (the served key against the seed's or the kept record, the genesis, or
+    // another account under a known address) ends at the server the session it was given: at its own origin with the pin
+    // in force, and only while no session of that account is open here (endAbandonedSignIn's rules).
+    if (e instanceof IdentityMismatchError || e instanceof GenesisRefused || e instanceof RemadeAccountError) {
+      await endAbandonedSignIn(from, minted, s.userId, mine, true);
+    }
+    // Another account under a known address (and only that refusal): "Forget the earlier account on this device" may be
+    // offered for it, for this address at this server, naming the account the address is tied to here.
+    if (e instanceof RemadeAccountError && e.earlier !== "" && e.earlier !== "?" && from.origin === serverUrl) {
+      // Stamped with the generation it was raised under: every later sign-in, code step, quick unlock, lock or switch moves
+      // the generation on (redeemGen), and the offer is then gone.
+      earlierOffer = { originKey: currentOriginKey, email: addressNorm(email), earlier: e.earlier, gen: redeemGen };
+    }
+    // Never leave live tokens in the api while locked (doUnlockWithPin:1597 parity) — but only this sign-in's own pair:
+    // another sign-in that set its pair since owns the api now.
     if (!session && tokenOwner === mine) api.setTokens(null, null);
     throw e;
   }
+}
+
+/** Where a password sign-in started: the origin whose card it checked, and the token owner then (endAbandonedSignIn). */
+interface SignInOrigin {
+  readonly origin: string;
+  readonly owner: number;
+}
+
+/** Bumped whenever a sign-in or a redeem puts its own pair into the module `api`: an abandoned sign-in clears or
+ *  revokes only a pair that is still its own. */
+let tokenOwner = 0;
+
+/**
+ * A sign-in left behind (a lock, a server switch, another sign-in) after the
+ * server already answered its login does not complete (the redeemGen checks), and it does not leave the session it
+ * minted alive at the server either. The pair is [pair], or (once this sign-in put it into `api`, as owner [owner]) the
+ * api's, possibly rotated. It is revoked with its own token at its own origin, bounded, through a separate client, and
+ * only when:
+ * - no other sign-in or redeem has put its pair into `api` since this one's [owner] (a revoke ends the device's
+ *   session, so it could end theirs), and no session of the same account is installed (the same reason);
+ * - its origin is still the one dialed, with its pin in force (§4.4 "No credential goes to an origin without a pin
+ *   in force"; after a switch the pair is dropped unsent and the server session lapses on its own).
+ *
+ * Why an abandoned sign-in after a switch stays unrevoked: the pair lived only in this worker's memory and is dropped
+ * there, so nothing can use it; and the server's logout ends every session of this browser's device row at that origin
+ * (AuthRoutes `POST /auth/logout` revokes by deviceId), which can include a quick-unlock record kept in the old origin's
+ * namespace across the switch, so sending it could sign the person out of a session they still have. What is left is
+ * a server session no client holds, which lapses with its refresh token. Ending it exactly would need a logout of one
+ * session (the token's own) on the server.
+ */
+async function endAbandonedSignIn(from: SignInOrigin, minted: TokenPair, userId: string, owner: number, inApi: boolean): Promise<void> {
+  if (tokenOwner !== owner) return; // another sign-in owns the api's pair (and may share this device's session)
+  let p = minted;
+  if (inApi) {
+    const held = api.getTokens(); // a refresh during the sync may have rotated it; a lock may have cleared it already
+    api.setTokens(null, null);
+    if (held.access !== null) p = held;
+  }
+  if (session !== null && session.userId === userId) return;
+  await revokePair(from.origin, p);
 }
 
 /** Single-flight for the TOTP code retry (mirrors pinUnlockInFlight): two racing popups / an
@@ -3212,9 +4303,10 @@ async function doUnlockTotp(code: string): Promise<Res<"unlockTotp">> {
   if (!p) return { ok: false, code: "totp_expired" }; // SW evicted / switched origin / 5-min fuse blew
   redeemGen++; // ONLY once a real challenge exists (a dead no-op must not abort an in-flight PIN redeem)
   const gen = redeemGen;
+  const from: SignInOrigin = { origin: p.origin, owner: tokenOwner };
   let s: SessionResponse;
   try {
-    s = await api.login(p.email, toB64(p.authKey), code);
+    s = await api.login(p.email, toB64(p.authKey), deviceObject(p.device.rec), code, p.replaces);
   } catch (e) {
     if (session) return { ok: true }; // lost the race but the vault is open — not an error
     if (e instanceof ApiError) {
@@ -3230,9 +4322,13 @@ async function doUnlockTotp(code: string): Promise<Res<"unlockTotp">> {
   if (session) return { ok: true }; // a full unlock landed while we were on the wire
   // A server switch during the login POST would have bumped redeemGen AND cleared pendingTotp (both
   // via applyServerChange) — hydrateSession's gen guard is the backstop, but bail early + explicitly.
-  if (gen !== redeemGen || !livePendingTotp()) return { ok: false, code: "aborted" };
+  if (gen !== redeemGen || !livePendingTotp()) {
+    await endAbandonedSignIn(from, { access: s.accessToken, refresh: s.refreshToken }, s.userId, from.owner, false);
+    return { ok: false, code: "aborted" };
+  }
   try {
-    return await hydrateSession(p.email, s, p.wrapKey, gen); // clears pendingTotp on success
+    // The device record is written by hydrateSession once the served account passed its checks.
+    return await hydrateSession(p.email, s, p.wrapKey, gen, from, { dev: p.device, current: () => gen === redeemGen && !session }); // clears pendingTotp on success
   } catch (e) {
     return { ok: false, code: mapUnlockError(e), error: String(e) };
   }
@@ -3243,15 +4339,20 @@ async function doUnlockTotp(code: string): Promise<Res<"unlockTotp">> {
  *  raw String(e) rides `error` as debug detail the surfaces never render. */
 async function unlockWithMapping(email: string, password: string): Promise<Res<"unlock">> {
   let r: Res<"unlock">;
+  const attempt = unlock(email, password); // its first step, before any wait, takes the attempt's generation
+  const gen = redeemGen;
+  const at = api;
   try {
-    r = await unlock(email, password);
+    r = await attempt;
   } catch (e) {
     r = { ok: false, code: mapUnlockError(e), error: String(e) };
   }
   // A15: the worker remembers the email (the popup used to write it to storage.local, which content scripts can read
   // on Firefox): once the server accepted it — a sign-in, or a password accepted pending the one-time code (else
   // TOTP-enrolled accounts never get it stored). The email only, never the password.
-  if (r.ok || r.code === "totp_required") await rememberEmail(email);
+  // And only while the attempt is still the current one, at the server it started under: a
+  // lock, a switch or "Forget this server" since (each bumps the generation) leaves it unwritten.
+  if ((r.ok || r.code === "totp_required") && gen === redeemGen && at === api) await rememberEmail(email);
   return r;
 }
 
@@ -3266,7 +4367,10 @@ async function readRememberedEmail(): Promise<string | null> {
 
 function mapUnlockError(e: unknown): UnlockCode {
   if (e instanceof KdfPolicyError) return "kdf_policy"; // H1 (spec 05 T1): server tried to weaken/DoS the KDF
-  if (e instanceof IdentityMismatchError) return "identity_mismatch";
+  if (e instanceof IdentityMismatchError || e instanceof GenesisRefused) return "identity_mismatch"; // §5.2: one copy for every verdict
+  if (e instanceof RemadeAccountError) return "remade_account"; // another account under a known address
+  if (e instanceof KnownAccountUnreadableError) return "memory_unreadable"; // the records could not be read: nothing taken
+  if (e instanceof CardStopError) return e.code;
   if (e instanceof VaultKeyDamagedError) return "keys_damaged"; // H67: damaged/foreign key blob — terminal, never wrong-password
   if (e instanceof ApiError) {
     if (e.code === "bad_wire_id") return "bad_wire_id"; // A11 (c18): tampering class, never the "try again" fold
@@ -3274,9 +4378,13 @@ function mapUnlockError(e: unknown): UnlockCode {
     // Restricted session (server §2.6 row 4): a totpRequired instance let an un-enrolled user's
     // login succeed, then every authed route 403s until they enroll in the web vault. Route there
     // honestly instead of the server_error dead-end (moot on the reference instance — TOTP off).
-    if (e.status === 403 && (e.code === "totp_enrollment_required" || e.code === "public_login_requires_totp")) return "totp_enroll_required";
+    if (e.status === 403 && e.code === "totp_enrollment_required") return "totp_enroll_required";
+    // §8.7: the password (and any code) verified, but the account only allows linked devices — the extension cannot be.
+    if (e.status === 403 && e.code === "link_required") return "link_required";
     if (e.status === 401) return e.code === "totp_required" ? "totp_required" : "bad_credentials";
-    return "server_error"; // 429/500/… fold here (strict Welcome-ladder parity, decision 5)
+    // The sign-in's back-off has its own line, as the web's sign-in has (it was folded into "the server had a problem").
+    if (e.status === 429) return "rate_limited";
+    return "server_error"; // 500/… fold here (strict Welcome-ladder parity, decision 5)
   }
   if (e instanceof TypeError) return "network"; // fetch rejection (web errors.ts:26-33 convention)
   return "unknown";
@@ -3295,8 +4403,7 @@ async function enrollQuickUnlock(pin: string): Promise<Res<"enrollQuickUnlock">>
   if (!session) return { ok: false, code: "locked" };
   // A16: no enrollment where nothing can arm (no session sealing key, or Chrome's access level unconfirmed).
   if (!quCompartmentTrusted) return { ok: false, code: "unavailable" };
-  if (session.mustChangePassword) return { ok: false, code: "must_change_password" };
-  if (!session.uvk) return { ok: false, code: "need_full_unlock" };
+  if (!session.uvk || session.serverEnded) return { ok: false, code: "need_full_unlock" }; // §4.4: no quick unlock for an ended session
   const r = await quickUnlock.enroll({
     uvk: session.uvk,
     userId: session.userId,
@@ -3306,17 +4413,20 @@ async function enrollQuickUnlock(pin: string): Promise<Res<"enrollQuickUnlock">>
     autoLockSeconds,
     stillCurrent: enrolledUnder(session),
   });
-  if (!r.ok) return r.code === "ended" ? { ok: false, code: "locked" } : { ok: false, code: r.code, reason: r.reason };
+  if (!r.ok) {
+    if (r.code === "weak_pin") return { ok: false, code: r.code, reason: r.reason };
+    return { ok: false, code: r.code === "ended" ? "locked" : "switched_off" }; // switched off meanwhile
+  }
   return { ok: true };
 }
 
-/** An enrolment belongs to the session it was asked under. A lock, a sign-out, a server switch (which locks) and a new
- *  browser session all drop `session`. Any of them during the seconds an enrolment takes (or the minutes a biometric
- *  prompt may stay up) and the enrolment writes nothing: before, it went on to seal that session's UVK into a fresh
- *  record (after a sign-out had wiped the old one), so the account's quick-unlock record and its email outlived the
- *  sign-out, and the next password sign-in to that account switched quick unlock back on. */
+/** An enrolment belongs to the session it was asked under. A lock, a sign-out, a server switch (which locks)
+ *  and a new browser session all drop `session`; a session the server ended is marked. Any of them during the seconds an
+ *  enrolment takes (or the minutes a biometric prompt may stay up) and the enrolment writes nothing: before, it went on
+ *  to seal that session's UVK into a fresh record after the sign-out had wiped the old one, so the account's quick-unlock
+ *  record and its email outlived the sign-out, and the next password sign-in to that account switched it back on. */
 function enrolledUnder(s: Session): () => boolean {
-  return () => session === s;
+  return () => session === s && !s.serverEnded;
 }
 
 /** Enroll biometric quick-unlock (0.17.0) — same gates as enrollQuickUnlock (unlocked, in-memory UVK,
@@ -3328,8 +4438,7 @@ async function enrollQuickUnlockBio(): Promise<Res<"enrollQuickUnlockBio">> {
   if (!session) return { ok: false, code: "locked" };
   // A16: refused before the passkey ceremony — no enrollment where nothing can arm.
   if (!quCompartmentTrusted) return { ok: false, code: "unavailable" };
-  if (session.mustChangePassword) return { ok: false, code: "must_change_password" };
-  if (!session.uvk) return { ok: false, code: "need_full_unlock" };
+  if (!session.uvk || session.serverEnded) return { ok: false, code: "need_full_unlock" }; // §4.4: no quick unlock for an ended session
   dropEnrollSecretCache();
   const userId = session.userId;
   const r = await quickUnlock.enrollBio({
@@ -3358,7 +4467,9 @@ function unlockWithPin(pin: string): Promise<Res<"unlockWithPin">> {
   return pinUnlockInFlight;
 }
 
-type RedeemDanceResult = { ok: true } | { ok: false; code: "aborted" | "revoked" | "network" | "identity_mismatch" | "kdf_policy" | "server_error" | "stale_uvk" | "keys_damaged" };
+type RedeemDanceResult =
+  | { ok: true; notice?: QuickUnlockNotice }
+  | { ok: false; code: "aborted" | "revoked" | "not_confirmed" | "network" | "identity_mismatch" | "memory_unreadable" | "kdf_policy" | "server_error" | "stale_uvk" | "keys_damaged" | "confirm_server" | "server_fork" | "card_invalid" | "operator_account" };
 
 function unlockWithBio(): Promise<Res<"unlockWithBio">> {
   bioUnlockInFlight ??= doUnlockWithBio().finally(() => {
@@ -3369,30 +4480,39 @@ function unlockWithBio(): Promise<Res<"unlockWithBio">> {
 
 async function doUnlockWithBio(): Promise<Res<"unlockWithBio">> {
   await ensureLoaded();
+  earlierOffer = null; // a later attempt clears the offer to forget an earlier account
   if (session) return { ok: true }; // already unlocked (a race)
+  await Promise.race([lockRefreshSettled, delay(REDEEM_FOLLOWS_REFRESH_MS)]); // the record's pair, answered late
+  if (session) return { ok: true };
   const gen = redeemGen;
-  const begin = await quickUnlock.beginRedeemBio(); // opens the connector + runs the WebAuthn ceremony
+  // opens the connector + runs the WebAuthn ceremony; left by a lock or a switch meanwhile → "aborted"
+  const begin = await quickUnlock.beginRedeemBio(() => gen === redeemGen && session === null);
   if (!begin.ok) return { ok: false, code: begin.code }; // not_armed | expired | corrupt | bio_cancelled
   // owns() guard: a lock / sign-out / full unlock landed during the ceremony → discard silently.
   if (gen !== redeemGen || session) return { ok: false, code: "aborted" };
   return finishRedeem(begin, supersedeSignIns());
 }
 
-/** A quick unlock that has just proved its factor supersedes a password sign-in already under way, as a password
- *  sign-in supersedes a quick unlock (unlock's own `redeemGen++`): the later action wins. Before, the redeem left the
- *  generation alone, so a sign-in started earlier (say on the master-password form while the PIN was being checked) and
- *  the redeem both ran to the end: the sign-in installed its session with its pair, and the redeem then installed its
- *  own session over it while the worker's one client still held the sign-in's pair, so one account's session ran on
- *  another account's tokens. Returns the redeem's own generation. */
+/** A quick unlock that has just proved its factor supersedes a password sign-in already under way, as a
+ *  password sign-in supersedes a quick unlock (unlock's own `redeemGen++`): the later action wins. Before, the redeem
+ *  left the generation alone, so a sign-in started earlier (say on the master-password form while the PIN was being
+ *  checked) and the redeem both ran to the end: the sign-in installed its session with its pair, and the redeem then
+ *  installed its own session over it while the worker's one client still held the sign-in's pair, so one account's
+ *  session ran on another account's tokens. Returns the redeem's own generation. */
 function supersedeSignIns(): number {
   return ++redeemGen;
 }
 
 async function doUnlockWithPin(pin: string): Promise<Res<"unlockWithPin">> {
   await ensureLoaded();
+  earlierOffer = null; // a later attempt clears the offer to forget an earlier account
   if (session) return { ok: true }; // already unlocked (a race) — nothing to redeem
+  // A refresh a lock stopped waiting for brings the record's pair when it answers; the redeem reads after it.
+  await Promise.race([lockRefreshSettled, delay(REDEEM_FOLLOWS_REFRESH_MS)]);
+  if (session) return { ok: true };
   const gen = redeemGen;
-  const begin = await quickUnlock.beginRedeem(pin);
+  // A lock or a server switch (which locks first) during the derivation leaves the redeem: "aborted".
+  const begin = await quickUnlock.beginRedeem(pin, () => gen === redeemGen && session === null);
   if (!begin.ok) {
     return begin.code === "wrong_pin"
       ? { ok: false, code: "wrong_pin", attemptsRemaining: begin.attemptsRemaining }
@@ -3409,8 +4529,10 @@ async function doUnlockWithPin(pin: string): Promise<Res<"unlockWithPin">> {
  *  → sync → session build under withRedeemInFlight, GUARANTEEING api tokens clear on any locked exit.
  *  Its failure codes are exactly the subset both PinUnlockCode and BioUnlockCode carry. */
 async function finishRedeem(begin: BeginRedeemOk, gen: number): Promise<RedeemDanceResult> {
-  const mine = ++tokenOwner; // the redeem's pair now owns the api
+  const mine = ++tokenOwner; // the redeem's pair now owns the api (endAbandonedSignIn)
   api.setTokens(begin.tokens.access, begin.tokens.refresh);
+  const dialer = api; // the client the redeem runs on (redeemClient)
+  pairUser.set(dialer, begin.userId);
   // withRedeemInFlight sets redeemInFlight for the server dance and GUARANTEES it clears on EVERY exit
   // (success / owns()-abort return / throw) — a mid-redeem switch/lock that bumps redeemGen and aborts
   // here can never STRAND the flag true (which would later misroute a full unlock's initial setTokens
@@ -3421,16 +4543,44 @@ async function finishRedeem(begin: BeginRedeemOk, gen: number): Promise<RedeemDa
   try {
     return await withRedeemInFlight(
       (v) => {
-        redeemInFlight = v; // true → token mutations land in QKEY.lockedTokens (persistTokens), not a session
+        // true → this client's token mutations land in QKEY.lockedTokens (persistTokens), not a session. Cleared only
+        // while it is still this redeem's mark (another server's redeem may hold it after a switch).
+        if (v) redeemClient = dialer;
+        else if (redeemClient === dialer) redeemClient = null;
       },
       async (): Promise<RedeemDanceResult> => {
         try {
-          // A3⊕B2: forced rotation is the FIRST server contact. It is also the account-state read that
-          // catches a rescue (which revokes all sessions, spec 03) — a revoked/rotated refresh → 401.
+          // The record holds no refresh token: a lock overtook a refresh whose answer never came (its mark stood, so the
+          // client handed the lock no token), or the worker stopped while one was out. That is not the server ending the
+          // session: before, the refresh below answered "revoked" and the sign-out's wipe ran. Nothing is sent; it ends as
+          // a living worker's "no try left" ends: the quick-unlock record and the known-logins digest go (as
+          // endSessionByServer drops them), captures stay, and the token the lock kept is named by the next sign-in.
+          if (begin.tokens.refresh === null) {
+            api.setTokens(null, null);
+            await quickUnlock.wipe().catch(() => {});
+            knownLoginsKey = null;
+            await sessionSeal.remove("knownLogins", currentOriginKey).catch(() => {});
+            // A standing mark of this end for the locked popup, kept at rest (a stopped worker still says it), until the
+            // next unlock clears it as it clears the idle-lock line.
+            await plainSession.set({ [NKEY]: { kind: "not_confirmed" } }).catch(() => {});
+            return { ok: false, code: "not_confirmed" };
+          }
+          // Design 2026-11-15 §4.4: the card chain is checked before the refresh token is spent; a fork stops here.
+          await ensureCardFresh();
+          if (gen !== redeemGen) return { ok: false, code: "aborted" };
+          // §12.2 rule 7: a quick unlock carries no role on the wire, so the card decides. A handover that made this
+          // account the operator signs it out (full wipe, the redeem's pair revoked) before any refresh is spent.
+          if (cardNamesOperator(begin.userId)) {
+            await doSignOut(true);
+            await plainSession.set({ [NKEY]: { kind: "operator" } }).catch(() => {});
+            return { ok: false, code: "operator_account" };
+          }
+          // A3⊕B2: forced rotation is the FIRST authenticated server contact. It is also the account-state read that
+          // catches a revocation elsewhere — a revoked/rotated refresh → 401.
           const rot = await api.forceRefresh();
           if (gen !== redeemGen) return { ok: false, code: "aborted" };
           if (rot === "revoked") {
-            await doSignOut(); // definitive-401 → FULL wipe (blob + co-key + tokens) → full sign-in
+            await doSignOut(true); // definitive-401 → FULL wipe (blob + co-key + tokens) → full sign-in
             return { ok: false, code: "revoked" };
           }
           if (rot === "transient") {
@@ -3449,59 +4599,90 @@ async function finishRedeem(begin: BeginRedeemOk, gen: number): Promise<RedeemDa
           const seedEnvelope = seedGate.envelope;
           // The seed open throwing = stale/foreign UVK (→ wipe); the compare failing = IdentityMismatchError
           // (→ HARD FAIL, blob KEPT). Same strictness as the full unlock (verifyServerIdentity).
-          const identity = boxKeypairFromSeed(open(begin.uvk, seedEnvelope, adIdkey(begin.userId)));
+          const seed = open(begin.uvk, seedEnvelope, adIdkey(begin.userId));
+          const identity = boxKeypairFromSeed(seed);
           verifyServerIdentity(identity.publicKey, keys.identityPub);
+          // The served key against the kept record of this account's key, as on the password road: a server that holds
+          // the vault key could otherwise serve a seed of its own under it and be taken here. The account id is the local
+          // record's, so only the key record is read; nothing is written. A read that fails refuses (blob KEPT).
+          await checkKnownAccount(null, begin.userId, identity.publicKey);
+          if (gen !== redeemGen) return { ok: false, code: "aborted" };
 
           const sync = await api.sync(0);
-          await fetchPolicyInto(); // breaker B6: re-fetch autoLockSeconds — done BEFORE the final owns-check so
-          if (gen !== redeemGen) return { ok: false, code: "aborted" }; // no network await follows the session build
-          const { vaultKeys, vaultRoles, keyUnreadable, waiting } = buildVaultKeysFromWraps(sync.grants, begin.uvk, begin.userId);
-          warnKeyState(keyUnreadable, waiting);
-          const personalVaultId = await pickPersonalVaultId(keys.personalWrap, begin.uvk, begin.userId, vaultKeys, sync.vaults);
-          const homed = await homeAndDecrypt(sync, vaultKeys, begin.userId);
+          await fetchPolicyInto(() => gen === redeemGen); // breaker B6: re-fetch autoLockSeconds — done BEFORE the final owns-check so
           if (gen !== redeemGen) return { ok: false, code: "aborted" };
-          const items = homed.items;
-          // Provenance QUICK + the COPIED stamp (breaker A4). mustChangePassword is false by construction —
-          // a rescue would have revoked the session and the forced refresh above would have 401'd (breaker B6).
+          // §12.2: the same reduced rule as the full unlock — the genesis verified at every unlock (buildUnlockKeys).
+          const { vaultKeys, vaultRoles, personalVaultId, waiting } = await buildUnlockKeys(keys, begin.uvk, seed, begin.userId, sync.grants);
+          const homed = await homeAndDecrypt(sync, vaultKeys, begin.userId, personalVaultId);
+          if (gen !== redeemGen) return { ok: false, code: "aborted" };
+          // Provenance QUICK + the COPIED stamp (breaker A4).
           session = {
             userId: begin.userId,
             email: begin.email,
-            items,
+            items: itemsUnderHeldKeys(homed.items, vaultKeys),
             vaultKeys,
             vaultRoles,
             personalVaultId,
-            mustChangePassword: false,
             uvk: begin.uvk, // UVK retained in memory (breaker B1) so a re-enroll from this QUICK session works
-            waitingGrants: waiting.size,
+            waitingGrants: waiting,
             homes: homed.homes,
+            homesKnown: homed.known,
             wrongVault: homed.wrongVault,
             vaultMeta: vaultMetaOf(sync.vaults),
             provenance: "QUICK",
             lastFullUnlockAt: begin.blob.lastFullUnlockAt,
+            lockAt: Date.now() + lockWindowMs(), // the deadline starts at the install; armAutoLock moves it
           };
-          redeemInFlight = false; // a session exists now → persistTokens routes to the full snapshot again
+          if (redeemClient === dialer) redeemClient = null; // a session exists now → persistTokens routes to the full snapshot again
           // From here only LOCAL storage awaits remain (no doLock is UI-reachable during a redeem — the popup
           // shows the locked PIN screen, whose Lock/Sign-out buttons are unlocked-only; the gen checks above
           // are defense-in-depth). completeRedeem clears the token stash and keeps the blob for the next lock.
           clearPendingTotp(); // a PIN redeem opened the vault → any stale TOTP challenge is spent
-          await persistSession();
-          await quickUnlock.completeRedeem(autoLockSeconds);
-          void plainSession.remove(NKEY);
-          void chrome.alarms.create("resync", { periodInMinutes: RESYNC_PERIOD_MIN });
+          // The vault is open from here. A record write that fails now (a full or failing storage, a wipe
+          // since the read) is not a stale UVK: before, it fell to the catch below, which wiped the record and answered
+          // "stale_uvk" over an open vault. It is said as what it is, and the record is left for the next lock to re-arm.
+          // The same for the session snapshot's write, the one just before the record's and the
+          // larger, so the first to fail in a full storage. The vault stays open in this worker (a worker that stops
+          // before the next lock comes back locked, and then the master password opens it); the record is still updated,
+          // so it holds no live pair while the vault is open, and the next lock arms it with the pair in use then.
+          const installed = session;
+          const sessionSaved = await persistSession().then(
+            () => true,
+            () => false,
+          );
+          // A lock (or a switch, which locks) that lands in the waits after the install armed the record
+          // with the live pair; the redeem's record update would disarm it (or, after a switch, disarm the new server's).
+          // Nothing more is written for a session that is no longer the one in front, and the unlock says so.
+          const stillOpen = () => session === installed;
+          if (!stillOpen()) return { ok: false, code: "aborted" };
+          const recordUpdated = await quickUnlock.completeRedeem(autoLockSeconds, stillOpen).then(
+            () => true,
+            () => false,
+          );
+          if (!stillOpen()) return { ok: false, code: "aborted" };
+          if (!recordUpdated) stashOwed = installed; // the record may still hold the pair stashed for this redeem
+          void plainSession.remove(NKEY).catch(() => {}); // the idle-lock line of the last lock; the next lock rewrites it
+          kindDeferred = null; // entry 10: a deferred kind change asks again at the next unlock
+          void startResyncAlarm();
           void ensureSocket(true);
           armAutoLock();
           reofferPendingSaves();
-          return { ok: true };
+          return sessionSaved && recordUpdated ? { ok: true } : { ok: true, notice: "quick_unlock_not_updated" };
         } catch (e) {
-          if (e instanceof IdentityMismatchError) return { ok: false, code: "identity_mismatch" }; // blob KEPT (evidence)
+          if (e instanceof IdentityMismatchError || e instanceof GenesisRefused) return { ok: false, code: "identity_mismatch" }; // blob KEPT (evidence)
+          if (e instanceof KnownAccountUnreadableError) return { ok: false, code: "memory_unreadable" }; // blob KEPT, try again
+          if (e instanceof CardStopError) {
+            api.setTokens(null, null); // nothing was spent: the blob is KEPT for when the server is usable again
+            return { ok: false, code: e.code };
+          }
           if (e instanceof VaultKeyDamagedError) return { ok: false, code: "keys_damaged" }; // q38: blob KEPT, terminal
           if (e instanceof KdfPolicyError) {
-            await doSignOut(); // the server tried to weaken the master KDF on redeem — wipe, force full sign-in
+            await doSignOut(true); // the server tried to weaken the master KDF on redeem — wipe, force full sign-in
             return { ok: false, code: "kdf_policy" };
           }
           if (e instanceof ApiError) {
             if (e.status === 401 || e.status === 403) {
-              await doSignOut(); // definitive-401 survived the inner refresh → FULL wipe
+              await doSignOut(true); // definitive-401 survived the inner refresh → FULL wipe
               return { ok: false, code: "revoked" };
             }
             return { ok: false, code: "server_error" }; // transient server — blob kept
@@ -3514,9 +4695,9 @@ async function finishRedeem(begin: BeginRedeemOk, gen: number): Promise<RedeemDa
       },
     );
   } finally {
-    // A failed redeem must never leave tokens live in the api while locked, but only its own pair: a sign-in that set its
-    // pair since (and is still in its sync, so no session yet) owns the api now, and clearing it left that sign-in to
-    // install a session with no token at all.
+    // A failed redeem must never leave tokens live in the api while locked — but only its own pair: a
+    // sign-in that set its pair since (and is still in its sync, so no session yet) owns the api now, and clearing it
+    // left that sign-in to install a session with no token at all.
     if (!session && tokenOwner === mine) api.setTokens(null, null);
   }
 }
@@ -3549,12 +4730,37 @@ async function dismissQuickUnlockOffer(): Promise<Res<"dismissQuickUnlockOffer">
   return { ok: true };
 }
 
+/** Design §4.4 (decided on 2026-11-17): [n] more captures deleted unsaved by a lock or sign-out nobody was asked about,
+ *  added to any the popup has not said yet. Plain: only the number. Best-effort (storage.session unavailable: unsaid). */
+async function addLostCaptures(n: number): Promise<void> {
+  try {
+    const was = (await plainSession.get(LOST_KEY))[LOST_KEY];
+    await plainSession.set({ [LOST_KEY]: (typeof was === "number" && was > 0 ? was : 0) + n });
+  } catch {
+    /* storage.session unavailable */
+  }
+}
+
+/** The captures deleted unsaved since the popup last said so, taken: the popup says them once. */
+async function takeLostCaptures(): Promise<number> {
+  try {
+    const n = (await plainSession.get(LOST_KEY))[LOST_KEY];
+    if (typeof n !== "number" || n <= 0) return 0;
+    await plainSession.remove(LOST_KEY);
+    return n;
+  } catch {
+    return 0;
+  }
+}
+
 /** The F26 idle-lock reason, read from its own storage.session key (E1-7). Not part of the session
  *  snapshot — it must outlive the snapshot's removal doLock does. Plain (A16): no secret in it. */
-async function readLockNotice(): Promise<{ kind: "idle"; seconds: number } | null> {
+async function readLockNotice(): Promise<Res<"status">["lockNotice"]> {
   try {
     const n = (await plainSession.get(NKEY))[NKEY] as { kind?: unknown; seconds?: unknown } | undefined;
     if (n && n.kind === "idle" && typeof n.seconds === "number") return { kind: "idle", seconds: n.seconds };
+    if (n && n.kind === "operator") return { kind: "operator" };
+    if (n && n.kind === "not_confirmed") return { kind: "not_confirmed" };
   } catch {
     /* storage.session unavailable — no notice */
   }
@@ -3635,16 +4841,20 @@ async function closeOffscreenIfPresent(): Promise<void> {
  *  A15: moved out of storage.local, where a content script could plant homes that hid items from fill. */
 const homesKey = (userId: string): string => nsk(`itemHomes:${userId}`);
 
-async function loadHomes(userId: string): Promise<Map<string, string>> {
+/** The item homes, or null when the record cannot be read (design §4.4: unknown, never empty — an empty map here used
+ *  to be taken as authoritative and then written back over the real record). */
+async function loadHomes(userId: string): Promise<Map<string, string> | null> {
+  const k = homesKey(userId);
+  let raw: unknown;
   try {
-    const k = homesKey(userId);
-    // A10: a strict decode (UUID itemId → UUID vaultId); a cleaned record is re-persisted once.
-    const d = decodeItemHomes((await trusted.get(k))[k]);
-    if (d.rewrite) await trusted.set({ [k]: encodeItemHomes(d.value) }).catch(() => {});
-    return d.value;
+    raw = (await trusted.get(k))[k];
   } catch {
-    return new Map(); // no trusted store: a fresh browser's posture (the residual), never a failed unlock
+    return null;
   }
+  // A10: a strict decode (UUID itemId → UUID vaultId); a cleaned record is re-persisted once.
+  const d = decodeItemHomes(raw);
+  if (d.rewrite) await trusted.set({ [k]: encodeItemHomes(d.value) }).catch(() => {});
+  return d.value;
 }
 
 function saveHomes(userId: string, homes: Map<string, string>): Promise<void> {
@@ -3666,9 +4876,17 @@ async function homeAndDecrypt(
   sync: SyncResponse,
   vaultKeys: Map<string, Uint8Array>,
   userId: string,
-  homes?: Map<string, string>,
-): Promise<{ items: DecryptedItem[]; homes: Map<string, string>; wrongVault: number }> {
-  const h = homes ?? (await loadHomes(userId));
+  personalVaultId: string,
+  held?: { homes: Map<string, string>; known: boolean },
+): Promise<{ items: DecryptedItem[]; homes: Map<string, string>; known: boolean; wrongVault: number }> {
+  const loaded = held === undefined ? await loadHomes(userId) : null;
+  const known = held !== undefined ? held.known : loaded !== null;
+  const h = held?.homes ?? loaded ?? new Map<string, string>();
+  // §4.4: with the homes record unreadable, only the personal vault's rows are admitted (only this account's own
+  // clients can seal under its key, so no other vault's writer can plant one there); no row of another vault is
+  // admitted, since nothing can be checked against its home, and the record is not written back.
+  const rows = known ? sync.items : sync.items.filter((it) => personalVaultId !== "" && it.vaultId === personalVaultId);
+  if (!known) console.warn("andvari: this browser's record of item homes could not be read; shared vaults' items stay hidden this session");
   const opened = new Map<SyncResponse["items"][number], DecryptedItem>();
   const applies = (it: SyncResponse["items"][number]): boolean => {
     if (it.deleted || !it.blob || !vaultKeys.has(it.vaultId)) return false;
@@ -3676,14 +4894,14 @@ async function homeAndDecrypt(
     if (d) opened.set(it, d);
     return d !== null;
   };
-  const { admitted, tally, changed } = admitRows(sync.items, h, applies);
-  if (changed) await saveHomes(userId, h);
+  const { admitted, tally, changed } = admitRows(rows, h, applies);
+  if (changed && known) await saveHomes(userId, h);
   const items: DecryptedItem[] = [];
   for (const it of admitted) {
     const d = opened.get(it) ?? decryptItem(it, vaultKeys);
     if (d) items.push(d);
   }
-  return { items, homes: h, wrongVault: tally.refused };
+  return { items, homes: h, known, wrongVault: tally.refused };
 }
 
 /** One row, decrypted under a held key to a well-formed doc, or null (tombstone, no key, undecryptable, malformed). */
@@ -3718,6 +4936,15 @@ function decryptItems(sync: SyncResponse, vaultKeys: Map<string, Uint8Array>): D
   return items;
 }
 
+/** The one rule of the session's list of opened items: it never holds an item of a vault whose key the session does not
+ *  hold. Of [items], keeps only those whose vault key is in [vaultKeys] at this moment, the keys of the session the list is
+ *  set on. Every place that sets a session's list goes through here (the unlock, the quick unlock, the restore from the
+ *  snapshot, a pull's drop of a key and its install, a save that adds an item): a pull that opened rows before a later
+ *  pull dropped their vault's key, and installs after it, installs none of them. A source test holds every such place. */
+function itemsUnderHeldKeys(items: readonly DecryptedItem[], vaultKeys: ReadonlyMap<string, Uint8Array>): DecryptedItem[] {
+  return items.filter((i) => vaultKeys.has(i.vaultId));
+}
+
 // ---- matching ----
 
 /** ux-parity--2: ONE list order fleet-wide. Web sorts by name (store.ts localeCompare) and
@@ -3737,14 +4964,21 @@ function loginItems(): DecryptedItem[] {
   return session ? session.items.filter((i) => i.doc.type === "login").sort(byName) : [];
 }
 
-/** Login items whose saved uris match the page host — canonical urimatch (spec 02 §3.1) over a
- *  browser FillTarget. The host is normalized here (location.host may carry a port); saved
- *  androidapp:// entries classify kind:"app" and correctly never match a web target. */
-function matchesFor(host: string): DecryptedItem[] {
-  const webHost = normalizeHost(host);
-  if (!webHost) return [];
-  const target: FillTarget = { webHost, packageName: "" };
-  return loginItems().filter((it) => matchLogins(it.doc.login?.uris ?? [], target, pslResolve));
+/** Login items whose saved uris match the page — canonical urimatch (spec 02 §3.1) over a
+ *  browser FillTarget. [page] is the page's ORIGIN (a browser-set `sender.origin`, the popup's active-tab origin, or
+ *  a capture's stored uri), never a bare host: its scheme decides which addresses may match, since a plain-http page
+ *  matches only an address saved as http (spec 05 autofill (e) — a login saved for https was
+ *  offered on the same host over http, where anyone on the path serves the page). The host is normalized here (an
+ *  origin may carry a port); saved androidapp:// entries classify kind:"app" and never match a web target. */
+function matchesFor(page: string): DecryptedItem[] {
+  if (normalizeHost(page) === null) return [];
+  return loginItems().filter((it) => matchLoginsAt(it.doc.login?.uris ?? [], page, pslResolve));
+}
+
+/** The page a pending capture was taken on: its stored uri (H124: `http://…` for a plain-http origin, else
+ *  `https://<host>`). A pending persisted by an older worker has no uri and matches by its host, as it did then. */
+function pendingPage(p: { host: string; uri?: string }): string {
+  return p.uri ?? p.host;
 }
 
 function toMatchItem(it: DecryptedItem, siteMatch: boolean): MatchItem {
@@ -3927,6 +5161,9 @@ function reveal(msg: Extract<Req, { type: "reveal" }>, sender: chrome.runtime.Me
   // without allow-same-origin has an opaque origin but a perfectly real `location.hostname`.
   // The popup keeps `msg.host` (no tab; its host comes from `activeTabHost()` under activeTab).
   const webHost = sender.tab !== undefined ? senderHost(sender) : normalizeHost(msg.host);
+  // Spec 05 autofill (e): the scheme from the same source as the host — a plain-http page
+  // matches only an address saved as http. The popup names the active tab's origin, scheme included.
+  const plainHttp = isPlainHttp(sender.tab !== undefined ? sender.origin : msg.host);
   // Security review 2026-10 (root cause B): a TAB sender's `explicit` no longer skips the host
   // match — the in-page click that set it could be steered by the page (revealgate.ts). A page
   // frame gets a host-mismatched item only through the popup's one-shot grant below.
@@ -3934,7 +5171,7 @@ function reveal(msg: Extract<Req, { type: "reveal" }>, sender: chrome.runtime.Me
     revealGate({
       fromTab: sender.tab !== undefined,
       explicit: msg.explicit === true,
-      hostMatched: webHost !== null && matchLogins(it.doc.login?.uris ?? [], { webHost, packageName: "" }, pslResolve),
+      hostMatched: webHost !== null && matchLoginsOnPage(it.doc.login?.uris ?? [], webHost, plainHttp, pslResolve),
     }) === "allow";
   const tabId = sender.tab?.id;
   // A popup fill grant is redeemable ONLY by the tab's TOP frame (fillFromPopup targets frameId 0).
@@ -4002,27 +5239,35 @@ async function appVaultDispatch(msg: Req, sender: chrome.runtime.MessageSender):
     case "ping":
       // This build never contacts the server: the andvari app does, and the popup shows no connection test.
       return { ok: false, error: "the andvari app talks to the server, not this extension" } satisfies Res<"ping">;
-    case "setServerUrl":
+    case "chooseServer":
+    case "confirmServer":
       // The server is the andvari app's: only the app's answer (its own ask, or the popup's relay) changes it here, and
       // the page that sent this (Options) is not in this build.
-      return { ok: false, code: "not_allowed" } satisfies Res<"setServerUrl">;
-    case "forgetLegacyServer":
-      return { ok: false } satisfies Res<"forgetLegacyServer">;
+      return { ok: false, code: "not_allowed" } satisfies Res<"chooseServer">;
+    case "forgetServer":
+      return { ok: false } satisfies Res<"forgetServer">;
+    case "forgetEarlierAccount":
+      return { ok: false, code: "not_offered" } satisfies Res<"forgetEarlierAccount">; // no own sign-in in this build
+    case "followServerChange":
+      return { ok: false, code: "not_allowed" } satisfies Res<"followServerChange">;
+    case "deferServerChange":
+      return { ok: false } satisfies Res<"deferServerChange">;
     case "status":
       return {
         unlocked: vault.unlocked,
         count: vault.items().length,
         email: vault.email,
-        mustChangePassword: false,
+        cardNotice: null,
         lockNotice: null,
+        timerNotice: null, // Safari on iOS: the app's vault, locked by the app
         quickUnlock: { enrolled: false, armed: false, attemptsRemaining: 0, offerDismissed: true, kind: null },
         totpPending: null,
-        personalChange: false,
-        personalChangeText: null,
-        personalProposal: false,
         waitingGrants: 0,
+        serverEnded: false,
         wrongVault: 0,
         rememberedEmail: null,
+        unsavedCaptures: 0, // Safari on iOS: a capture goes to the andvari app's queue, which the app keeps
+        capturesLost: 0, // …so no lock here deletes one
         pageSummoned: Date.now() - pageSummonedPopupAt < PAGE_SUMMON_WINDOW_MS,
       } satisfies Res<"status">;
     case "appUnlock": {
@@ -4040,13 +5285,17 @@ async function appVaultDispatch(msg: Req, sender: chrome.runtime.MessageSender):
     }
     case "lock":
       vault.close();
+      // As doLock does: a fill the person picked before the lock is not redeemable after it. (A redemption after close
+      // already answered `cancelled`; the grants themselves now go with the lock too.)
+      grants.clear();
+      cardGrants.clear();
       return { ok: true } satisfies Res<"lock">;
     case "matches": {
       // No in-page menu in this build: a page frame never gets a list. The popup gets the logins saved for the site
       // of the active tab, by the tab's own URL (never the host the message names), so it can lead with them.
       if (sender.tab !== undefined || !vault.unlocked) return { locked: !vault.unlocked, matches: [] } satisfies Res<"matches">;
       const page = await activePageHost();
-      const matches = page === null ? [] : appVaultList(undefined).filter((i) => matchLogins(i.uris, { webHost: page, packageName: "" }, pslResolve)).map((i) => ({ ...i, siteMatch: true }));
+      const matches = page === null ? [] : appVaultList(undefined).filter((i) => matchLoginsAt(i.uris, page, pslResolve)).map((i) => ({ ...i, siteMatch: true }));
       return { locked: false, matches } satisfies Res<"matches">;
     }
     case "allItems":
@@ -4091,8 +5340,6 @@ async function appVaultDispatch(msg: Req, sender: chrome.runtime.MessageSender):
     case "setTotp":
     case "linkUri":
     case "signOut":
-    case "personalAcceptChange":
-    case "personalDescribeChange":
       return noOwnSession(msg.type);
     default:
       return undefined;
@@ -4143,7 +5390,7 @@ async function appVaultReveal(msg: Extract<Req, { type: "reveal" }>, sender: chr
   if (tabId === undefined) {
     // The popup: an explicit copy of one login's password ([revealGate], as in every build).
     const webHost = normalizeHost(msg.host);
-    allowed = revealGate({ fromTab: false, explicit: msg.explicit === true, hostMatched: webHost !== null && matchLogins(it.uris, { webHost, packageName: "" }, pslResolve) }) === "allow";
+    allowed = revealGate({ fromTab: false, explicit: msg.explicit === true, hostMatched: webHost !== null && matchLoginsOnPage(it.uris, webHost, isPlainHttp(msg.host), pslResolve) }) === "allow";
   } else {
     // A page frame: ONLY by redeeming the popup's one-shot grant, in the top frame, at the origin the grant was
     // minted for. This build has no in-page menu, so a frame has no reason of its own to ask; a host match alone
@@ -4165,12 +5412,13 @@ async function appVaultCode(itemId: string): Promise<Res<"totp">> {
   return { ok: true, code: r.code, secondsLeft: 30 - (Math.floor(Date.now() / 1000) % 30) };
 }
 
-/** The host of the active tab's top-level page, from the tab's own URL (readable while the popup is open). */
+/** The active tab's top-level page, from the tab's own URL (readable while the popup is open): its ORIGIN, so the
+ *  match sees the scheme (F4: a plain-http page matches only an address saved as http). Null when it has no host. */
 async function activePageHost(): Promise<string | null> {
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     const top = tab?.id === undefined ? null : await topOrigin(tab.id);
-    return top === null ? null : normalizeHost(top);
+    return top === null || normalizeHost(top) === null ? null : top;
   } catch {
     return null;
   }
@@ -4304,23 +5552,24 @@ async function fillFromPopup(itemId: string, sender: chrome.runtime.MessageSende
   // window); an opaque or unreadable top is never eligible, the card grant's [A1] rule.
   const top = await topOrigin(tab.id);
   if (top === null) return { ok: false, code: "not_allowed", error: "this page cannot be filled" };
-  // The tab must still be on the page the popup showed ([shownPage], the origin its "This site" list was drawn for). A
-  // tab can move to another site while the popup is open (the page that opened it may navigate it at any moment), and
-  // the person's pick was made for the page the popup named: without this the grant below would be minted for the new
-  // site, whose own content script then redeems it. Compared at the same read the grant binds to, so a later move
-  // cannot get past it either (the redeeming document must then be at [top]). Before the Safari confirm below, so a
-  // confirmation never fills a page the popup did not show.
+  // The tab must still be on the page the popup showed ([shownPage], the origin its "This site" list was
+  // for). A tab can move to another site while the popup is open (the page that opened it may navigate it at any
+  // moment), and the person's pick was made for the site the popup named: without this the grant below would be minted
+  // for the new site, whose own content script then redeems it. Compared at the same read the grant binds to, so a
+  // later move cannot get past it either (the redeeming document must then be at [top]).
   if (shownPage === null || shownPage !== top) return { ok: false, code: "not_allowed", error: "the page changed since the popup showed it" };
-  // Safari: this popup is the only fill surface and lists the whole vault, so a login saved for another site is
-  // filled here only after the person confirmed it, with both hosts named (a look-alike domain is the case).
-  if (APP_VAULT !== null) {
+  // Every build: the popup lists the whole vault, so a login saved for another site is filled here only after the
+  // person confirmed it, with both sites named (a look-alike domain is the case). Judged against the tab's top page,
+  // where the fill goes, never against a frame inside it.
+  {
     const page = normalizeHost(top);
-    const uris = APP_VAULT.item(itemId)?.uris ?? [];
-    // The confirmation names the page it was given for: it holds only while the active tab is still on that host.
-    const confirmed = confirmedOtherSite !== null && confirmedOtherSite === (page ?? top);
+    const saved = APP_VAULT !== null ? (APP_VAULT.item(itemId)?.uris ?? []) : (session!.items.find((i) => i.itemId === itemId)?.doc.login?.uris ?? []);
+    // F4 (spec 05 autofill (e)): on a plain-http page only the addresses saved as http can match.
+    const uris = offeredUris(saved, isPlainHttp(top));
+    // The confirmation is the token of the question asked: it holds for this login, on this top-level origin only.
+    const confirmed = confirmedOtherSite !== null && confirmedOtherSite === otherSiteConfirmation(itemId, top);
     if (!confirmed && (page === null || !matchLogins(uris, { webHost: page, packageName: "" }, pslResolve))) {
-      const savedFor = uris.map((u) => normalizeHost(u)).find((h): h is string => h !== null) ?? "another site";
-      return { ok: false, code: "not_allowed", error: "confirm other site", needsConfirm: { savedFor, page: page ?? top } };
+      return { ok: false, code: "not_allowed", error: "confirm other site", needsConfirm: otherSiteQuestion(itemId, saved, top, pslResolve) };
     }
   }
   grants.set(tab.id, { itemId, origin: top, expiresMs: Date.now() + GRANT_TTL_MS });
@@ -4539,7 +5788,7 @@ function providerFrameNotAllowed(tabId: number): string | null {
 }
 
 /** V4 (design §V4): the tab's SINGLE badge authority, so the login count and the card discovery dot
- *  never clobber each other. Login precedence — matchesFor(top host) > 0 paints the count (the
+ *  never clobber each other. Login precedence — matchesFor(top origin) > 0 paints the count (the
  *  pre-V4 behavior, unchanged); ONLY when there is no login match does a payment provider's card
  *  form (owner decision 2026-11-14) paint CARD_BADGE_TEXT. Both signals are trusted-chrome metadata
  *  (host match; browser-set per-frame origins against the provider list) — zero card data. `topOrigin` reads `tab.url`, which is
@@ -4553,10 +5802,12 @@ function refreshTabBadge(tabId: number): void {
   // [A4] pin forbids. No record (un-granted page, pre-report) → no badge, fail-quiet.
   // Synchronous now: no await, so no lock/session interleave to re-check.
   const top = session !== null ? (tabs.get(tabId)?.topOrigin ?? null) : null;
+  // `host` names the page by its origin (F4: matchesFor reads the scheme from it — a plain-http page counts only the
+  // logins saved as http); "" when the recorded origin is not a URL.
   let host = "";
   if (top !== null) {
     try {
-      host = new URL(top).hostname;
+      host = new URL(top).origin;
     } catch {
       host = "";
     }
@@ -5082,7 +6333,9 @@ async function capturedCredential(
   // lone host login (2b — a password change), else a new item (2c). Locked ⇒ matchesFor() is empty
   // ⇒ records save-new; resolve re-checks post-unlock with a STRICTER rule (no silent 2b clobber).
   // A11 (q14): a personal-vault match outranks a co-member's matching item in another vault.
-  const existing = saveTargetFor(matchesFor(host), username, msg.password, session?.personalVaultId);
+  // F4: matched as the page it was captured on (bound.uri keeps the http origin of a plain-http page), so a password
+  // typed on http://bank.example is never offered as an update of the login saved for https://bank.example.
+  const existing = saveTargetFor(matchesFor(bound.uri), username, msg.password, session?.personalVaultId);
   if (existing && (existing.doc.login?.password ?? "") === msg.password) {
     // Unchanged password (a re-login of a known item — 2a) — every successful re-login would banner otherwise.
     if (st.pending) {
@@ -5096,7 +6349,11 @@ async function capturedCredential(
   // G21: a reader-vault match still drives the 2a suppress above (a re-login of a shared login is
   // nothing to save), but it can never be the UPDATE target — the server denies a reader's push —
   // so the banner offers Save-new (a fresh personal item) instead of a doomed Update.
-  const updatable = existing !== undefined && writableItem(existing) ? existing : undefined;
+  // Design 2026-11-15 §12.2 rule 4: the extension writes only to the personal vault (writableItem). A changed password
+  // for a matching login that lives in a shared vault is not updated here: the banner becomes the notice "This login is
+  // in *vault*. Update it in the andvari app." (saveoffer.ts), and the resolve step refuses the write (commitPendingSave).
+  const shared = existing !== undefined && !writableItem(existing) && session !== null && existing.vaultId !== session.personalVaultId ? existing : undefined;
+  const updatable = existing !== undefined && writableItem(existing) ? existing : shared;
   // A11 (q14): the banner names the DESTINATION vault (the update target's, else the personal vault; locked = none
   // known yet), and the vault the user saw named is kept SW-side so the resolve step can hold it to that.
   const dest = destinationOf(updatable?.vaultId ?? session?.personalVaultId ?? "");
@@ -5116,6 +6373,14 @@ async function capturedCredential(
     // SW-side only (publicPending never carries it — the banner shows `host`).
     uri: bound.uri,
   };
+  // A first try of this tab's save whose answer was lost keeps its ids only while what was caught is the same (the form
+  // submitted again): its second try then sends the same item under the same ids. Anything caught differently (another
+  // password typed) is a new item under new ids, never the first request's ids with other content (the server would
+  // answer from its record of the first and store nothing new).
+  const earlier = st.pending;
+  if (earlier?.lost !== undefined && earlier.host === pending.host && earlier.username === pending.username && earlier.password === pending.password && (earlier.uri ?? `https://${earlier.host}`) === pending.uri && pending.updatesItemId === null) {
+    (pending as typeof pending & { lost?: LostPut }).lost = earlier.lost;
+  }
   // Locked-capture posture (owner decisions 2026-08-18). A pending minted while locked holds a
   // plaintext page password in storage.session, so it carries a TTL stamp (LOCKED_PENDING_TTL_MS,
   // enforced by every re-offer gate + the unlock re-offer). If the known-logins digest recognizes
@@ -5155,7 +6420,8 @@ async function saveThroughApp(tabId: number, st: TabState, pending: NonNullable<
     persistTabs();
     return { ok: true, viaApp: true };
   }
-  return { ok: false, code: r === "no_account" ? "app_no_account" : r === "refused" ? "rejected" : "app_unavailable" };
+  // The app's own refusal is a code of its own: never the server's `rejected`, whose line speaks of the server.
+  return { ok: false, code: r === "no_account" ? "app_no_account" : r === "refused" ? "app_refused" : "app_unavailable" };
 }
 
 async function resolvePendingSave(
@@ -5225,7 +6491,7 @@ async function resolvePendingSave(
 async function commitPendingSave(
   tabId: number,
   st: TabState,
-  pending: PendingSave & { password: string; frameId: number; uri?: string; updatesVaultId?: string | null; approvedAt?: number },
+  pending: PendingSave & { password: string; frameId: number; uri?: string; updatesVaultId?: string | null; approvedAt?: number; lost?: LostPut },
 ): Promise<{ res: Res<"resolvePendingSave">; wrote: boolean }> {
   if (!session) return { res: { ok: false, code: "locked", error: "locked" }, wrote: false };
   if (!session.personalVaultId) return { res: { ok: false, code: "no_personal_vault", error: "no personal vault" }, wrote: false }; // A9 review MEDIUM-1
@@ -5244,15 +6510,18 @@ async function commitPendingSave(
   const frozenTarget = frozen && frozen.vaultId === namedVault ? frozen : undefined;
   let decision = resolveSaveAction(
     frozenTarget,
-    matchesFor(pending.host),
+    matchesFor(pendingPage(pending)),
     pending.username,
     pending.password,
     session.personalVaultId,
   );
-  // G21: a reader-vault target (a frozen pre-fix pending, or the host∧username match) can't take
-  // the put — the server denies a reader's push — so land the save as a NEW personal item instead.
-  // resolveSaveAction's suppress rule is untouched: a re-login of a shared reader login stays nothing-to-save.
-  if (decision.kind === "update" && !writableItem(decision.target)) decision = { kind: "create" };
+  // §12.2 rule 4: the extension writes only to the personal vault. A frozen target in a shared vault (the banner was the
+  // "Update it in the andvari app" notice) is never written; a host∧username match outside the personal vault that
+  // the banner never named lands as a NEW personal item (resolveSaveAction). The suppress rule is untouched.
+  if (decision.kind === "update" && !writableItem(decision.target)) {
+    if (frozenTarget !== undefined) return { res: { ok: false, code: "shared_vault", error: "the login is in a shared vault" }, wrote: false };
+    decision = { kind: "create" };
+  }
   if (decision.kind === "suppress") {
     // 2a re-login of a known item (reachable via the locked-at-capture path, where the :967
     // unchanged-password suppress couldn't run) — nothing to save; don't mint a duplicate.
@@ -5270,11 +6539,21 @@ async function commitPendingSave(
   } else {
     // New login — the frozen/username target vanished, or a locked-2b / 2c ambiguity (recoverable New).
     // H124: a pending persisted by a pre-H124 SW has no `uri` — fall back to the old spelling.
-    result = await putNewLogin(pending.host, pending.username, pending.password, pending.uri ?? `https://${pending.host}`);
+    // A first try whose answer was lost: the same item, under the same ids (BZ).
+    const made = await putNewLogin(pending.host, pending.username, pending.password, pending.uri ?? `https://${pending.host}`, pending.lost);
+    if (made.lost !== undefined && session === owner) {
+      pending.lost = made.lost;
+      tabs.set(tabId, st);
+      persistTabs();
+    }
+    const { lost: _ids, ...said } = made;
+    result = said;
   }
-  // A lock while the write was on the wire already dropped every pending ([S3-lock] allow-list); [st] is the record from
-  // before it, so it is not put back (it would bring the dropped fields back with it).
-  if (session !== owner) return { res: result, wrote: result.ok };
+  // A lock while the write was on the wire already dropped every pending ([S3-lock] allow-list); [st] is
+  // the record from before it, so it is not put back (it would bring the dropped fields back with it).
+  // The write landed in [owner]'s account. When another account is open by the
+  // time it answers, the page must not just say "saved" over a vault that does not hold it: it says where it went.
+  if (session !== owner) return { res: result.ok && session !== null && session.userId !== owner.userId ? { ...result, otherAccount: true } : result, wrote: result.ok };
   if (result.ok) {
     st.pending = undefined;
     tabs.set(tabId, st);
@@ -5323,7 +6602,9 @@ async function captureCard(
   }
   // Match an existing card by DIGITS equality only (never expiry/name): an UPDATE refreshes
   // expiry/name/postal on the same card ([X2-A5b]); a mismatch (or no match) is a NEW card.
-  const existing = number !== "" ? session.items.find((i) => i.doc.type === "card" && digitsOnly(i.doc.card?.number ?? "") === number) : undefined;
+  // Design §12.2 rule 4: only a card the extension may write (one in the personal vault) is an update target; a card in
+  // a shared vault is no target at all, so a page that knows its number cannot get its fields written into that vault.
+  const existing = number !== "" ? session.items.find((i) => i.doc.type === "card" && writableItem(i) && digitsOnly(i.doc.card?.number ?? "") === number) : undefined;
   const rec = {
     host,
     number,
@@ -5335,6 +6616,10 @@ async function captureCard(
     updatesItemId: existing?.itemId,
     updatesItemName: existing?.doc.name,
   };
+  // As for a login: a lost first try's ids ride along only while the card caught is the same, field for field.
+  const earlier = pendingCardSave.get(tabId);
+  const same = earlier !== undefined && earlier.host === rec.host && earlier.number === rec.number && earlier.expMonth === rec.expMonth && earlier.expYear === rec.expYear && earlier.cardholderName === rec.cardholderName && earlier.postalCode === rec.postalCode && rec.updatesItemId === undefined;
+  if (same && earlier.lost !== undefined) (rec as typeof rec & { lost?: LostPut }).lost = earlier.lost;
   pendingCardSave.set(tabId, rec); // [X2-A4] single-slot per tab — a new capture REPLACES
   return { ok: true, pending: publicPendingCard(rec) };
 }
@@ -5361,7 +6646,7 @@ async function resolvePendingCardSave(
     pendingCardSave.delete(tabId);
     return { ok: false, code: "failed", error: "invalid card number" };
   }
-  const target = rec.updatesItemId ? session.items.find((i) => i.itemId === rec.updatesItemId && i.doc.type === "card") : undefined;
+  const target = rec.updatesItemId ? session.items.find((i) => i.itemId === rec.updatesItemId && i.doc.type === "card" && writableItem(i)) : undefined;
   let result: { ok: boolean; code?: SaveErrorCode; error?: string };
   if (target && digitsOnly(target.doc.card?.number ?? "") === digitsOnly(rec.number)) {
     // [X2-A5b] UPDATE = spread the existing doc AND card; refresh only expMonth/expYear/cardholderName
@@ -5378,7 +6663,11 @@ async function resolvePendingCardSave(
     if (rec.postalCode) card.postalCode = rec.postalCode;
     result = await putCard(target, { ...target.doc, card });
   } else {
-    result = await putNewCard(rec); // no match / the matched item vanished — a NEW card
+    // A NEW card (no match / the matched item vanished); a first try whose answer was lost: the same item, same ids.
+    const made = await putNewCard(rec, rec.lost);
+    if (made.lost !== undefined) rec.lost = made.lost;
+    const { lost: _ids, ...said } = made;
+    result = said;
   }
   if (result.ok) pendingCardSave.delete(tabId);
   return result;
@@ -5394,11 +6683,13 @@ async function resolvePendingCardSave(
  *  own grant rows, so a key without one is a key the grant table does not account for (a pre-A11 personal-wrap
  *  install, a pre-G21 snapshot until the next sync refills the roles); it is never an update/TOTP-add target. The one
  *  exception is the IN-FORCE personal vault, which the UVK-authenticated wrap decides on its own (§4.3). */
+/** Design 2026-11-15 §12.2 rule 4: the extension writes only to the personal vault. The write paths (save, update, a
+ *  card's update, TOTP add, link a URI) ask here before they offer or attempt a write, so an item in a shared vault is
+ *  read-only in this extension whatever its role; putItem, the one function that sends an item, refuses any other vault
+ *  by itself, so a path that forgets to ask still cannot write one. */
 function writableItem(it: DecryptedItem): boolean {
   if (!session) return false;
-  const role = session.vaultRoles.get(it.vaultId);
-  if (role === undefined) return session.personalVaultId !== "" && it.vaultId === session.personalVaultId;
-  return role !== "reader";
+  return session.personalVaultId !== "" && it.vaultId === session.personalVaultId;
 }
 
 /** Seal + push one put over the existing envelope path; answers the per-mutation result.
@@ -5411,8 +6702,15 @@ async function putItem(
   doc: ItemDoc,
   baseItemRev: number,
   formatVersion: number,
+  // A second try of a put whose answer was lost passes the first one's id: the server answers a replayed mutation id
+  // from its journal (spec 03 §5), so the item is taken once.
+  mutationId: string = crypto.randomUUID(),
 ): Promise<MutationResult | undefined> {
-  const vk = session?.vaultKeys.get(vaultId);
+  // Design §12.2 rule 4, structurally: the one function that sends an item refuses any vault but the personal one.
+  if (!session || session.personalVaultId === "" || vaultId !== session.personalVaultId) return undefined;
+  // §4.4: under a block (a fork), or while a session the server ended stands, nothing is written; saveFailure says why.
+  if (dialBlock !== null || session.serverEnded) return undefined;
+  const vk = session.vaultKeys.get(vaultId);
   // A1b: INV-WRITE-KEY (only a key this session holds, i.e. one that opened under the UVK — never a grant seal) and the
   // INV-SEAL home cross-check (the item lives in this vault, or is a fresh id that takes it as its home).
   const gate = sealGate(vk !== undefined, session?.homes.get(itemId), vaultId);
@@ -5423,7 +6721,7 @@ async function putItem(
   try {
     const resp = await api.push([
       {
-        mutationId: crypto.randomUUID(),
+        mutationId,
         op: "put",
         itemId,
         vaultId,
@@ -5431,15 +6729,62 @@ async function putItem(
         // attachmentIds mirrors the doc (web putMutation parity) — [] on an update would orphan blobs.
         item: { formatVersion, attachmentIds: doc.attachments?.map((a) => a.id) ?? [], blob },
       },
-    ]);
+    ])
+      .catch((e: unknown) => {
+        // The request may have reached the server and its answer been lost: that is "cannot tell", never "failed".
+        throw answerMayBeLost(e) ? new PutAnswerLostError(mutationId) : e;
+      });
     const r = resp.results[0];
     if (gate === "new_home" && (r?.status === "applied" || r?.status === "conflict") && !owner.homes.has(itemId)) {
       owner.homes.set(itemId, vaultId);
-      void saveHomes(owner.userId, owner.homes);
+      if (owner.homesKnown) void saveHomes(owner.userId, owner.homes); // §4.4: an unread record is never written back
     }
     return r;
   } finally {
     writesInFlight--;
+  }
+}
+
+/**
+ * A put that may have reached the server and whose answer did not arrive: no answer at all, an answer that is not the
+ * server's (a redirect, a 5xx, a body that does not read), or a refreshed token's retry lost the same way. Nothing was
+ * sent only where this browser refused to dial; a 4xx is the server's own refusal of the request.
+ */
+class PutAnswerLostError extends Error {
+  readonly mutationId: string;
+  constructor(mutationId: string) {
+    super("the save's answer was lost: it may be stored");
+    this.mutationId = mutationId;
+    this.name = "PutAnswerLostError";
+  }
+}
+
+function answerMayBeLost(e: unknown): boolean {
+  if (!(e instanceof ApiError)) return true;
+  if (e.code === "confirm_server") return false;
+  return e.status === 0 || e.status >= 500;
+}
+
+/**
+ * A NEW item whose put's answer was lost: kept with the capture (the tab's pending save, the card's pending save), so
+ * that the person's second try sends the same item under the same item id and the same mutation id, and the server
+ * takes it once (BZ: never reported as failed, never doubled).
+ */
+interface LostPut {
+  readonly itemId: string;
+  readonly mutationId: string;
+}
+
+/** What a new item's put answers: [lost] is set where its answer was lost (code `cannot_tell`). */
+type NewPutResult = { ok: boolean; code?: SaveErrorCode; error?: string; reason?: string; lost?: LostPut };
+
+/** {@link putItem} of a NEW item under [ids]: its answer, or, where the answer was lost, the `cannot_tell` result. */
+async function putNewItem(ids: LostPut, vaultId: string, doc: ItemDoc, fv: number): Promise<{ readonly landed: MutationResult | undefined } | { readonly lostAnswer: NewPutResult }> {
+  try {
+    return { landed: await putItem(ids.itemId, vaultId, doc, 0, fv, ids.mutationId) };
+  } catch (e) {
+    if (e instanceof PutAnswerLostError) return { lostAnswer: { ok: false, code: "cannot_tell", error: e.message, lost: ids } };
+    throw e;
   }
 }
 
@@ -5451,9 +6796,14 @@ async function putItem(
  *  no longer reaches here from the four put paths (putExisting/putNewLogin/putNewCard/putCard) — since H20 a conflict is a LANDED write
  *  (putLanded), materialized, and answered ok:true. The `error` string is debug-only detail the
  *  surface never renders (it maps the CODE to copy). */
-function saveFailure(status: MutationResult["status"] | undefined): { ok: false; code: SaveErrorCode; error: string } {
+function saveFailure(status: MutationResult["status"] | undefined, reason?: string): { ok: false; code: SaveErrorCode; error: string; reason?: string } {
+  if (dialBlock?.kind === "fork") return { ok: false, code: "server_fork", error: "the server is stopped by a fork; nothing is written" };
+  if (session?.serverEnded) return { ok: false, code: "server_ended", error: "the server ended this session; nothing is written" };
   const code: SaveErrorCode = status === "conflict" ? "conflict" : status === "rejected" ? "rejected" : "failed";
-  return { ok: false, code, error: `save failed (${status ?? "no vault key"})` };
+  // The server's own reason for a refusal is kept up to the sentence (a full account is said as a full account, not as a
+  // missing attachment). Only a wire code's shape is carried; anything else is no reason.
+  const why = code === "rejected" && typeof reason === "string" && /^[a-z_]{1,64}$/.test(reason) ? { reason } : {};
+  return { ok: false, code, error: `save failed (${status ?? "no vault key"})`, ...why };
 }
 
 /** H20 (2026-09-13 audit): did this put LAND? Spec 03 §5 is explicit that `conflict` is a write
@@ -5479,9 +6829,9 @@ function putLanded(r: MutationResult | undefined): r is MutationResult & { statu
  *  one item — its own `conflict`/`duplicate` answer is that convergence, not an error. A reader
  *  vault never materializes (its push would be denied — the web twin's first check). */
 async function materializeConflictCopy(r: MutationResult, vaultId: string, owner: Session | null): Promise<void> {
-  // Work that outlives its session: [owner] is the session the landed write was made under. A lock, a sign-out or
-  // another account's sign-in while that write was on the wire ends it, and nothing of it may then be decrypted with, or
-  // added to, whatever session holds the worker now; the next unlock of that account pulls the copy instead.
+  // Work that outlives a lock: [owner] is the session the landed write was made under. A lock, a sign-out
+  // or another account's sign-in while that write was on the wire ends it, and nothing of it may then be decrypted
+  // with, or added to, whatever session holds the worker now; the next unlock of that account pulls the copy instead.
   if (r.status !== "conflict" || r.newItemRev === undefined || owner === null || session !== owner) return;
   const losing = r.serverItem;
   if (!losing || losing.deleted || !losing.blob) return;
@@ -5502,7 +6852,7 @@ async function materializeConflictCopy(r: MutationResult, vaultId: string, owner
   try {
     const cr = await putItem(copyId, vaultId, copyDoc, 0, fv);
     if (putLanded(cr) && session === owner) {
-      owner.items.push({ itemId: copyId, vaultId, rev: cr.newItemRev ?? 1, formatVersion: fv, doc: copyDoc });
+      owner.items = itemsUnderHeldKeys([...owner.items, { itemId: copyId, vaultId, rev: cr.newItemRev ?? 1, formatVersion: fv, doc: copyDoc }], owner.vaultKeys);
       persistSession();
     }
   } catch {
@@ -5510,7 +6860,7 @@ async function materializeConflictCopy(r: MutationResult, vaultId: string, owner
   }
 }
 
-async function putExisting(target: DecryptedItem, doc: ItemDoc): Promise<{ ok: boolean; code?: SaveErrorCode; error?: string }> {
+async function putExisting(target: DecryptedItem, doc: ItemDoc): Promise<{ ok: boolean; code?: SaveErrorCode; error?: string; reason?: string }> {
   // Monotonic re-seal: never below the fv the item arrived at (web Account.itemFv parity — the
   // server refuses fv downgrades). This is the LOGIN re-seal path only: every putExisting caller
   // filters type==="login", so the floor is LOGIN_FORMAT_VERSION. G2 [X2-A6] lifted the older
@@ -5519,7 +6869,7 @@ async function putExisting(target: DecryptedItem, doc: ItemDoc): Promise<{ ok: b
   const fv = Math.max(LOGIN_FORMAT_VERSION, target.formatVersion);
   const owner = session; // the session this write is made under (materializeConflictCopy)
   const r = await putItem(target.itemId, target.vaultId, doc, target.rev, fv);
-  if (!putLanded(r)) return saveFailure(r?.status);
+  if (!putLanded(r)) return saveFailure(r?.status, r?.reason);
   target.doc = doc;
   target.rev = r.newItemRev ?? target.rev + 1;
   target.formatVersion = fv; // what this write actually sealed at (web store.ts parity)
@@ -5529,22 +6879,26 @@ async function putExisting(target: DecryptedItem, doc: ItemDoc): Promise<{ ok: b
 }
 
 /** `uri` is the stored site uri (H124: `capturedSiteUri` — http stays http); `host` names the item. */
-async function putNewLogin(host: string, username: string, password: string, uri: string): Promise<{ ok: boolean; code?: SaveErrorCode; error?: string }> {
+async function putNewLogin(host: string, username: string, password: string, uri: string, lost?: LostPut): Promise<NewPutResult> {
   if (!session) return { ok: false, code: "locked", error: "locked" };
   if (!session.personalVaultId) return { ok: false, code: "no_personal_vault", error: "no personal vault" }; // A9 review MEDIUM-1
-  const itemId = crypto.randomUUID();
+  // A second try after a lost answer sends the same item (BZ): the first try's item id and mutation id.
+  const ids: LostPut = lost ?? { itemId: crypto.randomUUID(), mutationId: crypto.randomUUID() };
+  const itemId = ids.itemId;
   const doc: ItemDoc = { type: "login", name: host, login: { username, password, uris: [uri] } };
   // NEW logins seal at the login doc floor (format.ts). G2 added card creation via a SEPARATE
   // card-aware seal (CARD_FORMAT_VERSION); this path is logins-only.
   const owner = session;
-  const r = await putItem(itemId, owner.personalVaultId, doc, 0, LOGIN_FORMAT_VERSION);
-  if (!putLanded(r)) return saveFailure(r?.status); // H20: a conflict on a fresh id still LANDED
-  // Work that outlives its session: a lock, a sign-out or another account's sign-in while this write was on the wire
-  // ended [owner]. The write landed under its account (the next unlock there pulls it); the new login is never added to
-  // the session that holds the worker now, which may be another account's.
+  const p = await putNewItem(ids, owner.personalVaultId, doc, LOGIN_FORMAT_VERSION);
+  if ("lostAnswer" in p) return p.lostAnswer;
+  const r = p.landed;
+  if (!putLanded(r)) return saveFailure(r?.status, r?.reason); // H20: a conflict on a fresh id still LANDED
+  // Work that outlives a lock: a lock, a sign-out or another account's sign-in while this write was on the
+  // wire ended [owner]. The write landed under its account (the next unlock there pulls it); the new login is never
+  // added to the session that holds the worker now, which may be another account's.
   if (session !== owner) return { ok: true };
   const rev = r.newItemRev ?? 1; // matchable immediately:
-  owner.items.push({ itemId, vaultId: owner.personalVaultId, rev, formatVersion: LOGIN_FORMAT_VERSION, doc });
+  owner.items = itemsUnderHeldKeys([...owner.items, { itemId, vaultId: owner.personalVaultId, rev, formatVersion: LOGIN_FORMAT_VERSION, doc }], owner.vaultKeys);
   persistSession();
   await materializeConflictCopy(r, owner.personalVaultId, owner);
   return { ok: true };
@@ -5559,10 +6913,12 @@ async function putNewCard(rec: {
   expYear: string;
   cardholderName: string;
   postalCode?: string;
-}): Promise<{ ok: boolean; code?: SaveErrorCode; error?: string }> {
+}, lost?: LostPut): Promise<NewPutResult> {
   if (!session) return { ok: false, code: "locked", error: "locked" };
   if (!session.personalVaultId) return { ok: false, code: "no_personal_vault", error: "no personal vault" }; // A9 review MEDIUM-1
-  const itemId = crypto.randomUUID();
+  // A second try after a lost answer sends the same item (BZ), as putNewLogin.
+  const ids: LostPut = lost ?? { itemId: crypto.randomUUID(), mutationId: crypto.randomUUID() };
+  const itemId = ids.itemId;
   const card: CardData = { number: rec.number };
   if (rec.expMonth) card.expMonth = rec.expMonth;
   if (rec.expYear) card.expYear = rec.expYear;
@@ -5570,11 +6926,13 @@ async function putNewCard(rec: {
   if (rec.postalCode) card.postalCode = rec.postalCode;
   const doc: ItemDoc = { type: "card", name: rec.host, card };
   const owner = session;
-  const r = await putItem(itemId, owner.personalVaultId, doc, 0, CARD_FORMAT_VERSION);
-  if (!putLanded(r)) return saveFailure(r?.status); // H20: a conflict on a fresh id still LANDED
+  const p = await putNewItem(ids, owner.personalVaultId, doc, CARD_FORMAT_VERSION);
+  if ("lostAnswer" in p) return p.lostAnswer;
+  const r = p.landed;
+  if (!putLanded(r)) return saveFailure(r?.status, r?.reason); // H20: a conflict on a fresh id still LANDED
   if (session !== owner) return { ok: true }; // ended while on the wire: as putNewLogin
   const rev = r.newItemRev ?? 1;
-  owner.items.push({ itemId, vaultId: owner.personalVaultId, rev, formatVersion: CARD_FORMAT_VERSION, doc });
+  owner.items = itemsUnderHeldKeys([...owner.items, { itemId, vaultId: owner.personalVaultId, rev, formatVersion: CARD_FORMAT_VERSION, doc }], owner.vaultKeys);
   persistSession();
   await materializeConflictCopy(r, owner.personalVaultId, owner);
   return { ok: true };
@@ -5623,14 +6981,14 @@ async function setTotp(
 
 /** [X2-A6] card-aware re-seal — floors at max(CARD_FORMAT_VERSION, target.formatVersion), NOT the
  *  login putExisting (LOGIN_FORMAT_VERSION floor). Monotonic; the server refuses fv downgrades. */
-async function putCard(target: DecryptedItem, doc: ItemDoc): Promise<{ ok: boolean; code?: SaveErrorCode; error?: string }> {
+async function putCard(target: DecryptedItem, doc: ItemDoc): Promise<{ ok: boolean; code?: SaveErrorCode; error?: string; reason?: string }> {
   const fv = Math.max(CARD_FORMAT_VERSION, target.formatVersion);
   const owner = session; // the session this write is made under (materializeConflictCopy)
   const r = await putItem(target.itemId, target.vaultId, doc, target.rev, fv);
   // H20 (recheck R01): the FOURTH put path — a card UPDATE conflicts exactly like a login update
   // (the server applied our value, the displaced card comes back as serverItem), so it gets the
   // putExisting treatment: a landed conflict is ok:true and the displaced version is materialized.
-  if (!putLanded(r)) return saveFailure(r?.status);
+  if (!putLanded(r)) return saveFailure(r?.status, r?.reason);
   target.doc = doc;
   target.rev = r.newItemRev ?? target.rev + 1;
   target.formatVersion = fv;
@@ -5655,18 +7013,23 @@ async function linkUri(msg: Extract<Req, { type: "linkUri" }>, sender: chrome.ru
   if (!webHost) return { ok: false, error: "bad host" };
   if (sender.tab !== undefined && senderHost(sender) !== webHost) return { ok: false, error: "not this frame's host" };
   const kept = (it.doc.login?.uris ?? []).filter((u) => u.trim() !== "");
+  // F4 (spec 05 autofill (e)): the page the link is for, scheme included — a tab sender's own browser-set origin, or
+  // the origin the popup names. On a plain-http page only an address saved as http counts as linked already, since
+  // an https one does not match there; the address stored is then the http origin (capturedSiteUri, H124).
+  const page = sender.tab !== undefined ? (typeof sender.origin === "string" ? sender.origin : "") : msg.host;
+  const plainHttp = isPlainHttp(page);
   const already = kept.some((u) => {
     const p = parseSavedUri(u);
-    return p?.kind === "web" && p.host === webHost;
+    return p?.kind === "web" && p.host === webHost && (!plainHttp || isPlainHttp(u));
   });
   if (already) return { ok: true }; // nothing to push
   // G21: a reader grant can't take the append — refuse here instead of pushing a write the server
   // will deny (the offer banner renders its honest "Could not link." line).
   if (!writableItem(it)) return { ok: false, error: "read-only vault" };
-  // H124: a link offered on a plain-http page stores the http origin the user is actually on; the
-  // browser-set `sender.origin` is the only source (a page-supplied url could not be trusted for
-  // the [A2] host check either). A popup sender has no origin → the classic `https://<host>`.
-  const uri = capturedSiteUri(sender.tab !== undefined && typeof sender.origin === "string" ? sender.origin : "", webHost);
+  // H124: a link offered on a plain-http page stores the http origin the user is actually on; for a tab sender the
+  // browser-set `sender.origin` is the only source (a page-supplied url could not be trusted for the [A2] host check
+  // either). The popup names the active tab's origin (F4), so an http page links its http origin there too.
+  const uri = capturedSiteUri(page, webHost);
   const doc: ItemDoc = { ...it.doc, login: { ...it.doc.login, uris: [...kept, uri] } };
   return putExisting(it, doc);
 }

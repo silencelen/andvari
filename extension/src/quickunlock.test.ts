@@ -596,3 +596,22 @@ test("cross-kind: a PIN blob relabelled kind:'biometric' can't be opened by begi
   assert.deepEqual(await qu.beginRedeemBio(), { ok: false, code: "corrupt" });
   assert.equal(s.peek(), null, "the transplant fails-closed to corrupt+wipe (wrong key + bio AAD)");
 });
+
+test("a lock arms only a record of the account whose session it ends", async () => {
+  const { qu, s } = makeEngine();
+  await qu.enroll(enrollArgs()); // user-A's record
+  assert.equal(await qu.arm({ access: "b", refresh: "rb" }, "user-B"), "declined", "another account's session: declined (the caller wipes)");
+  assert.equal(s.peek()!.lockedTokens, null, "its tokens are not stashed beside user-A's wrap");
+  assert.equal(await qu.arm({ access: "a", refresh: "ra" }, "user-A"), "armed");
+  assert.equal(await qu.arm({ access: "a", refresh: "ra" }), "armed", "a lock that knows no session (during a quick unlock) arms as before");
+});
+
+test("a token change that may only change a stash never puts one into a record that holds none", async () => {
+  const { qu, s } = makeEngine();
+  await qu.enroll(enrollArgs()); // unlocked-armed: no stash
+  await qu.setLockedTokens({ access: "a", refresh: "r" }, { onlyIfStashed: true });
+  assert.equal(s.peek()!.lockedTokens, null, "nothing armed");
+  await qu.arm({ access: "a", refresh: "r" });
+  await qu.setLockedTokens({ access: "a2", refresh: "r2" }, { onlyIfStashed: true });
+  assert.deepEqual(s.peek()!.lockedTokens, { access: "a2", refresh: "r2" }, "a stash that is there is kept current");
+});

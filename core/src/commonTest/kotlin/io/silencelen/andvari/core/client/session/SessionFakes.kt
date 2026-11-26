@@ -3,7 +3,6 @@ package io.silencelen.andvari.core.client.session
 import io.silencelen.andvari.core.client.DeviceState
 import io.silencelen.andvari.core.client.InMemoryVaultCache
 import io.silencelen.andvari.core.client.MemoryDeviceState
-import io.silencelen.andvari.core.client.OriginCanon
 import io.silencelen.andvari.core.client.SelfIdentityPin
 import io.silencelen.andvari.core.client.Tokens
 import io.silencelen.andvari.core.client.VaultCache
@@ -47,7 +46,7 @@ internal class FakeOriginStore : OriginStore {
         stamps.remove(userId)
     }
 
-    override fun identityPins() = SelfIdentityPin.KeyValueStore({ pinMap[it] }, { k, v -> pinMap[k] = v })
+    override fun identityPins() = SelfIdentityPin.KeyValueStore({ pinMap[it] }, { k, v -> pinMap[k] = v }, { pinMap.remove(it) })
 }
 
 internal class FakeSessionPersistence(override var baseUrl: String?) : SessionPersistence {
@@ -89,18 +88,22 @@ internal class FakeSessionPersistence(override var baseUrl: String?) : SessionPe
         stored = null
     }
 
-    /** The origins forgotten ([forgetServer]), in order. */
-    val forgotten = mutableListOf<String>()
+    /** Server forgets, in order (the origin each one dialled). */
+    val forgotten = mutableListOf<String?>()
 
-    override fun forgetServer(originKey: String) {
-        forgotten += originKey
-        if (stored?.baseUrl.isNullOrEmpty() || OriginCanon.originKey(stored!!.baseUrl) == originKey) stored = null
-        origins.remove(originKey)
-        if (baseUrl?.let(OriginCanon::originKey) == originKey) {
-            pendingServer = null
-            lastSyncAt = 0L
-            baseUrl = null
+    override fun forgetServer(): Boolean {
+        forgotten += baseUrl
+        clear()
+        // As the real store: the origin's device records go; other accounts' records under it stay.
+        baseUrl?.let { origins[io.silencelen.andvari.core.client.OriginCanon.originKey(it)] }?.apply {
+            cacheAllowed = true
+            autoLockSeconds = 0
+            policyFetchedAt = 0
+            serverTimeFloorMs = 0
         }
+        baseUrl = null
+        pendingServer = null
+        return true
     }
 
     override var mustChangePassword = false
@@ -153,17 +156,6 @@ internal class FakeNamespaces : NamespaceStorage {
 
     override fun deleteVaultCache(originKey: String, userId: String) {
         deleted += "$originKey/$userId"
-    }
-
-    /** The origins forgotten ([deleteOrigin]), in order. */
-    val deletedOrigins = mutableListOf<String>()
-
-    override fun deleteOrigin(originKey: String): List<String> {
-        deletedOrigins += originKey
-        val users = (devices.keys + caches.keys + opened).filter { it.startsWith("$originKey/") }.map { it.substringAfter('/') }.distinct()
-        devices.keys.removeAll { it.startsWith("$originKey/") }
-        caches.keys.removeAll { it.startsWith("$originKey/") }
-        return users
     }
 }
 

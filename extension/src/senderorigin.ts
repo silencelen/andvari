@@ -4,7 +4,7 @@
 // (`location.href`, `location.hostname`) is page-influenced: a sandboxed frame keeps its URL host
 // while its origin is opaque, and a hostile frame's script can say anything. `sender.origin` is set
 // by the browser on every message. Every capture and match decision for a TAB sender derives its
-// host here; only the popup (no tab) names a host itself, from `activeTabHost()` under activeTab.
+// host here; only the popup (no tab) names a page itself: the active tab's origin, under activeTab.
 // Pure and chrome-free so node --test pins it (senderorigin.test.ts).
 import { capturedSiteUri } from "./siteurl.ts";
 import { normalizeHost } from "./urimatch.ts";
@@ -24,6 +24,15 @@ export function originHost(origin: unknown): string | null {
  *  or, for the popup, the host it named. */
 export function requestHost(isTabSender: boolean, origin: unknown, claimed: string): string | null {
   return isTabSender ? originHost(origin) : normalizeHost(claimed);
+}
+
+/** The page a request is about, as a match identifier (urimatch.ts `matchLoginsAt`): a tab sender's browser-set
+ *  origin, scheme included (its `claimed` host is ignored), or, for the popup, what it named (the active tab's
+ *  origin). Null when no host can be read from it. The scheme rides along because a plain-http page matches only an
+ *  address saved as http (spec 05 autofill (e)). */
+export function requestPage(isTabSender: boolean, origin: unknown, claimed: string): string | null {
+  if (isTabSender) return originHost(origin) === null ? null : (origin as string);
+  return normalizeHost(claimed) === null ? null : claimed;
 }
 
 /** A captured login's binding: the site host and the uri a NEW item stores (H124: the origin's own
@@ -46,6 +55,13 @@ export function webOriginOfUrl(u: unknown): string | null {
   } catch {
     return null;
   }
+}
+
+/** The popup's active tab, from its URL: the host it shows, and the origin it names to the worker (F4: the scheme
+ *  decides what may match). Null for a URL that is not http(s) or has no host. */
+export function tabPageOf(u: unknown): { host: string; page: string } | null {
+  const page = webOriginOfUrl(u);
+  return page === null ? null : { host: new URL(page).hostname, page };
 }
 
 /**

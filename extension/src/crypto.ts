@@ -1,5 +1,4 @@
 import { argon2id } from "@noble/hashes/argon2.js";
-import { blake2b } from "@noble/hashes/blake2.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256, sha512 } from "@noble/hashes/sha2.js";
 import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
@@ -51,6 +50,10 @@ export class KdfPolicyError extends Error {
 /** H1 fence — reject SERVER-SUPPLIED KDF params before any argon2id derives under them. Inclusive
  *  bounds (at-floor DEFAULT passes); applied at the unlock ingestion boundary, never in the primitive. */
 export function assertServerKdfParams(p: KdfParams): void {
+  // Spec 03 §0.1 "Field presence": an absent `kdfParams` is refused, never filled in with a default (a wrong guess
+  // derives the wrong master key and looks like a wrong password). It used to fail as a TypeError, shown as "can't reach
+  // the server".
+  if (p === null || typeof p !== "object") throw new KdfPolicyError("kdf_below_floor");
   // Non-numeric / omitted fields (undefined, NaN, a string) slip past a bare `<`/`>` in JS, so reject
   // them explicitly — an omitted ops/memBytes must still hit the distinct KdfPolicyError, not derive
   // under garbage (mirrors web keys.ts).
@@ -69,7 +72,6 @@ function ad(...parts: string[]): Uint8Array {
   return utf8(`${AD_NS}|${parts.join("|")}`);
 }
 export const adUvk = (userId: string): Uint8Array => ad("uvk", userId);
-export const adVk = (vaultId: string, userId: string): Uint8Array => ad("vk", vaultId, userId);
 /** Security review 2026-10, root cause A §4.1: the PERSONAL wrap `AccountKeys.personalWrap`, a distinct AD
  *  purpose so an owner wrap never opens as a personal wrap (core `Ad.vkPersonal` / web `adVkPersonal`). */
 export const adVkPersonal = (vaultId: string, userId: string): Uint8Array => ad("vk-personal", vaultId, userId);
@@ -101,53 +103,8 @@ export function boxKeypairFromSeed(seed: Uint8Array): { publicKey: Uint8Array; p
   return { publicKey: nacl.scalarMult.base(clamped), privateKey };
 }
 
-/**
- * crypto_box_seal_open — open a libsodium sealed box (a member shared-vault grant's sealedVk).
- * tweetnacl for the box (crypto_box_beforenm + open) + @noble blake2b for the sealed-box nonce;
- * verified byte-parity with libsodium. Throws on a wrong key / corrupt box.
- */
-export function sealOpen(recipientPub: Uint8Array, recipientPriv: Uint8Array, sealed: Uint8Array): Uint8Array {
-  if (sealed.length < 32 + 16) throw new Error("sealed box too short");
-  const epk = sealed.subarray(0, 32);
-  const nonce = blake2b(new Uint8Array([...epk, ...recipientPub]), { dkLen: 24 });
-  const key = nacl.box.before(epk, recipientPriv);
-  const pt = nacl.box.open.after(sealed.subarray(32), nonce, key);
-  if (!pt) throw new Error("crypto_box_seal_open failed (wrong key or corrupt box)");
-  return pt;
-}
-
-/**
- * Open a sealed shared-vault grant → the 32-byte VK (spec 03 §10). The THIRD SharedGrant twin,
- * beside core SharedGrant.open and web openSharedGrant, and graded by the same
- * spec/test-vectors/sharedgrant.json (crypto.vectors.test.ts). It used to be inlined in
- * background.ts buildVaultKeys with two of the three checks (audit H93, 2026-09-13): the payload
- * version and the vaultId binding were there, the VK-length guard was not — so a grant whose
- * payload decoded to a 31-byte "vk" was accepted into vaultKeys, every later open() on that
- * vault's items threw inside @noble's key-length check, decryptItems swallowed each as
- * "undecryptable — skip", and the vault silently showed EMPTY where core and web name the cause.
- * Only a VK holder can seal a grant, so that is a buggy or foreign client rather than a hostile
- * server — the reason this is a uniformity gap and not a key-exposure one. Hoisted so the
- * production code path is what the vector grades, not a test-side re-implementation.
- *
- * Throws on every refusal; the caller (buildVaultKeys) treats a throw as "skip this grant".
- */
-export function openSharedGrant(
-  memberIdentityPub: Uint8Array,
-  memberIdentityPriv: Uint8Array,
-  expectedVaultId: string,
-  sealed: Uint8Array,
-): Uint8Array {
-  const raw = sealOpen(memberIdentityPub, memberIdentityPriv, sealed);
-  const p = JSON.parse(new TextDecoder().decode(raw)) as { v?: unknown; vaultId?: unknown; vk?: unknown };
-  if (p.v !== 1) throw new Error(`unsupported shared-grant payload version ${String(p.v)}`);
-  // Binds the seal to the grant row it arrived on: a seal replayed onto another vault's row
-  // (a server cannot forge one, but it can reseat one) must not hand that row's items a key.
-  if (p.vaultId !== expectedVaultId) throw new Error("shared grant vaultId mismatch");
-  if (typeof p.vk !== "string") throw new Error("shared grant payload has no vk");
-  const vk = fromB64(p.vk);
-  if (vk.length !== KEY_BYTES) throw new Error("shared grant VK is not 32 bytes");
-  return vk;
-}
+// The sealed-box open (`sealOpen`) and the shared-grant open (`openSharedGrant`) are gone.
+// The extension opens no grant (design §12.2 rule 1): keys come only from UVK wraps (wraps.ts).
 
 /**
  * Master key from the master password (== libsodium crypto_pwhash ARGON2ID13). ~5–6 s at the

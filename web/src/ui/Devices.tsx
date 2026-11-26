@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { ApiClient } from "../api/client";
 import { Busy } from "./Busy";
 import { safeHttpHref } from "./safeurl";
 
@@ -195,7 +196,11 @@ export function ExtensionRowView({ state }: { state: ExtensionRow }) {
   );
 }
 
-export function DevicesCard({ origin, canonicalOrigin }: { origin?: string; canonicalOrigin?: string | null }) {
+/**
+ * `client` is the one transport (api/client.ts): the manifest is fetched through its traffic gate, so a session under
+ * a forked pin fetches nothing (design §4.4). Without one, nothing is fetched and the rows read as unpublished.
+ */
+export function DevicesCard({ origin, canonicalOrigin, client }: { origin?: string; canonicalOrigin?: string | null; client?: Pick<ApiClient, "fetchStatic"> }) {
   const current = origin ?? (typeof location !== "undefined" ? location.origin : "");
   // Advertise the SERVER-DECLARED canonical origin (client-policy `canonicalOrigin`) to other
   // devices — the session may ride a legacy front (e.g. the ≥90-day tailnet compat front) that
@@ -206,14 +211,19 @@ export function DevicesCard({ origin, canonicalOrigin }: { origin?: string; cano
 
   useEffect(() => {
     let live = true;
-    fetch("/downloads/manifest.json", { headers: { accept: "application/json" } })
+    if (!client) {
+      setManifest("error");
+      return;
+    }
+    client
+      .fetchStatic("/downloads/manifest.json", { headers: { accept: "application/json" } })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
       .then((m) => live && setManifest(coerceManifest(m)))
       .catch(() => live && setManifest("error"));
     return () => {
       live = false;
     };
-  }, []);
+  }, [client]);
 
   return (
     <div className="sheet">

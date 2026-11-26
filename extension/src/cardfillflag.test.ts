@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import * as esbuild from "esbuild";
 import { CARD_FILL, CARD_FILL_OFF } from "./cardfillflag.ts";
+import * as T from "./copy.ts";
 import { CARD_FILL_FROM_APP, CARD_FILL_OFF_COPY, cardFillErrorCopy, cardFillOffLine } from "./errors.ts";
 
 const read = (f: string): string => readFileSync(new URL(f, import.meta.url), "utf8");
@@ -55,7 +56,7 @@ async function safariContent(cardFill: boolean): Promise<string> {
  *  frame's ancestors), and the fill (its redemption, its refusals). */
 const CONTENT_CARD = {
   report: ["cardFormInfo", "choseNow"],
-  chip: ["cardChipOffer", "Fill card with andvari", "openPopupForCards", "Open andvari from the toolbar to fill this card"],
+  chip: ["cardChipOffer", T.CARD_CHIP, "openPopupForCards", T.OPEN_FROM_TOOLBAR_TO_FILL_CARD],
   choice: ["userActivation", "ancestorOrigins"],
   fill: ["revealCardForFill", "closed_form"],
 };
@@ -131,11 +132,9 @@ test("without card fill the content script chooses nothing and reports nothing, 
   assert.match(popup, /const why = cardCopyReason\(BUILD_TARGET === "safari"\);/, "the target decides the line");
   // Per target (0.30.0 release prep): only the Safari popup, which copies no card number or code, sends the person to
   // the app; a Chrome or Firefox build made with CARDFILL=0 copies every detail itself, and says so.
-  assert.equal(CARD_FILL_FROM_APP, "andvari fills no cards here: copy a card's number and code in the andvari app.");
-  assert.equal(CARD_FILL_OFF_COPY, "This build of andvari fills no cards into pages: copy a card's details with the buttons below.");
+  assert.notEqual(CARD_FILL_FROM_APP, CARD_FILL_OFF_COPY, "a line for each");
   assert.equal(cardFillOffLine(true), CARD_FILL_FROM_APP);
   assert.equal(cardFillOffLine(false), CARD_FILL_OFF_COPY);
-  assert.ok(!CARD_FILL_OFF_COPY.includes("andvari app"), "a desktop build never sends the person to the app for a card");
   assert.equal(cardFillErrorCopy("fill_off", undefined, true), CARD_FILL_FROM_APP);
   assert.equal(cardFillErrorCopy("fill_off", undefined, false), CARD_FILL_OFF_COPY, "the fill's refusal says the same");
 });

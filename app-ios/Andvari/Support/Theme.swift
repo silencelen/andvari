@@ -23,7 +23,7 @@ enum Palette {
     static let glyphHigh = dynamic(light: 0xE9D9A6, dark: 0x8A6D28)
     static let glyphLow = dynamic(light: 0xD8BD7A, dark: 0x2A2110)
     static let danger = dynamic(light: 0xB3402C, dark: 0xD97F6F)
-    static let ok = dynamic(light: 0x4F7A3A, dark: 0x7FA86A)
+    static let ok = dynamic(light: 0x4C7538, dark: 0x7FA86A)
 
     private static func dynamic(light: UInt32, dark: UInt32) -> Color {
         Color(uiColor: UIColor { traits in

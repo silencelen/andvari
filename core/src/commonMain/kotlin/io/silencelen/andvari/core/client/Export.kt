@@ -349,6 +349,18 @@ object Backup {
      *  4096 is far above any real backup and [buildWithPayloadBytes] refuses to exceed it rather
      *  than writing a file [open] would reject. */
     const val MAX_SECTIONS = 4096
+
+    /**
+     * The deepest nesting of arrays and objects [open] reads in the payload, the payload's own object counted as one;
+     * a deeper payload is `bad_payload`, refused before the parser descends into it. The platform parser recurses once
+     * per level with no limit of its own, so a payload of some ten thousand `[` (about 20 KB) overflowed the stack: a
+     * `StackOverflowError`, which no `catch (e: Exception)` takes, and on Kotlin/Native a crash.
+     *
+     * The deepest payload an andvari writer makes is 7 levels: the payload, its items, an item, its document, `login`,
+     * `passwordHistory`, one entry of it. The margin up to 64 leaves room for fields a later document format may nest
+     * (a document keeps the fields it does not know), while staying far below any depth that troubles a small stack.
+     */
+    const val MAX_PAYLOAD_DEPTH = 64
     private const val MIN_KDF_MEM_BYTES = 8L * 1024 // libsodium crypto_pwhash minima,
     private const val MIN_KDF_OPS = 1L //              not a policy floor
 
@@ -498,6 +510,11 @@ object Backup {
             }
             val (off, len) = sections[section]
             if (len <= Attachments.HEADER_BYTES) throw BackupException(ERR_WRONG_PASSPHRASE_OR_CORRUPT, "attachment section $section too short")
+            // Spec 07 §2.4: the manifest's file keys are fresh random keys for the file's own sections. One of zeros is a
+            // damaged backup, refused with the section's own code, never decrypted under it.
+            if (io.silencelen.andvari.core.crypto.KeyFloor.allZero(fileKey)) {
+                throw BackupException(ERR_WRONG_PASSPHRASE_OR_CORRUPT, "attachment section $section has an all-zero file key")
+            }
             val header = file.copyOfRange(off, off + Attachments.HEADER_BYTES)
             val ciphertext = file.copyOfRange(off + Attachments.HEADER_BYTES, off + len)
             return try {
@@ -610,6 +627,7 @@ object Backup {
             exportKey.fill(0)
         }
         val payload = try {
+            if (nestedDeeperThan(plain, MAX_PAYLOAD_DEPTH)) throw BackupException(ERR_BAD_PAYLOAD, "the payload is nested deeper than $MAX_PAYLOAD_DEPTH")
             json.decodeFromString(BackupPayload.serializer(), plain.decodeToString())
         } catch (e: Exception) {
             throw BackupException(ERR_BAD_PAYLOAD, "authenticated payload is not valid backup JSON")
@@ -620,6 +638,37 @@ object Backup {
     }
 
     // ---- helpers ----
+
+    /**
+     * True when the JSON text [utf8] opens more than [bound] arrays and objects inside one another. Brackets inside a
+     * string are no nesting: a string runs from a quote to the next quote that no backslash escapes. In UTF-8 the bytes
+     * of a quote, a backslash and a bracket never occur inside a character of several bytes, so the bytes are read as
+     * they are. A closing bracket where nothing is open counts as too deep (refused). Other text that is no JSON at all
+     * is left to the parser, which refuses it.
+     */
+    internal fun nestedDeeperThan(utf8: ByteArray, bound: Int): Boolean {
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (b in utf8) {
+            val c = b.toInt()
+            if (inString) {
+                when {
+                    escaped -> escaped = false
+                    c == '\\'.code -> escaped = true
+                    c == '"'.code -> inString = false
+                }
+                continue
+            }
+            when (c) {
+                '"'.code -> inString = true
+                '['.code, '{'.code -> if (++depth > bound) return true
+                // A closer where nothing is open is no JSON: refused here, whatever the parser would say.
+                ']'.code, '}'.code -> if (--depth < 0) return true
+            }
+        }
+        return false
+    }
 
     /** §2.3: MKx = Argon2id(passphrase as typed) → exportKey = HKDF(info="andvari/v1/export"). */
     private fun deriveExportKey(crypto: CryptoProvider, passphrase: String, kdfSalt: ByteArray, params: KdfParams): ByteArray {

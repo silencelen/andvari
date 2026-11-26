@@ -1,9 +1,9 @@
 import { CryptoError } from "./sodium";
 
 /**
- * Precondition for the two canonical-JSON payloads that are composed by string TEMPLATE rather
- * than by an encoder — {@link ../crypto/escrow!canonicalPayload} (spec 04 §3) and
- * {@link ../crypto/sharedgrant!canonicalGrantPayload} (spec 01 §6). Twin of core's
+ * Precondition for the canonical-JSON payload that is composed by string TEMPLATE rather than by
+ * an encoder — {@link ../crypto/escrow!canonicalPayload} (spec 04 §3; the v1 shared-grant payload
+ * went with the v1 seal, design 2026-11-15 §15). Twin of core's
  * `CanonicalJson.requireJsonSafe`; both must produce bytes identical to the other side's, which
  * is why they are templates and not `JSON.stringify`: an encoder is free to reorder keys or
  * escape differently, and these bytes are sealed and later re-parsed by another implementation.

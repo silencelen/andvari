@@ -627,7 +627,23 @@ class AndvariApi(
         return totpSetup(account.reauthAuthKey(password, keys))
     }
     suspend fun totpConfirm(code: String): TotpStatus = call("POST", "/api/v1/account/totp/confirm", TotpCodeRequest(code))
-    suspend fun totpDisable(code: String): TotpStatus = call("POST", "/api/v1/account/totp/disable", TotpCodeRequest(code))
+    /**
+     * Since 2026-11-16 a code alone no longer turns two-step sign-in off: the server asks for the master password first.
+     * Kept so that no caller breaks: it sends nothing and throws `403 reauth_required`. Use the overload with the password.
+     */
+    @Suppress("UNUSED_PARAMETER", "RedundantSuspendModifier")
+    suspend fun totpDisable(code: String): TotpStatus =
+        throw ApiException(403, "reauth_required", "turning two-step sign-in off needs the master password as well as the code")
+
+    /**
+     * Turn two-step sign-in off with a current [code] and the master [password]: its proof is derived as for a first
+     * enrollment ([Account.reauthAuthKey], the fenced in-session derivation; one argon2id pass, off the UI thread) and
+     * sent beside the code. The server checks the proof first (`403 reauth_failed`, its back-off `429`), then the code.
+     */
+    suspend fun totpDisable(code: String, password: String, account: Account): TotpStatus {
+        val key = account.reauthAuthKey(password, accountKeys())
+        return call("POST", "/api/v1/account/totp/disable", io.silencelen.andvari.core.model.wire.TotpDisableRequest(code, key))
+    }
 
     /**
      * An admin invites someone (`POST /admin/users`, spec 03 §7): the web app's Administration makes this call, and the

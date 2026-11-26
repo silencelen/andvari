@@ -284,7 +284,8 @@ internal class PendingSaves(private val disk: FillSnapshotStore, private val dis
 
     /** The saves [record] holds, when this account wrote it for kept saves; null otherwise. */
     private fun open(account: Account, record: ByteArray): List<PendingSave>? {
-        val plain = runCatching { account.openLocalRecord(RECORD, record) }.getOrNull() ?: return null
+        // A lock passes through: the kept saves are never deleted because the vault locked.
+        val plain = io.silencelen.andvari.core.crypto.orNullUnlessLocked { account.openLocalRecord(RECORD, record) } ?: return null
         return try {
             runCatching { json.decodeFromString(serializer, plain.decodeToString()) }.getOrNull()
         } finally {
@@ -302,7 +303,7 @@ internal class PendingSaves(private val disk: FillSnapshotStore, private val dis
      * (a sealed box without the MAC) is opened only to count them, and nothing in it is used; anything else counts as one.
      */
     private fun countUnreadable(account: Account, record: ByteArray): Int {
-        val plain = runCatching { account.openQueuedSave(record) }.getOrNull() ?: return 1
+        val plain = io.silencelen.andvari.core.crypto.orNullUnlessLocked { account.openQueuedSave(record) } ?: return 1
         return try {
             runCatching { json.decodeFromString(serializer, plain.decodeToString()).size }.getOrNull()?.coerceAtLeast(1) ?: 1
         } finally {

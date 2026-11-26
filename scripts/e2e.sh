@@ -1,116 +1,82 @@
 #!/usr/bin/env bash
-# Local end-to-end: real server (shadowJar) + real web client code + real WebSocket,
-# across a SIGKILL to prove crash-durable idempotency (P1 verification gate).
+# The end-to-end run: every web journey (web/src/journeys/) against the real server, driven by the
+# web client's own flow modules over real HTTP. Each journey starts its own server in test mode on
+# 127.0.0.1 (`andvari setup --test`, with its mail sink and test clock), and the engine's
+# command-line module and recovery-cli where a journey needs them, all built here from this working
+# copy. Nothing leaves this machine.
+#
+# A journey that cannot find what it runs skips itself (journeysUnavailable() and
+# recoveryCliUnavailable() in web/src/journeys/harness.ts), and vitest does not count a skip as a
+# failure. Here a skip IS a failure: the run passes only when every test file under web/src/journeys/
+# passed and vitest reports no test skipped. scripts/verify.sh runs the same journeys inside its web
+# leg; this runs them alone.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORK="$(mktemp -d /tmp/andvari-e2e.XXXXXX)"
-DB="$WORK/andvari.db"
-STATE="$WORK/state.json"
-PORT=8099
-BASE="http://127.0.0.1:$PORT"
-BOOTSTRAP="e2e-bootstrap-token-$$" # >= INVITE_TOKEN_MIN_CHARS whatever the PID
 LOCK=/tmp/andvari-gradle.lock
 
-cleanup() { [ -n "${SRV_PID:-}" ] && kill -9 "$SRV_PID" 2>/dev/null || true; rm -rf "$WORK"; }
-trap cleanup EXIT
+echo "==> building the server, andvari-cli and recovery-cli (installDist)"
+(cd "$REPO_DIR" && flock "$LOCK" ./gradlew :server:installDist :tools:andvari-cli:installDist \
+  :tools:recovery-cli:installDist --console=plain -q)
 
-echo "==> building server + recovery-cli shadowJars"
-(cd "$REPO_DIR" && flock "$LOCK" ./gradlew :server:shadowJar :tools:recovery-cli:shadowJar -q)
-SERVER_JAR="$(ls "$REPO_DIR"/server/build/libs/andvari-server*.jar | head -1)"
-RECOVERY_JAR="$(ls "$REPO_DIR"/tools/recovery-cli/build/libs/andvari-recovery-cli*.jar | head -1)"
-
-echo "==> escrow ceremony (recovery-cli keygen)"
-KEYGEN="$(java -jar "$RECOVERY_JAR" keygen 2>/dev/null)"
-PUBKEY="$(echo "$KEYGEN" | grep 'ANDVARI_RECOVERY_PUBKEY=' | head -1 | cut -d= -f2)"
-FINGERPRINT="$(echo "$KEYGEN" | grep 'ANDVARI_RECOVERY_FINGERPRINT=' | head -1 | cut -d= -f2)"
-echo "    recovery pubkey pinned, fingerprint ${FINGERPRINT:0:16}…"
-
-start_server() {
-  ANDVARI_HOST=127.0.0.1 ANDVARI_PORT=$PORT ANDVARI_DB="$DB" \
-    ANDVARI_BLOB_DIR="$WORK/blobs" \
-    ANDVARI_RECOVERY_PUBKEY="$PUBKEY" ANDVARI_RECOVERY_FINGERPRINT="$FINGERPRINT" \
-    ANDVARI_ENUM_SECRET="$(head -c32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')" \
-    ANDVARI_BOOTSTRAP_TOKEN="$BOOTSTRAP" \
-    java -jar "$SERVER_JAR" >"$WORK/server.log" 2>&1 &
-  SRV_PID=$!
-}
-
-wait_health() {
-  for _ in $(seq 1 50); do
-    curl -sf "$BASE/healthz" >/dev/null 2>&1 && return 0
-    sleep 0.2
-  done
-  echo "server did not become healthy; log:"; cat "$WORK/server.log"; exit 1
-}
-
-# ---- phase runner ------------------------------------------------------------
-# Each phase used to be `(... npx vitest ...) | tail -15`, and the banner at the bottom printed
-# unconditionally. That lied in two ways at once (audit H96):
-#
-#   1. The phases were selected by an early `return` INSIDE the test body, so vitest counted the
-#      two phases that were not selected as PASSES: every phase printed "Tests  3 passed (3)"
-#      while running exactly one of them. The test file now uses `it.runIf(PHASE === …)`, so a
-#      phase reports `1 passed | 2 skipped` — which is a number worth asserting.
-#   2. Nothing asserted that any phase actually executed. `describe.skipIf(!BASE)` skipping the
-#      whole file, an unknown ANDVARI_E2E_PHASE, or a rename that makes the glob match nothing
-#      would all leave "E2E PASSED" on the screen having proved nothing — the exact
-#      collected-nothing-exits-0 trap scripts/verify.sh guards the extension leg against.
-#
-# So: run each phase into its own log, require the runner to report at least one PASSING test,
-# count the phases that cleared that floor, and refuse the final banner unless all three did.
-# The log also replaces `tail -15`: on failure the whole thing is printed, because a truncated
-# assertion message is the one line you needed.
-PHASES_RUN=0
-run_phase() {
-  local phase="$1" title="$2"
-  local log="$WORK/phase-$phase.log" rc=0 passed=""
-  echo "==> PHASE $(printf '%s' "$phase" | tr '[:lower:]' '[:upper:]'): $title"
-  if (cd "$REPO_DIR/web" && ANDVARI_E2E="$BASE" ANDVARI_E2E_PHASE="$phase" ANDVARI_E2E_STATE="$STATE" \
-        ANDVARI_E2E_BOOTSTRAP="$BOOTSTRAP" npx vitest run src/e2e/live.e2e.test.ts) >"$log" 2>&1; then
-    rc=0
-  else
-    rc=$?
-  fi
-  if [ "$rc" -ne 0 ]; then
-    echo "    PHASE $phase FAILED (vitest exit $rc) — full output follows:" >&2
-    cat "$log" >&2
+# Each output where harness.ts looks for it, and harness.ts still looking there (the same check
+# scripts/verify.sh makes before its TypeScript leg): a moved output fails here, not as a skip.
+for p in server/build/install/server/bin/server tools/andvari-cli/build/install/andvari-cli/lib \
+         tools/recovery-cli/build/install/recovery-cli/bin/recovery-cli; do
+  if ! grep -qF "\"$p\"" "$REPO_DIR/web/src/journeys/harness.ts"; then
+    echo "    E2E: web/src/journeys/harness.ts no longer reads $p — point this check at what it reads now." >&2
     exit 1
   fi
-  # vitest summary line: "Tests  1 passed | 2 skipped (3)". No "N passed" at all means the whole
-  # file was skipped (no BASE) or nothing was collected — a green exit code that proves nothing.
-  passed=$(grep -oE 'Tests[[:space:]]+[0-9]+ passed' "$log" | head -1 | grep -oE '[0-9]+' | head -1) || true
-  if [ "${passed:-0}" -lt 1 ]; then
-    cat "$log" >&2
-    echo "    PHASE $phase COLLECTED NOTHING: vitest reported ${passed:-0} passing tests." >&2
-    echo "    A phase that runs no test is not a phase that passed — refusing to continue." >&2
+  if [ ! -e "$REPO_DIR/$p" ]; then
+    echo "    E2E: $p is missing after the build (its installDist task builds it); the journeys would skip." >&2
     exit 1
   fi
-  tail -15 "$log"
-  PHASES_RUN=$((PHASES_RUN + 1))
-}
+done
 
-echo "==> starting server (pid capture)"
-start_server
-wait_health
-echo "    healthy at $BASE"
-
-run_phase a "enroll + push + WebSocket propagation"
-
-echo "==> SIGKILL the server mid-life, then restart on the SAME db (crash simulation)"
-kill -9 "$SRV_PID"; wait "$SRV_PID" 2>/dev/null || true
-start_server
-wait_health
-echo "    server restarted, db survived"
-
-run_phase b "replay same mutationId (idempotent) + continue"
-
-run_phase c "offline durable-cache drills (fake-indexeddb + the SAME surviving server/db)"
-
-# The banner is a claim about three phases, so assert three phases. (Each already proved it ran at
-# least one test; this catches a phase deleted from the script or short-circuited past run_phase.)
-if [ "$PHASES_RUN" -ne 3 ]; then
-  echo "    E2E INCOMPLETE: $PHASES_RUN of 3 phases executed — not printing a pass banner." >&2
+FILES=$(find "$REPO_DIR/web/src/journeys" -maxdepth 1 -name '*.test.ts' | wc -l)
+JOURNEYS=$(find "$REPO_DIR/web/src/journeys" -maxdepth 1 -name '*.journey.test.ts' | wc -l)
+if [ "$JOURNEYS" -lt 1 ]; then
+  echo "    E2E: no *.journey.test.ts under web/src/journeys — nothing to run." >&2
   exit 1
 fi
-echo "==> E2E PASSED: WebSocket propagation + crash-durable idempotency + offline-cache drills ($PHASES_RUN/3 phases, each with a passing test)"
+
+echo "==> running $FILES test files under web/src/journeys ($JOURNEYS journeys); the output is printed when the run ends"
+rc=0
+OUT=$(cd "$REPO_DIR/web" && NO_COLOR=1 npx vitest run src/journeys --testTimeout 300000 2>&1) || rc=$?
+printf '%s\n' "$OUT"
+if [ "$rc" -ne 0 ]; then
+  echo "==> E2E FAILED (vitest exit $rc)" >&2
+  exit 1
+fi
+
+# Nothing skipped. vitest's summary reads "Test Files  N passed (N)" and "Tests  M passed (M)" only
+# when every file and every test passed; a skip adds "| K skipped" to the line. A journey that skips
+# itself also prints why (the console.warn of harness.ts), so that text is refused as well.
+files_line=$(printf '%s\n' "$OUT" | grep -m1 -E '^[[:space:]]*Test Files[[:space:]]') || true
+tests_line=$(printf '%s\n' "$OUT" | grep -m1 -E '^[[:space:]]*Tests[[:space:]]') || true
+re_files='^[[:space:]]*Test Files[[:space:]]+([0-9]+) passed \(([0-9]+)\)[[:space:]]*$'
+re_tests='^[[:space:]]*Tests[[:space:]]+([0-9]+) passed \(([0-9]+)\)[[:space:]]*$'
+skipped=""
+if [[ "$files_line" =~ $re_files ]] && [ "${BASH_REMATCH[1]}" = "${BASH_REMATCH[2]}" ] \
+   && [ "${BASH_REMATCH[1]}" -eq "$FILES" ]; then
+  :
+else
+  skipped="the files line is \"${files_line:-<none>}\", not \"Test Files  $FILES passed ($FILES)\""
+fi
+if [ -z "$skipped" ]; then
+  if [[ "$tests_line" =~ $re_tests ]] && [ "${BASH_REMATCH[1]}" = "${BASH_REMATCH[2]}" ] \
+     && [ "${BASH_REMATCH[1]}" -ge 1 ]; then
+    TESTS="${BASH_REMATCH[1]}"
+  else
+    skipped="the tests line is \"${tests_line:-<none>}\", not every test passed"
+  fi
+fi
+if [ -z "$skipped" ] && printf '%s\n' "$OUT" | grep -qE 'journeys skipped:|build the offline tool first'; then
+  skipped="a journey printed that it skips itself"
+fi
+if [ -n "$skipped" ]; then
+  echo "==> E2E INCOMPLETE: $skipped. A journey that did not run is not a journey that passed." >&2
+  exit 1
+fi
+
+echo "==> E2E PASSED: $FILES test files ($JOURNEYS journeys), $TESTS tests, none skipped"

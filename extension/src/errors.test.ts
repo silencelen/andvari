@@ -1,257 +1,269 @@
-// node --test (see version.test.ts). Pins every user-facing sentence the surfaces render
-// (E1-3/E1-5/E1-7) — these are VERBATIM ports of the web canon, so any edit here or there
-// is cross-client copy drift and must be a deliberate, twin-side change.
+// node --test (see version.test.ts). Each code a surface renders reads the line named for it in errors.ts (E1-3/E1-5/
+// E1-7). Lines are named by their constants, never by their words: the owner's words go into those constants by a tool
+// at any time, and a test that pinned a placeholder's words would turn red that day although nothing is wrong.
 import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import * as E from "./errors.ts";
 import {
   bioUnlockErrorCopy,
-  CARD_COPY_FAILED,
   cardFillErrorCopy,
-  CLIPBOARD_FAILED,
   enrollBioErrorCopy,
   enrollErrorCopy,
+  fillApproved,
   fillErrorCopy,
   lockNoticeCopy,
   pinUnlockErrorCopy,
   revealErrorCopy,
-  SAVE_UNLOCK_PROMPTED,
-  SAVE_UNLOCK_TOOLBAR,
   saveErrorCopy,
-  TOTP_ADDED,
   totpAddErrorCopy,
-  UNREACHABLE,
   unlockErrorCopy,
 } from "./errors.ts";
 
-test("UNREACHABLE is the canonical web sentence", () => {
-  // Byte-equal to web/src/ui/errors.ts UNREACHABLE (em dash U+2014, ASCII apostrophes).
-  // Duplicated because no build path from extension/ to web/src exists.
-  assert.equal(UNREACHABLE, "Can't reach the andvari server — check your connection (and your VPN, if your server is private), then try again.");
+test("unlock ladder: every code reads its own line", () => {
+  const want: Record<string, string> = {
+    bad_credentials: E.WRONG_CREDENTIALS,
+    totp_required: E.TOTP_ENTER_CODE,
+    totp_bad_code: E.TOTP_BAD_CODE,
+    totp_rate_limited: E.SIGN_IN_TOO_MANY_TRIES,
+    rate_limited: E.SIGN_IN_TOO_MANY_TRIES,
+    totp_expired: E.TOTP_EXPIRED,
+    totp_enroll_required: E.TOTP_ENROLL_REQUIRED,
+    aborted: E.SIGN_IN_INTERRUPTED,
+    upgrade_required: E.UPGRADE_REQUIRED,
+    identity_mismatch: E.IDENTITY_MISMATCH,
+    keys_damaged: E.ACCOUNT_KEYS_DAMAGED,
+    kdf_policy: E.KDF_POLICY_BLOCKED,
+    bad_wire_id: E.BAD_WIRE_ID,
+    confirm_server: E.CONFIRM_SERVER_FIRST,
+    server_fork: E.SERVER_FORK,
+    card_invalid: E.CARD_INVALID,
+    operator_account: E.OPERATOR_NOT_IN_EXTENSION,
+    server_error: E.SIGN_IN_SERVER_ERROR,
+    network: E.UNREACHABLE,
+    unknown: E.SIGN_IN_FAILED,
+  };
+  for (const [code, line] of Object.entries(want)) assert.equal(unlockErrorCopy(code as never), line, code);
+  assert.equal(unlockErrorCopy(undefined), E.SIGN_IN_FAILED);
+  // link_required fills the approved sentence with the email that signed in.
+  assert.equal(unlockErrorCopy("link_required", "bea@example.org"), fillApproved(E.LINK_REQUIRED_CANNOT_LINK, "bea@example.org"));
+  // The hard faults are lines of their own: never a wrong password, never the "try again" terminal.
+  for (const hard of ["keys_damaged", "kdf_policy", "identity_mismatch", "bad_wire_id"] as const) {
+    assert.notEqual(unlockErrorCopy(hard), unlockErrorCopy("bad_credentials"), hard);
+    assert.notEqual(unlockErrorCopy(hard), unlockErrorCopy(undefined), hard);
+  }
 });
 
-test("unlock ladder: every code renders the exact copy", () => {
-  assert.equal(unlockErrorCopy("bad_credentials"), "Wrong email or master password.");
-  // 0.16.3: totp_required is no longer a web-vault dead-end — it's the instruction the popup shows
-  // when it flips to the one-time-code field (rendered polite/info, not as an error).
-  assert.equal(unlockErrorCopy("totp_required"), "Enter the 6-digit code from your authenticator app.");
-  assert.equal(unlockErrorCopy("totp_bad_code"), "That code didn’t work — codes change every 30 seconds, so try the current one.");
-  assert.equal(unlockErrorCopy("totp_rate_limited"), "Too many attempts — wait a minute, then sign in again.");
-  assert.equal(unlockErrorCopy("totp_expired"), "That took too long — sign in again.");
-  assert.equal(unlockErrorCopy("totp_enroll_required"), "This server requires two-factor setup — finish it in the web vault, then sign in here.");
-  assert.equal(unlockErrorCopy("aborted"), "Sign-in was interrupted — try again.");
-  // Deliberately does NOT hard-promise the banner link (AM5): a pin can name an
-  // unpublished build, in which case no update banner materializes.
-  assert.equal(unlockErrorCopy("upgrade_required"), "Your server requires a newer extension — get the update from the web vault or the link above.");
-  // web IdentityMismatchError's message, byte-equal — never rendered as wrong-password.
-  assert.equal(unlockErrorCopy("identity_mismatch"), "Server identity key mismatch — possible tampering. Do not proceed; contact your admin.");
-  // H67: a wrappedUvk that isn't a readable envelope (bad base64url, too short, an unknown
-  // version/alg) is refused before the password's wrap key is applied — so this rung must be the
-  // terminal damaged-keys sentence, byte-equal to core HouseholdCopy.ACCOUNT_KEYS_DAMAGED and web
-  // account.ts VAULT_KEYS_DAMAGED, and must never read as bad credentials or invite a retry.
-  assert.equal(
-    unlockErrorCopy("keys_damaged"),
-    "This account's stored keys are damaged or from a newer version, so sign-in cannot continue. Contact your admin or restore from a backup.",
-  );
-  assert.notEqual(unlockErrorCopy("keys_damaged"), unlockErrorCopy("bad_credentials"));
-  assert.notEqual(unlockErrorCopy("keys_damaged"), unlockErrorCopy(undefined)); // not the "try again" terminal
-  // H122 (2026-09-13 audit): pinned to the LITERAL, not merely to its siblings. The PIN and bio
-  // ladders below assert equality with THIS call, so with no literal anywhere all three could be
-  // reworded together and stay green — which is how the weakened-KDF sentence came to end
-  // "contact your admin." here and "contact your administrator." in core and web, despite
-  // HouseholdCopy.kt declaring itself a byte-twin of this file. One wording won: "admin", which
-  // is what the identity-mismatch line directly above (byte-equal across all three canons) and
-  // the ~500 other uses in the tree already say. Core's twin is HouseholdCopy.WEAK_KDF_SIGN_IN
-  // (its WEAK_KDF_ACTION is the "The action was blocked" variant web renders). This is the
-  // sentence the house rules say must never be softened, so it never falls back to a generic
-  // failure: an edit here has to be a deliberate, three-canon change.
-  assert.equal(
-    unlockErrorCopy("kdf_policy"),
-    "This server sent weakened security settings for your master password. Sign-in was blocked to protect you — contact your admin.",
-  );
-  assert.equal(unlockErrorCopy("server_error"), "The server had a problem answering — your details may be fine. Try again in a moment.");
-  assert.equal(unlockErrorCopy("network"), UNREACHABLE);
-  assert.equal(unlockErrorCopy("unknown"), "Sign-in failed. Please try again.");
+test("save banner: every code reads its own line, never SW-internal strings", () => {
+  const want: Record<string, string> = {
+    shared_vault: E.SAVE_SHARED_VAULT,
+    server_fork: E.SAVE_REFUSED_FORK,
+    // Turned round (BZ): the save banner is about a capture a lock deletes, so its line never says "lock".
+    server_ended: E.SAVE_REFUSED_SERVER_ENDED_CAUGHT,
+    app_no_account: E.SAVE_APP_NO_ACCOUNT,
+    app_unavailable: E.SAVE_APP_UNAVAILABLE,
+    locked: E.SAVE_LOCKED,
+    no_personal_vault: E.NO_PERSONAL_VAULT_CONFIRM,
+    conflict: E.SAVE_CONFLICT_KEPT_BOTH,
+    // Turned round (BZ): a refusal with no reason the extension knows is no longer said as a missing attachment.
+    rejected: E.SAVE_REJECTED_OTHER,
+    failed: E.SAVE_FAILED,
+    // The Safari app's own refusal has a code of its own, never the server's `rejected`.
+    app_refused: E.SAVE_APP_REFUSED,
+  };
+  for (const [code, line] of Object.entries(want)) assert.equal(saveErrorCopy(code as never), line, code);
+  assert.equal(saveErrorCopy(undefined), E.SAVE_FAILED); // SW unreachable
+  // H03/R37: `rejected` is the PERMANENT rung, never the retryable default.
+  for (const line of [E.SAVE_REJECTED_ATTACHMENT, E.SAVE_REJECTED_FULL, E.SAVE_REJECTED_TOO_LARGE, E.SAVE_REJECTED_OTHER]) assert.notEqual(line, E.SAVE_FAILED);
+  assert.notEqual(E.SAVE_APP_REFUSED, E.SAVE_REJECTED_OTHER);
 });
 
-test("unlock ladder: an absent code falls back to the terminal sentence", () => {
-  assert.equal(unlockErrorCopy(undefined), "Sign-in failed. Please try again.");
+test("no line advises an act that destroys what it is about: where a lock would delete what was caught and not saved, nothing says to lock", () => {
+  // The save banner is always about such a capture. On the code before: "Lock, then sign in again to save."
+  assert.equal(saveErrorCopy("server_ended"), E.SAVE_REFUSED_SERVER_ENDED_CAUGHT);
+  assert.notEqual(saveErrorCopy("server_ended"), E.SAVE_REFUSED_SERVER_ENDED);
+  // The notice beside the vault: with nothing caught, the approved line; with captures, or a count not known, another.
+  assert.equal(E.serverEndedNotice(0), E.SERVER_ENDED_NOTICE);
+  assert.notEqual(E.serverEndedNotice(2), E.SERVER_ENDED_NOTICE);
+  assert.notEqual(E.serverEndedNotice(1), E.SERVER_ENDED_NOTICE);
+  assert.equal(E.serverEndedNotice(null), E.SERVER_ENDED_NOTICE_UNSAVED_UNKNOWN);
+  assert.equal(E.serverEndedNotice(2), E.SERVER_ENDED_NOTICE_UNSAVED_MANY.replace("{0}", "2"));
+  assert.equal(E.serverEndedNotice(1), E.SERVER_ENDED_NOTICE_UNSAVED_ONE);
 });
 
-test("save banner: the three codes render copy, never SW-internal strings", () => {
-  // Unlock-prompt (2026-08-12): the LOGIN banner no longer renders the `locked` rung (its Save
-  // click summons the unlock screen and shows SAVE_UNLOCK_* instead); the rung stays pinned for
-  // the card banner's lock-mid-resolve race.
-  assert.equal(saveErrorCopy("locked"), "Could not save — unlock andvari and try again.");
-  // H20 (2026-09-13 audit): a `conflict` push status is a write the server APPLIED (spec 03 §5).
-  // The old sentence ("changed elsewhere — open it in the web vault") said the save did not happen
-  // when it had. The SW no longer emits the code from any put path (conflicts land as ok:true and
-  // the displaced version is materialized), so the rung only has to stay TRUE, never a failure.
-  assert.equal(saveErrorCopy("conflict"), "Saved — this login also changed elsewhere; both versions are in your vault.");
-  assert.doesNotMatch(saveErrorCopy("conflict"), /could not|open it in the web vault/i);
-  assert.equal(saveErrorCopy("failed"), "Could not save — try again.");
-  assert.equal(saveErrorCopy(undefined), "Could not save — try again."); // SW unreachable
+test("a refused save is said by the server's own reason, up to the sentence: a full account as a full account", () => {
+  const want: Record<string, string> = {
+    quota_exceeded: E.SAVE_REJECTED_FULL,
+    unknown_attachment: E.SAVE_REJECTED_ATTACHMENT,
+    attachment_mismatch: E.SAVE_REJECTED_ATTACHMENT,
+    item_too_large: E.SAVE_REJECTED_TOO_LARGE,
+    item_attachment_quota: E.SAVE_REJECTED_TOO_LARGE,
+    too_many_attachments: E.SAVE_REJECTED_TOO_LARGE,
+    bad_item_id: E.SAVE_REJECTED_OTHER,
+  };
+  for (const [reason, line] of Object.entries(want)) assert.equal(saveErrorCopy("rejected", reason), line, reason);
+  // On the code before: a full account read "an attachment it references is no longer there".
+  assert.notEqual(saveErrorCopy("rejected", "quota_exceeded"), E.SAVE_REJECTED_ATTACHMENT);
 });
 
-test("save banner: `rejected` (H03/R37) is the PERMANENT rung — core's sentence byte-equal, never the retryable default", () => {
-  // The server's per-row `rejected` verdict (an attachment ref that no longer resolves) fails
-  // identically on every retry, so "try again" would be a lie. The sentence is the natives'
-  // HouseholdCopy.SAVE_REJECTED_ATTACHMENT, pinned against the Kotlin source the token-lockstep
-  // way (web vault-copy.test.ts idiom) so a one-sided reword fails here instead of drifting.
-  const householdKt = readFileSync(new URL("../../core/src/commonMain/kotlin/io/silencelen/andvari/core/client/HouseholdCopy.kt", import.meta.url), "utf-8");
-  const m = householdKt.match(/const val SAVE_REJECTED_ATTACHMENT = "([^"]+)"/);
-  assert.ok(m, "HouseholdCopy.SAVE_REJECTED_ATTACHMENT moved — update the pin");
-  assert.equal(saveErrorCopy("rejected"), m![1]);
-  assert.notEqual(saveErrorCopy("rejected"), saveErrorCopy("failed"));
-  assert.doesNotMatch(saveErrorCopy("rejected"), /try again\.$/);
+test("TOTP add: every code reads its own line", () => {
+  const want: Record<string, string> = {
+    locked: E.TOTP_ADD_LOCKED,
+    no_personal_vault: E.NO_PERSONAL_VAULT_CONFIRM,
+    invalid: E.TOTP_ADD_INVALID,
+    exists: E.TOTP_ADD_EXISTS,
+    not_allowed: E.TOTP_ADD_NOT_ALLOWED,
+    conflict: E.TOTP_ADD_CONFLICT,
+    read_only: E.TOTP_ADD_READ_ONLY,
+    failed: E.TOTP_ADD_FAILED,
+  };
+  for (const [code, line] of Object.entries(want)) assert.equal(totpAddErrorCopy(code as never), line, code);
+  assert.equal(totpAddErrorCopy(undefined), E.TOTP_ADD_FAILED); // SW mid-restart
+  // `exists` is the ADD-ONLY contract: it is not the retryable failure.
+  assert.notEqual(E.TOTP_ADD_EXISTS, E.TOTP_ADD_FAILED);
 });
 
-test("TOTP add (2026-08-12): every code renders copy; exists routes to the web vault, never a retry", () => {
-  assert.equal(TOTP_ADDED, "One-time code added.");
-  assert.equal(totpAddErrorCopy("locked"), "andvari locked before it could add the code — unlock and try again.");
-  assert.equal(totpAddErrorCopy("invalid"), "That doesn't look like a one-time-code secret — paste the otpauth:// link or the setup key.");
-  // The ADD-ONLY contract: replacing a stored second factor is a web-vault edit, so this copy
-  // must never suggest retrying from the extension.
-  assert.equal(totpAddErrorCopy("exists"), "This login already has a one-time code — manage it in the web vault.");
-  assert.equal(totpAddErrorCopy("not_allowed"), "andvari couldn't tell which login this code belongs to — add it from the popup instead.");
-  // H20: the same truth as the save banner's conflict rung — a landed write, never a failure.
-  assert.equal(totpAddErrorCopy("conflict"), "One-time code added — this login also changed elsewhere; both versions are in your vault.");
-  assert.doesNotMatch(totpAddErrorCopy("conflict"), /could not|open it in the web vault/i);
-  assert.equal(totpAddErrorCopy("failed"), "Could not add the code — try again.");
-  assert.equal(totpAddErrorCopy(undefined), "Could not add the code — try again."); // SW mid-restart
+test("fill outcomes (Cut M, v2 #14): every code reads its own line", () => {
+  const want: Record<string, string> = {
+    locked: E.FILL_LOCKED,
+    not_allowed: E.FILL_NOT_ALLOWED,
+    no_form: E.FILL_NO_FORM,
+    no_fields: E.FILL_NO_FIELDS,
+    no_secret: E.FILL_NO_SECRET,
+    unreachable: E.FILL_UNREACHABLE,
+  };
+  for (const [code, line] of Object.entries(want)) assert.equal(fillErrorCopy(code as never), line, code);
+  assert.equal(fillErrorCopy(undefined), E.FILL_UNREACHABLE);
 });
 
-test("unlock-prompt lines (2026-08-12): neither sentence asks for a second Save", () => {
-  // The SW keeps the locked Save click as approval and lands it on unlock, so the copy must
-  // promise finishing, not retrying — "try again" here would be a lie about the flow.
-  assert.equal(SAVE_UNLOCK_PROMPTED, "Unlock andvari to finish saving.");
-  assert.equal(SAVE_UNLOCK_TOOLBAR, "Open andvari from the toolbar and unlock to finish saving.");
+test("reveal-seam failures (#23): every code reads its own line", () => {
+  assert.equal(revealErrorCopy("locked"), E.REVEAL_LOCKED);
+  assert.equal(revealErrorCopy("not_allowed"), E.REVEAL_NOT_ALLOWED);
+  assert.equal(revealErrorCopy(undefined), E.REVEAL_FAILED); // SW mid-restart
 });
 
-test("fill outcomes (Cut M, v2 #14): every code renders canon copy, never SW/content-internal strings", () => {
-  assert.equal(fillErrorCopy("locked"), "andvari locked before it could fill — unlock and try again.");
-  assert.equal(fillErrorCopy("not_allowed"), "andvari wouldn't release this login for this page — try again from the popup.");
-  assert.equal(fillErrorCopy("no_form"), "No login fields found on this page — copy the username and password instead.");
-  assert.equal(fillErrorCopy("no_fields"), "Couldn't fill the fields on this page — copy the username and password instead.");
-  assert.equal(fillErrorCopy("no_secret"), "Nothing to fill — this login has no username or password saved.");
-  // "unreachable" and an absent code (SW mid-restart / no outcome from the page) share the
-  // popup's long-standing delivery-failure sentence.
-  assert.equal(fillErrorCopy("unreachable"), "Couldn't reach the page — reload the tab and retry.");
-  assert.equal(fillErrorCopy(undefined), "Couldn't reach the page — reload the tab and retry.");
-});
-
-test("reveal-seam failures (#23): every code renders verb-neutral copy, never SW-internal strings", () => {
-  // Verb-neutral ("release that login") because these render on BOTH the copy button and the
-  // show/hide password toggle — a "copy" verb would misdescribe the reveal action.
-  assert.equal(revealErrorCopy("locked"), "andvari locked before it could release that login — unlock and try again.");
-  assert.equal(revealErrorCopy("not_allowed"), "andvari wouldn't release that login — reopen the popup and try again.");
-  assert.equal(revealErrorCopy(undefined), "Could not release that login — try again."); // SW mid-restart
-});
-
-test("quick-unlock redeem: wrong_pin is a generic no-oracle line carrying the remaining attempts", () => {
+test("quick-unlock redeem: wrong_pin carries the remaining attempts, singular for one", () => {
   // breaker A1/A2: no partial-correctness signal, no wrong-PIN-vs-corrupt-blob distinction.
-  assert.equal(pinUnlockErrorCopy("wrong_pin", 4), "That PIN didn't match — 4 tries left, or use your master password.");
-  assert.equal(pinUnlockErrorCopy("wrong_pin", 1), "That PIN didn't match — 1 try left, or use your master password."); // singular
-  assert.equal(pinUnlockErrorCopy("wrong_pin", 0), "That PIN didn't match — 0 tries left, or use your master password.");
+  assert.equal(pinUnlockErrorCopy("wrong_pin", 1), fillApproved(E.PIN_WRONG_ONE_TRY_LEFT, "1"));
+  assert.equal(pinUnlockErrorCopy("wrong_pin", 3), fillApproved(E.PIN_WRONG_TRIES_LEFT, "3"));
+  assert.equal(pinUnlockErrorCopy("wrong_pin"), fillApproved(E.PIN_WRONG_TRIES_LEFT, "0"));
+  for (const k of ["PIN_WRONG_ONE_TRY_LEFT", "PIN_WRONG_TRIES_LEFT"] as const) assert.deepEqual(E[k].match(/\{\d+\}/g), ["{0}"], k);
 });
 
-test("quick-unlock redeem: wiped-blob / revoked / hard-fault outcomes route to the right copy", () => {
-  assert.equal(pinUnlockErrorCopy("expired"), "It's been a while since you signed in — enter your master password to continue.");
-  assert.equal(pinUnlockErrorCopy("exhausted"), "Too many wrong PINs — quick unlock is off. Unlock with your master password.");
-  assert.equal(pinUnlockErrorCopy("corrupt"), "Quick unlock needs to be set up again — unlock with your master password.");
-  assert.equal(pinUnlockErrorCopy("stale_uvk"), "Quick unlock needs to be set up again — unlock with your master password.");
-  assert.equal(pinUnlockErrorCopy("revoked"), "Your session ended — sign in again with your master password.");
-  // Hard security faults keep their exact sentences — NEVER softened (parity with the unlock ladder).
+test("quick-unlock redeem: wiped-blob / revoked / hard-fault outcomes route to the right line", () => {
+  const want: Record<string, string> = {
+    expired: E.QUICK_UNLOCK_EXPIRED,
+    exhausted: E.PIN_EXHAUSTED,
+    corrupt: E.QUICK_UNLOCK_SET_UP_AGAIN,
+    stale_uvk: E.QUICK_UNLOCK_SET_UP_AGAIN,
+    keys_damaged: E.ACCOUNT_KEYS_DAMAGED,
+    revoked: E.QUICK_UNLOCK_SESSION_ENDED,
+    identity_mismatch: E.IDENTITY_MISMATCH,
+    kdf_policy: E.KDF_POLICY_BLOCKED,
+    confirm_server: E.CONFIRM_SERVER_FIRST,
+    server_error: E.QUICK_UNLOCK_SERVER_ERROR,
+    network: E.UNREACHABLE,
+    operator_account: E.OPERATOR_NOT_IN_EXTENSION,
+    not_armed: E.PIN_UNLOCK_FAILED,
+    aborted: E.PIN_UNLOCK_FAILED,
+  };
+  for (const [code, line] of Object.entries(want)) assert.equal(pinUnlockErrorCopy(code as never), line, code);
+  assert.equal(pinUnlockErrorCopy(undefined), E.PIN_UNLOCK_FAILED);
+  // Hard security faults keep the unlock ladder's own lines (never softened).
   assert.equal(pinUnlockErrorCopy("identity_mismatch"), unlockErrorCopy("identity_mismatch"));
   assert.equal(pinUnlockErrorCopy("kdf_policy"), unlockErrorCopy("kdf_policy"));
-  assert.equal(pinUnlockErrorCopy("network"), UNREACHABLE);
-  assert.equal(pinUnlockErrorCopy("server_error"), "The server had a problem answering — try again in a moment.");
-  // not_armed / aborted (benign races) + an absent code fall to the master password quietly.
-  assert.equal(pinUnlockErrorCopy("aborted"), "Couldn't quick-unlock — unlock with your master password.");
-  assert.equal(pinUnlockErrorCopy(undefined), "Couldn't quick-unlock — unlock with your master password.");
 });
 
 test("quick-unlock enroll: the entropy-floor nudges (breaker A2⊕B8) + the gate refusals", () => {
-  assert.equal(enrollErrorCopy("weak_pin", "too_short"), "Use at least 6 characters for your PIN.");
-  assert.equal(enrollErrorCopy("weak_pin", "digits_need_length"), "An all-number PIN needs at least 10 digits — or add a letter to a shorter one.");
-  assert.equal(enrollErrorCopy("weak_pin", "trivial"), "That PIN is too easy to guess — avoid sequences and repeats.");
-  assert.equal(enrollErrorCopy("locked"), "Unlock andvari first to set up quick unlock.");
-  assert.equal(enrollErrorCopy("must_change_password"), "Set a new master password in the web vault before turning on quick unlock.");
-  assert.equal(enrollErrorCopy("need_full_unlock"), "Enter your master password once more to set up quick unlock.");
-  assert.equal(enrollErrorCopy(undefined), "Couldn't turn on quick unlock — try again.");
+  assert.equal(enrollErrorCopy("locked"), E.ENROLL_LOCKED);
+  assert.equal(enrollErrorCopy("must_change_password"), E.ENROLL_MUST_CHANGE_PASSWORD);
+  assert.equal(enrollErrorCopy("need_full_unlock"), E.ENROLL_NEED_FULL_UNLOCK);
+  assert.equal(enrollErrorCopy("weak_pin", "too_short"), E.PIN_TOO_SHORT);
+  assert.equal(enrollErrorCopy("weak_pin", "digits_need_length"), E.PIN_DIGITS_NEED_LENGTH);
+  assert.equal(enrollErrorCopy("weak_pin", "trivial"), E.PIN_TRIVIAL);
+  assert.equal(enrollErrorCopy("weak_pin"), E.PIN_TRIVIAL);
+  assert.equal(enrollErrorCopy("switched_off"), E.QUICK_UNLOCK_SWITCHED_OFF);
+  assert.equal(enrollErrorCopy(undefined), E.ENROLL_FAILED);
 });
 
 test("biometric redeem (0.17.0): cancel is retryable; wiped/revoked/hard-fault route like the PIN lane", () => {
-  assert.equal(bioUnlockErrorCopy("bio_cancelled"), "Device unlock was cancelled — try again, or use your master password.");
-  assert.equal(bioUnlockErrorCopy("expired"), "It's been a while since you signed in — enter your master password to continue.");
-  assert.equal(bioUnlockErrorCopy("corrupt"), "Quick unlock needs to be set up again — unlock with your master password.");
-  assert.equal(bioUnlockErrorCopy("stale_uvk"), "Quick unlock needs to be set up again — unlock with your master password.");
-  assert.equal(bioUnlockErrorCopy("revoked"), "Your session ended — sign in again with your master password.");
-  // hard faults keep the exact shared sentences (never softened) — pinned against the source of truth.
-  assert.equal(bioUnlockErrorCopy("identity_mismatch"), unlockErrorCopy("identity_mismatch"));
-  assert.equal(bioUnlockErrorCopy("kdf_policy"), unlockErrorCopy("kdf_policy"));
-  assert.equal(bioUnlockErrorCopy("network"), UNREACHABLE);
-  assert.equal(bioUnlockErrorCopy("server_error"), "The server had a problem answering — try again in a moment.");
-  // not_armed / aborted (benign races) + an absent code fall to the master password quietly.
-  assert.equal(bioUnlockErrorCopy("not_armed"), "Couldn't unlock with your device — unlock with your master password.");
-  assert.equal(bioUnlockErrorCopy("aborted"), "Couldn't unlock with your device — unlock with your master password.");
-  assert.equal(bioUnlockErrorCopy(undefined), "Couldn't unlock with your device — unlock with your master password.");
+  const want: Record<string, string> = {
+    bio_cancelled: E.BIO_UNLOCK_CANCELLED,
+    expired: E.QUICK_UNLOCK_EXPIRED,
+    corrupt: E.QUICK_UNLOCK_SET_UP_AGAIN,
+    stale_uvk: E.QUICK_UNLOCK_SET_UP_AGAIN,
+    keys_damaged: E.ACCOUNT_KEYS_DAMAGED,
+    revoked: E.QUICK_UNLOCK_SESSION_ENDED,
+    identity_mismatch: E.IDENTITY_MISMATCH,
+    kdf_policy: E.KDF_POLICY_BLOCKED,
+    confirm_server: E.CONFIRM_SERVER_FIRST,
+    server_error: E.QUICK_UNLOCK_SERVER_ERROR,
+    network: E.UNREACHABLE,
+    operator_account: E.OPERATOR_NOT_IN_EXTENSION,
+  };
+  for (const [code, line] of Object.entries(want)) assert.equal(bioUnlockErrorCopy(code as never), line, code);
+  assert.equal(bioUnlockErrorCopy(undefined), E.BIO_UNLOCK_FAILED);
 });
 
 test("biometric enroll (0.17.0): unsupported keeps the PIN path; cancel is retryable; gates route like the PIN", () => {
-  assert.equal(enrollBioErrorCopy("bio_unsupported"), "This device can't do biometric quick unlock — set up a PIN instead.");
-  assert.equal(enrollBioErrorCopy("bio_cancelled"), "Setup was cancelled — try again when you're ready.");
-  assert.equal(enrollBioErrorCopy("locked"), "Unlock andvari first to set up quick unlock.");
-  assert.equal(enrollBioErrorCopy("must_change_password"), "Set a new master password in the web vault before turning on quick unlock.");
-  assert.equal(enrollBioErrorCopy("need_full_unlock"), "Enter your master password once more to set up quick unlock.");
-  assert.equal(enrollBioErrorCopy(undefined), "Couldn't turn on device quick unlock — try again.");
+  assert.equal(enrollBioErrorCopy("locked"), E.ENROLL_LOCKED);
+  assert.equal(enrollBioErrorCopy("must_change_password"), E.ENROLL_MUST_CHANGE_PASSWORD);
+  assert.equal(enrollBioErrorCopy("need_full_unlock"), E.ENROLL_NEED_FULL_UNLOCK);
+  assert.equal(enrollBioErrorCopy("bio_unsupported"), E.BIO_UNSUPPORTED);
+  assert.equal(enrollBioErrorCopy("bio_cancelled"), E.BIO_SETUP_CANCELLED);
+  assert.equal(enrollBioErrorCopy("switched_off"), E.QUICK_UNLOCK_SWITCHED_OFF);
+  assert.equal(enrollBioErrorCopy(undefined), E.ENROLL_BIO_FAILED);
 });
 
-test("A16: an enroll refused because nothing could keep quick unlock says why, and never says try again", () => {
-  const why = "Quick unlock isn't available in this browser mode — andvari has no private storage here to keep it in (Firefox does this when it never remembers history).";
-  assert.equal(enrollErrorCopy("unavailable"), why);
-  assert.equal(enrollBioErrorCopy("unavailable"), why);
+test("A16: an enroll refused because nothing could keep quick unlock says why, and is not the retryable failure", () => {
+  assert.equal(enrollErrorCopy("unavailable"), E.QUICK_UNLOCK_UNAVAILABLE);
+  assert.equal(enrollBioErrorCopy("unavailable"), E.QUICK_UNLOCK_UNAVAILABLE);
+  assert.notEqual(E.QUICK_UNLOCK_UNAVAILABLE, E.ENROLL_FAILED);
 });
 
-test("card + clipboard copy failures (#23): honest retryable sentences, never raw exception text", () => {
-  assert.equal(CARD_COPY_FAILED, "Could not copy from this card — reopen the popup and try again.");
-  assert.equal(CLIPBOARD_FAILED, "Couldn't copy to the clipboard — try again.");
-});
-
-test("lock notice: verbatim web format.ts rounding (AM3 — minutes at ≥ 60 s)", () => {
-  assert.equal(lockNoticeCopy(900), "Locked after 15 minutes of inactivity.");
+test("lock notice: the web's rounding (AM3 — minutes at ≥ 60 s), singular for one, the number in the line's slot", () => {
+  assert.equal(lockNoticeCopy(900), fillApproved(E.LOCKED_AFTER_MINUTES, "15"));
   // ≥ 60 s always renders whole minutes: Math.round(90/60) = 2 — never "90 seconds".
-  assert.equal(lockNoticeCopy(90), "Locked after 2 minutes of inactivity.");
-  assert.equal(lockNoticeCopy(60), "Locked after 1 minute of inactivity."); // singular
-  assert.equal(lockNoticeCopy(45), "Locked after 45 seconds of inactivity.");
-  assert.equal(lockNoticeCopy(1), "Locked after 1 second of inactivity."); // singular
-  assert.equal(lockNoticeCopy(0), "Locked after 1 second of inactivity."); // clamp ≥ 1 s
+  assert.equal(lockNoticeCopy(90), fillApproved(E.LOCKED_AFTER_MINUTES, "2"));
+  assert.equal(lockNoticeCopy(60), fillApproved(E.LOCKED_AFTER_ONE_MINUTE, "1"));
+  assert.equal(lockNoticeCopy(45), fillApproved(E.LOCKED_AFTER_SECONDS, "45"));
+  assert.equal(lockNoticeCopy(1), fillApproved(E.LOCKED_AFTER_ONE_SECOND, "1"));
+  assert.equal(lockNoticeCopy(0), fillApproved(E.LOCKED_AFTER_ONE_SECOND, "1")); // clamp ≥ 1 s
 });
 
-test("a card fill that wrote nothing says why: no chosen field, one that cannot be seen, or no provider's box to fill (round-5 C1)", () => {
-  assert.equal(cardFillErrorCopy("no_focus"), "Tap the card field in the payment form first, then fill again.");
-  assert.match(cardFillErrorCopy("not_visible"), /can't be seen on the page, so nothing was filled/);
-  // Round-6 M2: a form in a closed shadow root never gets a chosen field; "tap it" would not help.
-  assert.match(cardFillErrorCopy("closed_form"), /can't tell which one you tapped, so nothing was filled/);
-  // Owner decision 2026-11-14: a card goes only into a payment provider's card form.
-  assert.equal(cardFillErrorCopy("page_form"), "andvari fills a card only into a payment provider's card form, and this page takes the card itself.");
-  assert.equal(
-    cardFillErrorCopy("provider_not_allowed", "https://js.stripe.com", true),
-    "The card form comes from js.stripe.com, where Safari doesn't let andvari run yet. To fill it, allow andvari on js.stripe.com or on Every Website in Safari's extension settings.",
-  );
-  assert.match(cardFillErrorCopy("provider_not_allowed", "https://js.stripe.com"), /allow andvari on js\.stripe\.com in the extension's site access/);
-  // No origin known (nothing of the page reported): every website.
-  assert.equal(
-    cardFillErrorCopy("provider_not_allowed", undefined, true),
-    "andvari isn't running on this page, so it can't fill a card here. To let it, allow andvari on Every Website in Safari's extension settings.",
-  );
-  assert.match(cardFillErrorCopy("provider_not_allowed", undefined), /allow andvari on all sites in the extension's site access/);
-  assert.match(cardFillErrorCopy("provider_not_allowed", "not a url", true), /Every Website/);
-  // Two frames would take the same card detail: no fill at all.
-  assert.equal(cardFillErrorCopy("duplicate_fields"), "This page shows more than one payment form asking for the same card detail, so andvari fills none of them.");
-  assert.equal(cardFillErrorCopy("changed"), "The payment form changed after andvari opened. Open andvari again and fill.");
-  assert.match(cardFillErrorCopy("no_frame_origin"), /doesn't tell andvari which site a payment form's frame comes from/);
+test("a card fill that wrote nothing says why: each code reads its own line", () => {
+  const want: Record<string, string> = {
+    no_focus: E.CARD_NO_FOCUS,
+    not_visible: E.CARD_NOT_VISIBLE,
+    closed_form: E.CARD_CLOSED_FORM,
+    page_form: E.CARD_PAGE_FORM,
+    duplicate_fields: E.CARD_DUPLICATE_FIELDS,
+    changed: E.CARD_FORM_CHANGED,
+    mixed_forms: E.CARD_MIXED_FORMS,
+    no_frame_origin: E.CARD_NO_FRAME_ORIGIN,
+    no_form: E.CARD_NO_FORM,
+    no_fields: E.CARD_NO_FIELDS,
+  };
+  for (const [code, line] of Object.entries(want)) assert.equal(cardFillErrorCopy(code as never), line, code);
+  // The provider's host fills both of its slots when one is known; with none, every website.
+  assert.equal(cardFillErrorCopy("provider_not_allowed", "https://js.stripe.com", true), fillApproved(E.CARD_PROVIDER_NOT_ALLOWED_SAFARI, "js.stripe.com"));
+  assert.equal(cardFillErrorCopy("provider_not_allowed", "https://js.stripe.com"), fillApproved(E.CARD_PROVIDER_NOT_ALLOWED, "js.stripe.com"));
+  assert.equal(cardFillErrorCopy("provider_not_allowed", undefined, true), E.CARD_PROVIDER_NOT_ALLOWED_ANY_SAFARI);
+  assert.equal(cardFillErrorCopy("provider_not_allowed", undefined), E.CARD_PROVIDER_NOT_ALLOWED_ANY);
+  assert.equal(cardFillErrorCopy("provider_not_allowed", "not a url", true), E.CARD_PROVIDER_NOT_ALLOWED_ANY_SAFARI);
+  assert.equal(cardFillErrorCopy("fill_off", undefined, true), E.CARD_FILL_FROM_APP);
+  assert.equal(cardFillErrorCopy("fill_off"), E.CARD_FILL_OFF_COPY);
   assert.equal(cardFillErrorCopy("locked"), fillErrorCopy("locked"), "the rest as for a login fill");
   assert.equal(cardFillErrorCopy(undefined), fillErrorCopy(undefined));
 });
 
+test("waiting grants: none is empty; one and more read their own lines with the number", () => {
+  assert.equal(E.waitingGrantsLine(0), "");
+  assert.equal(E.waitingGrantsLine(1), E.GRANTS_WAITING_ONE);
+  assert.equal(E.waitingGrantsLine(4), fillApproved(E.GRANTS_WAITING, "4"));
+});
+
+test("waiting grants: the line for one vault and for more has the approved words (decided on 2026-11-23)", () => {
+  assert.equal(E.GRANTS_WAITING_ONE, "1 shared vault is not open here. Review it in andvari if it asks you to, then lock and unlock this extension. It may still stay closed here.");
+  assert.equal(E.GRANTS_WAITING, "{0} shared vaults are not open here. Review them in andvari if it asks you to, then lock and unlock this extension. Some may still stay closed here.");
+  assert.equal(E.waitingGrantsLine(2), "2 shared vaults are not open here. Review them in andvari if it asks you to, then lock and unlock this extension. Some may still stay closed here.");
+});

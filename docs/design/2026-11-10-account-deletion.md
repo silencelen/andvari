@@ -423,8 +423,9 @@ Logic lives in pure, tested modules (`ui/account-delete.ts`, `session.wipeLocalA
   not cryptographic erasure towards anyone who already held a vault key (R7 extended).
 - **Logs.** The journald/log-pipeline copies of audit lines keep the raw userId under the operator's retention (§9).
 - **Other devices.** Co-members' clients may hold the account's email and display name in memory from earlier members
-  lists; the account's own other devices keep their self-identity record (§10) and, until they next reach the server,
-  their offline copy (spec 05 T3: revocation takes effect at the next connectivity, which here answers 401).
+  lists; the account's own other devices keep their self-identity record (§10) and their offline copy. The 401 they get
+  at the next connectivity ends their session, not the copy (spec 05 T3): the copy stays until the person removes it,
+  except on the iPhone app, which deletes it at that 401.
 - **Native clients**: not on this branch. They need the same flow and the same local wipe; the wire contract is final.
 
 ## 13. Tests

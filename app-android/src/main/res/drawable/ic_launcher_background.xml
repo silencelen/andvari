@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Polished hardwood: a soft light from the upper left. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:pathData="M0,0 L108,0 L108,108 L0,108 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="30.24"
+                android:centerY="23.76"
+                android:gradientRadius="102.6">
+                <item android:offset="0" android:color="#FF33261A" />
+                <item android:offset="0.55" android:color="#FF1F1711" />
+                <item android:offset="1" android:color="#FF120D09" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

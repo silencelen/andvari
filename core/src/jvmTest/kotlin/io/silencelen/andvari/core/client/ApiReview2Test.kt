@@ -288,9 +288,11 @@ class ApiReview2Test {
      * Tripwire: product code derives a master-password credential for an upload ONLY through the fence. The raw KDF
      * ([Keys.masterKey]) is called only inside Account (every caller fenced), the backup KDF (its own window, spec 07 §2.3)
      * and the KDF re-key (fenced by [KdfUpgrade.shouldUpgrade]); the pre-session [Account.deriveAuthKey] appears only
-     * at the two sign-in sites (the shared one in core, which Android uses, and the desktop's), over the prelogin values
-     * (fenced at the API boundary, and no session salt exists yet), and at the iOS UI tests' seed tool's sign-in as
-     * another device of the account on the job's throwaway server (test tooling, not a client; the same prelogin shape).
+     * at the one sign-in site of the old session code (the shared one in core), over the prelogin values (fenced at
+     * the API boundary, and no session salt exists yet), and at the iOS UI tests' seed tool's sign-in as another
+     * device of the account on the job's throwaway server (test tooling, not a client; the same prelogin shape).
+     * The desktop had a sign-in site of its own until its old state holder was removed; the desktop now signs in
+     * through the app interface, which never calls this function.
      */
     @Test
     fun m1_tripwire_productCodeDerivesPasswordCredentialsOnlyThroughTheFence() {
@@ -314,13 +316,14 @@ class ApiReview2Test {
                 if (Regex("""Account\.deriveAuthKey\(""").containsMatchIn(code)) Triple(f.relativeTo(repo).path, i + 1, code.trim()) else null
             }
         }
-        // Step 7: Android's sign-in is core's shared one now (session/SessionEntry.kt); the pin moved with it.
-        val signInSites = listOf("core/client/session/SessionEntry.kt", "DesktopState.kt", "tools/uitest-seed/src/main/kotlin/io/silencelen/andvari/uitestseed/Main.kt")
+        // Step 7: Android's sign-in is core's shared one now (session/SessionEntry.kt); the pin moved with it. The
+        // desktop's own site (DesktopState.kt) went with its old state holder.
+        val signInSites = listOf("core/client/session/SessionEntry.kt", "tools/uitest-seed/src/main/kotlin/io/silencelen/andvari/uitestseed/Main.kt")
         val offenders = loginDerivations.filterNot { (path, _, code) ->
             signInSites.any { path.endsWith(it) } && "pre.kdfSalt" in code && "pre.kdfParams" in code
         }
         assertEquals(emptyList(), offenders.map { "${it.first}:${it.second}: ${it.third}" }, "derive an in-session password proof through Account.reauthAuthKey(password, keys)")
-        assertEquals(3, loginDerivations.size, "exactly the two sign-in sites and the UI tests' seed tool derive the pre-session login authKey")
+        assertEquals(2, loginDerivations.size, "exactly the shared sign-in site and the UI tests' seed tool derive the pre-session login authKey")
     }
 
     // ---- M-2: the designation in account state; a fresh device never adopts a served wrap silently ----

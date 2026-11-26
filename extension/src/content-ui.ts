@@ -15,7 +15,10 @@
  * drawn as SVG geometry (sigilSpan), never a runic codepoint that tofus on font-poor hosts.
  */
 import type { MatchItem, PendingCardSave, PendingSave } from "./messages";
-import { saveOfferCopy } from "./saveoffer";
+import { saveOfferCopy, slotParts } from "./saveoffer";
+import * as T from "./copy";
+import { runeSvg } from "./brand";
+import { fillApproved } from "./errors";
 import { createVisibilityGuard, type ActivationVerdict, type IoCtorLike, type VisibilityGuard } from "./visibilityguard";
 
 const UI_CSS = `
@@ -59,7 +62,7 @@ const UI_CSS = `
     --anv-gold-text: #7d5e14;
     --anv-btn-ink: #fdf9f0;
     --anv-danger: #b3402c;
-    --anv-ok: #4f7a3a;
+    --anv-ok: #4c7538;
     --anv-shadow: 0 18px 50px -24px rgba(70, 55, 20, .35);
   }
 }
@@ -100,7 +103,6 @@ const UI_CSS = `
    old text-shadow glow restated as a drop-shadow (shadows can't reach SVG strokes). */
 .hdr .sigil { color: var(--anv-gold); align-self: center; display: inline-flex; }
 .hdr .sigil svg { filter: drop-shadow(0 1px 12px rgba(208, 169, 74, .4)); }
-.hdr .a-mark { color: var(--anv-gold); }
 
 /* Security review 2026-10 (root cause B, the [S3] discipline the chip already had): ONE fixed
    height in every state. A content-sized list made the box's painted height — which a page reads by
@@ -318,8 +320,8 @@ function activationAllowed(surface: HTMLElement | null): boolean {
     lastRefusalToast = Date.now();
     showToast(
       v === "unsupported"
-        ? "This browser can't confirm andvari's menu is unobstructed — use the andvari toolbar icon instead"
-        : "Something on this page is covering andvari — use the andvari toolbar icon instead",
+        ? T.MENU_UNCONFIRMED
+        : T.MENU_COVERED,
     );
   }
   return false;
@@ -409,13 +411,11 @@ export function showCardChip(
   // position it could butt the REAL chip flush against a page-drawn master-password box.
   // [K-label]: neither string matches detect.ts's SUBMIT_TEXT_RX — a label like "Continue with
   // saved card" would turn our own chip into a G2 submit gesture.
-  const text = state.locked ? "andvari is locked — click the andvari toolbar icon" : "Fill card with andvari";
+  const text = state.locked ? T.CARD_CHIP_LOCKED : T.CARD_CHIP;
   // The spoken form of the same two sentences, each with the a11y-webext--12 activation chord
-  // appended. Spelled out as WHOLE literals rather than composed: [C1] forbids any interpolation
+  // appended. Lines of their own rather than composed: [C1] forbids any interpolation
   // form in this surface, and the visible [S6] copy above must stay byte-exact either way.
-  const spoken = state.locked
-    ? "andvari is locked — click the andvari toolbar icon. Press Alt plus Down Arrow to open andvari."
-    : "Fill card with andvari. Press Alt plus Down Arrow to open andvari.";
+  const spoken = state.locked ? T.CARD_CHIP_LOCKED_LABEL : T.CARD_CHIP_LABEL;
   chip.append(sigilSpan(12), span("label", text));
   // [S5] the listener binds to the CHIP inside the closed root, never to hostEl — hostEl is a
   // page-reachable node, so a host-bound listener would fire on hostEl.click(). isTrusted first,
@@ -642,36 +642,24 @@ function span(className: string, text: string): HTMLSpanElement {
   return s;
 }
 
-/** The ᛅ brand mark as a span-wrapped inline SVG (web Sigil.tsx geometry, verbatim): the raw
+/** The ᛅ brand mark as a span-wrapped inline SVG (brand.ts, assets/brand/andvari-rune.svg): the raw
  *  runic codepoint renders as tofu wherever no installed font covers the Runic block — fatal
- *  for a header whose whole job is anti-spoof attribution on arbitrary sites. The stroke
- *  inherits currentColor from the .sigil gold. */
+ *  for a header whose whole job is anti-spoof attribution on arbitrary sites. It fills in
+ *  currentColor, the .sigil gold. */
 function sigilSpan(size: number): HTMLSpanElement {
-  const NS = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(NS, "svg");
-  svg.setAttribute("width", String(size));
-  svg.setAttribute("height", String(size));
-  svg.setAttribute("viewBox", "0 0 24 24");
-  svg.setAttribute("fill", "none");
-  svg.setAttribute("stroke", "currentColor");
-  svg.setAttribute("stroke-width", "1.8");
-  svg.setAttribute("stroke-linecap", "round");
-  svg.setAttribute("aria-hidden", "true");
-  for (const d of ["M12 3v18", "M5.5 8.5l13 6"]) { // a stave crossed by one falling stroke (long-branch ár)
-    const p = document.createElementNS(NS, "path");
-    p.setAttribute("d", d);
-    svg.append(p);
-  }
   const s = span("sigil", "");
-  s.append(svg);
+  s.append(runeSvg(size));
   return s;
 }
 
+/** The panel's head: the rune, then the name in one color, the panel's text color. The name stays text here: the
+ *  drawn outline (brand.ts) is 7 KB, and the content script stays under its packaging cap only without it
+ *  (cardfillflag.test.ts). */
 function brandHeader(): HTMLElement {
   const hdr = document.createElement("div");
   hdr.className = "hdr";
   const brand = document.createElement("span");
-  brand.append(span("a-mark", "and"), document.createTextNode("vari"));
+  brand.textContent = "andvari";
   hdr.append(sigilSpan(14), brand);
   return hdr;
 }
@@ -761,17 +749,17 @@ function renderMain(body: HTMLElement, state: DropdownState, h: DropdownHandlers
   body.removeAttribute("role");
   body.removeAttribute("aria-label");
   if (state.kind === "locked") {
-    body.appendChild(stateCard("Locked — click the andvari toolbar icon to unlock"));
+    body.appendChild(stateCard(T.MENU_LOCKED));
     return;
   }
   // From here on the container always carries at least the "Search all logins…" option.
   body.setAttribute("role", "listbox");
-  body.setAttribute("aria-label", `andvari — saved logins for ${state.host}`);
-  if (state.kind === "empty") body.appendChild(stateCard(`No saved login for ${state.host}`));
+  body.setAttribute("aria-label", fillApproved(T.MENU_LABEL, state.host));
+  if (state.kind === "empty") body.appendChild(stateCard(fillApproved(T.MENU_NO_LOGIN, state.host)));
   else for (const m of state.matches) body.appendChild(matchRow(m, () => h.onPick(m)));
-  if (state.isSignup) body.appendChild(actionRow("Use a strong password", () => h.onStrongPassword()));
+  if (state.isSignup) body.appendChild(actionRow(T.MENU_STRONG_PASSWORD, () => h.onStrongPassword()));
   // Root cause B: the search itself lives in the popup now — this row only opens it.
-  body.appendChild(actionRow("Search all logins…", () => h.onSearchAll()));
+  body.appendChild(actionRow(T.MENU_SEARCH_ALL, () => h.onSearchAll()));
 }
 
 /** Cut N review: content.ts's Enter-capture hook (a document-capture keydown registered at load,
@@ -804,10 +792,10 @@ export function openDropdown(anchor: HTMLElement, state: DropdownState, handlers
   const n = state.matches.length;
   announceLive(
     state.kind === "locked"
-      ? "andvari is locked — click the andvari toolbar icon to unlock"
+      ? T.MENU_LOCKED_ANNOUNCE
       : state.kind === "empty"
-        ? `No saved login for ${state.host}, arrows to browse`
-        : `${n} login${n === 1 ? "" : "s"} available, arrows to browse`,
+        ? fillApproved(T.MENU_NO_LOGIN_ANNOUNCE, state.host)
+        : fillApproved(n === 1 ? T.MENU_LOGINS_ANNOUNCE_ONE : T.MENU_LOGINS_ANNOUNCE, String(n)),
   );
 }
 
@@ -942,7 +930,7 @@ export function showSaveBanner(
       for (const p of copy.parts) msg.append(p.hl ? span("hl", p.text) : p.text);
     },
     primaryLabel: copy.primary,
-    ghostLabel: "Not now",
+    ghostLabel: T.NOT_NOW,
     idleMs: 30_000,
     okMs: 4000,
     errMs: 8000,
@@ -961,13 +949,13 @@ export function showCardSaveBanner(
 ): void {
   offerBanner({
     buildMsg: (msg) => {
-      if (pending.updatesItemId) {
-        msg.append("Update the card ", span("hl", pending.updatesItemName ?? pending.cardSubtitle));
-        msg.append(" (", span("hl", pending.cardSubtitle), ")?");
-      } else msg.append("Save this card ", span("hl", pending.cardSubtitle), " to andvari?");
+      const parts = pending.updatesItemId
+        ? slotParts(T.UPDATE_CARD_OFFER, pending.updatesItemName ?? pending.cardSubtitle, pending.cardSubtitle)
+        : slotParts(T.SAVE_CARD_OFFER, pending.cardSubtitle);
+      for (const p of parts) msg.append(p.hl ? span("hl", p.text) : p.text);
     },
-    primaryLabel: pending.updatesItemId ? "Update" : "Save",
-    ghostLabel: "Not now",
+    primaryLabel: pending.updatesItemId ? T.UPDATE : T.SAVE,
+    ghostLabel: T.NOT_NOW,
     idleMs: 30_000,
     okMs: 4000,
     errMs: 8000,

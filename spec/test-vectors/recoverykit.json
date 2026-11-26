@@ -1,0 +1,884 @@
+{
+  "_about": [
+    "The recovery kit of design 2026-11-15-onboarding-trust \u00a710.",
+    "Hand-authored from the independent oracle in tools/vector-gen/oracle (no andvari code). Regenerate with `npm run generate` there; `npm run check` fails on any difference.",
+    "grouping: the 32-byte secret as unpadded base64url, 43 characters, in 11 groups (ten of 4, one of 3); `display` joins them with single spaces.",
+    "typedSecret: a secret typed by hand. Spaces, CR and LF are ignored and nothing else is: not a tab, and not a dash, because base64url uses \"-\" (FI-B10). What is left must be the canonical base64url of 32 bytes. expect.valid, with the secret when it parses.",
+    "confirm: the type-back. `groups` are three group numbers (1..11) and `typed` what the person entered for them, in that order; expect.matches is an exact, case-sensitive comparison once space, CR and LF anywhere in each typed group are ignored (a tab is not ignored). groupChoice: a valid challenge is three DISTINCT numbers in 1..11.",
+    "qr.compose: andvari-kit:2:<O>:<C>:<E>:<S>, O = unpadded base64url of the origin, C = card0Hash as 64 lowercase hex, E = unpadded base64url of emailNorm, S = unpadded base64url of the secret. It is deliberately not a URL.",
+    "qr.parse: total and canonical, as for links (\u00a76.1): white space (space, tab, CR and LF, and nothing else: a form feed or a vertical tab stays and makes the text malformed) is removed first; exactly six colon-separated fields; the literal prefix andvari-kit and version 2; O canonical base64url of an origin of \u00a72.2; C 64 lowercase hex; E canonical base64url of an address that is its own emailNorm; S canonical base64url of 32 bytes; at most 1024 characters. expect.verdict is ok, with the four values, or bad_kit, the verdict \u00a72.4 names for a kit text that does not parse; expect.valid says the same as a boolean.",
+    "The cap of 1024 characters cannot be exercised on its own: the longest text the grammars allow is shorter, so anything longer already has a field that fails.",
+    "The extension handles no kits and grades none of these rows (\u00a717).",
+    "Changed on 2026-11-15, fourth batch, with the dot-atom and domain rule of emailNorm (spec 01 \u00a75.5): one qr.parse row is new, at the end: E decodes to alice<alice@example.com>, refused (bad_kit). Every address the file already carried is its own emailNorm, and no other row changed."
+  ],
+  "grouping": [
+    {
+      "why": "the kit secret used throughout this file; its text holds \"-\" and \"_\"",
+      "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+      "groups": [
+        "I-_2",
+        "pp2-",
+        "lUPE",
+        "OJjl",
+        "UuzZ",
+        "szXR",
+        "iN4Z",
+        "pfuk",
+        "rX73",
+        "EehE",
+        "-lM"
+      ],
+      "display": "I-_2 pp2- lUPE OJjl UuzZ szXR iN4Z pfuk rX73 EehE -lM"
+    },
+    {
+      "why": "another secret",
+      "secretB64": "PdSAjpFeJzfu0ZNJvBTp0idiwmM0Vsc5w_k9uuoYiqw",
+      "groups": [
+        "PdSA",
+        "jpFe",
+        "Jzfu",
+        "0ZNJ",
+        "vBTp",
+        "0idi",
+        "wmM0",
+        "Vsc5",
+        "w_k9",
+        "uuoY",
+        "iqw"
+      ],
+      "display": "PdSA jpFe Jzfu 0ZNJ vBTp 0idi wmM0 Vsc5 w_k9 uuoY iqw"
+    },
+    {
+      "why": "32 zero bytes",
+      "secretB64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "groups": [
+        "AAAA",
+        "AAAA",
+        "AAAA",
+        "AAAA",
+        "AAAA",
+        "AAAA",
+        "AAAA",
+        "AAAA",
+        "AAAA",
+        "AAAA",
+        "AAA"
+      ],
+      "display": "AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAA"
+    },
+    {
+      "why": "32 bytes of 0xff",
+      "secretB64": "__________________________________________8",
+      "groups": [
+        "____",
+        "____",
+        "____",
+        "____",
+        "____",
+        "____",
+        "____",
+        "____",
+        "____",
+        "____",
+        "__8"
+      ],
+      "display": "____ ____ ____ ____ ____ ____ ____ ____ ____ ____ __8"
+    }
+  ],
+  "typedSecret": [
+    {
+      "why": "as displayed: eleven groups separated by single spaces",
+      "input": "I-_2 pp2- lUPE OJjl UuzZ szXR iN4Z pfuk rX73 EehE -lM",
+      "expect": {
+        "valid": true,
+        "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM"
+      }
+    },
+    {
+      "why": "no separators at all",
+      "input": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+      "expect": {
+        "valid": true,
+        "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM"
+      }
+    },
+    {
+      "why": "one group per line (LF)",
+      "input": "I-_2\npp2-\nlUPE\nOJjl\nUuzZ\nszXR\niN4Z\npfuk\nrX73\nEehE\n-lM",
+      "expect": {
+        "valid": true,
+        "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM"
+      }
+    },
+    {
+      "why": "one group per line (CR LF)",
+      "input": "I-_2\r\npp2-\r\nlUPE\r\nOJjl\r\nUuzZ\r\nszXR\r\niN4Z\r\npfuk\r\nrX73\r\nEehE\r\n-lM",
+      "expect": {
+        "valid": true,
+        "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM"
+      }
+    },
+    {
+      "why": "several spaces between groups, and at both ends",
+      "input": "  I-_2   pp2-   lUPE   OJjl   UuzZ   szXR   iN4Z   pfuk   rX73   EehE   -lM  ",
+      "expect": {
+        "valid": true,
+        "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM"
+      }
+    },
+    {
+      "why": "a space inside a group",
+      "input": "I- _2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+      "expect": {
+        "valid": true,
+        "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM"
+      }
+    },
+    {
+      "why": "groups separated by tabs: a tab is not ignored",
+      "input": "I-_2\tpp2-\tlUPE\tOJjl\tUuzZ\tszXR\tiN4Z\tpfuk\trX73\tEehE\t-lM",
+      "expect": {
+        "valid": false
+      }
+    },
+    {
+      "why": "groups separated by dashes: a dash is base64url and is not ignored",
+      "input": "I-_2-pp2--lUPE-OJjl-UuzZ-szXR-iN4Z-pfuk-rX73-EehE--lM",
+      "expect": {
+        "valid": false
+      }
+    },
+    {
+      "why": "groups separated by NO-BREAK SPACE",
+      "input": "I-_2\u00a0pp2-\u00a0lUPE\u00a0OJjl\u00a0UuzZ\u00a0szXR\u00a0iN4Z\u00a0pfuk\u00a0rX73\u00a0EehE\u00a0-lM",
+      "expect": {
+        "valid": false
+      }
+    },
+    {
+      "why": "a form feed between two groups",
+      "input": "I-_2 pp2- lUPE OJjl UuzZ\fszXR iN4Z pfuk rX73 EehE -lM",
+      "expect": {
+        "valid": false
+      }
+    },
+    {
+      "why": "the last character missing (42 characters)",
+      "input": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-l",
+      "expect": {
+        "valid": false
+      }
+    },
+    {
+      "why": "one character too many (44 characters)",
+      "input": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lMA",
+      "expect": {
+        "valid": false
+      }
+    },
+    {
+      "why": "padded",
+      "input": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM=",
+      "expect": {
+        "valid": false
+      }
+    },
+    {
+      "why": "the standard alphabet: \"+\" for \"-\" and \"/\" for \"_\"",
+      "input": "I+/2 pp2+ lUPE OJjl UuzZ szXR iN4Z pfuk rX73 EehE +lM",
+      "expect": {
+        "valid": false
+      }
+    },
+    {
+      "why": "43 characters whose last one carries stray bits",
+      "input": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lN",
+      "expect": {
+        "valid": false
+      }
+    },
+    {
+      "why": "empty",
+      "input": "",
+      "expect": {
+        "valid": false
+      }
+    },
+    {
+      "why": "only spaces and line breaks",
+      "input": " \n \r\n ",
+      "expect": {
+        "valid": false
+      }
+    },
+    {
+      "why": "the whole kit QR text is not a typed secret",
+      "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+      "expect": {
+        "valid": false
+      }
+    }
+  ],
+  "confirm": [
+    {
+      "why": "\"Type groups 2, 7 and 10\": the three groups, exactly",
+      "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+      "groups": [
+        2,
+        7,
+        10
+      ],
+      "typed": [
+        "pp2-",
+        "iN4Z",
+        "EehE"
+      ],
+      "expect": {
+        "matches": true
+      }
+    },
+    {
+      "why": "the first, the second and the last group; group 11 has three characters",
+      "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+      "groups": [
+        1,
+        2,
+        11
+      ],
+      "typed": [
+        "I-_2",
+        "pp2-",
+        "-lM"
+      ],
+      "expect": {
+        "matches": true
+      }
+    },
+    {
+      "why": "the groups are asked in the order drawn, not sorted",
+      "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+      "groups": [
+        10,
+        2,
+        7
+      ],
+      "typed": [
+        "EehE",
+        "pp2-",
+        "iN4Z"
+      ],
+      "expect": {
+        "matches": true
+      }
+    },
+    {
+      "why": "one group wrong",
+      "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+      "groups": [
+        2,
+        7,
+        10
+      ],
+      "typed": [
+        "pp2-",
+        "iN4Z",
+        "rX73"
+      ],
+      "expect": {
+        "matches": false
+      }
+    },
+    {
+      "why": "the right groups in the wrong boxes",
+      "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+      "groups": [
+        2,
+        7,
+        10
+      ],
+      "typed": [
+        "iN4Z",
+        "pp2-",
+        "EehE"
+      ],
+      "expect": {
+        "matches": false
+      }
+    },
+    {
+      "why": "case-sensitive: one letter in the other case",
+      "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+      "groups": [
+        1,
+        7,
+        11
+      ],
+      "typed": [
+        "i-_2",
+        "iN4Z",
+        "-lM"
+      ],
+      "expect": {
+        "matches": false
+      }
+    },
+    {
+      "why": "group 11 typed with a fourth character",
+      "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+      "groups": [
+        1,
+        2,
+        11
+      ],
+      "typed": [
+        "I-_2",
+        "pp2-",
+        "-lMA"
+      ],
+      "expect": {
+        "matches": false
+      }
+    },
+    {
+      "why": "only two groups typed",
+      "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+      "groups": [
+        2,
+        7,
+        10
+      ],
+      "typed": [
+        "pp2-",
+        "iN4Z"
+      ],
+      "expect": {
+        "matches": false
+      }
+    },
+    {
+      "why": "a space inside a typed group: space, CR and LF anywhere in a typed group are ignored",
+      "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+      "groups": [
+        2,
+        7,
+        10
+      ],
+      "typed": [
+        "pp 2-",
+        "iN4Z",
+        "EehE"
+      ],
+      "expect": {
+        "matches": true
+      }
+    },
+    {
+      "why": "a space before and after a typed group",
+      "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+      "groups": [
+        2,
+        7,
+        10
+      ],
+      "typed": [
+        " pp2- ",
+        "iN4Z",
+        "EehE"
+      ],
+      "expect": {
+        "matches": true
+      }
+    },
+    {
+      "why": "a typed group that ends with CR LF",
+      "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+      "groups": [
+        2,
+        7,
+        10
+      ],
+      "typed": [
+        "pp2-",
+        "iN4Z\r\n",
+        "EehE"
+      ],
+      "expect": {
+        "matches": true
+      }
+    },
+    {
+      "why": "a tab inside a typed group: a tab is not ignored",
+      "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+      "groups": [
+        2,
+        7,
+        10
+      ],
+      "typed": [
+        "pp\t2-",
+        "iN4Z",
+        "EehE"
+      ],
+      "expect": {
+        "matches": false
+      }
+    },
+    {
+      "why": "a space inside a typed group that is wrong anyway",
+      "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+      "groups": [
+        2,
+        7,
+        10
+      ],
+      "typed": [
+        "lU PE",
+        "iN4Z",
+        "EehE"
+      ],
+      "expect": {
+        "matches": false
+      }
+    }
+  ],
+  "groupChoice": [
+    {
+      "why": "three distinct numbers in 1..11",
+      "groups": [
+        2,
+        7,
+        10
+      ],
+      "valid": true
+    },
+    {
+      "why": "the lowest and the highest",
+      "groups": [
+        1,
+        6,
+        11
+      ],
+      "valid": true
+    },
+    {
+      "why": "a number drawn twice",
+      "groups": [
+        2,
+        2,
+        7
+      ],
+      "valid": false
+    },
+    {
+      "why": "group 0 does not exist",
+      "groups": [
+        0,
+        5,
+        6
+      ],
+      "valid": false
+    },
+    {
+      "why": "group 12 does not exist",
+      "groups": [
+        1,
+        11,
+        12
+      ],
+      "valid": false
+    },
+    {
+      "why": "only two numbers",
+      "groups": [
+        3,
+        4
+      ],
+      "valid": false
+    },
+    {
+      "why": "four numbers",
+      "groups": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "valid": false
+    }
+  ],
+  "qr": {
+    "maxLength": 1024,
+    "compose": [
+      {
+        "why": "a kit for a self-hosted instance",
+        "origin": "https://vault.example.org",
+        "card0Hash": "5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "email": "alice@example.com",
+        "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "text": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM"
+      },
+      {
+        "why": "a kit for the public instance",
+        "origin": "https://vault.andvaripass.com",
+        "card0Hash": "5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "email": "alice@example.com",
+        "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "text": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5hbmR2YXJpcGFzcy5jb20:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM"
+      },
+      {
+        "why": "the longest kit the grammars allow: a 253-character host with port 65535 and a 254-octet address give 819 characters, under the cap of 1024",
+        "origin": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd:65535",
+        "card0Hash": "5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "email": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccc",
+        "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "text": "andvari-kit:2:aHR0cHM6Ly9hYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEuYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiLmNjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjYy5kZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkOjY1NTM1:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYUBiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiLmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIuYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYi5jY2M:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM"
+      }
+    ],
+    "parse": [
+      {
+        "why": "the kit text as composed",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": true,
+          "verdict": "ok",
+          "origin": "https://vault.example.org",
+          "card0Hash": "5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "email": "alice@example.com",
+          "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM"
+        }
+      },
+      {
+        "why": "the longest kit",
+        "input": "andvari-kit:2:aHR0cHM6Ly9hYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEuYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiLmNjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjYy5kZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkOjY1NTM1:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYUBiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiLmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIuYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYi5jY2M:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": true,
+          "verdict": "ok",
+          "origin": "https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd:65535",
+          "card0Hash": "5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "email": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccc",
+          "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM"
+        }
+      },
+      {
+        "why": "spaces at both ends and a line feed inside: white space is removed first, as for links",
+        "input": " andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5\nca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM ",
+        "expect": {
+          "valid": true,
+          "verdict": "ok",
+          "origin": "https://vault.example.org",
+          "card0Hash": "5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "email": "alice@example.com",
+          "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM"
+        }
+      },
+      {
+        "why": "CR LF and a tab inside",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVs\r\ndC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a\t1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": true,
+          "verdict": "ok",
+          "origin": "https://vault.example.org",
+          "card0Hash": "5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "email": "alice@example.com",
+          "secretB64": "I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM"
+        }
+      },
+      {
+        "why": "empty",
+        "input": "",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "the prefix in uppercase",
+        "input": "ANDVARI-KIT:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "another scheme word",
+        "input": "andvari-key:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "version 1",
+        "input": "andvari-kit:1:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "version 3",
+        "input": "andvari-kit:3:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "no version",
+        "input": "andvari-kit:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "five fields: no secret",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "seven fields",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM:x",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "written as a URL",
+        "input": "andvari-kit://2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "O is padded",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw=:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "O carries stray bits",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZB:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "O is the origin itself, not its base64url",
+        "input": "andvari-kit:2:https://vault.example.org:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "O decodes to an origin with a path",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZy8:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "O decodes to a plain-http LAN address",
+        "input": "andvari-kit:2:aHR0cDovLzE5Mi4xNjguMS4xMA:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "card0Hash in uppercase hex",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5CA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "card0Hash of 63 hex characters",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "card0Hash of 65 hex characters",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a10:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "card0Hash as base64url",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:XFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFxcXFw:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "card0Hash is \"none\"",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:none:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "E is padded",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20=:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "E is the address itself, not its base64url",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:alice@example.com:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "E decodes to an address with an uppercase letter: not an emailNorm",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:QWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "E decodes to an address with a space after it",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20g:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "E decodes to an address with no @",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2UuZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "E decodes to a non-ASCII address",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:w6RsaWNlQGV4YW1wbGUuY29t:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "E is empty",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1::I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "S is padded",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM=",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "S is 31 bytes",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-g",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "S is 33 bytes",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcH",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "S carries stray bits",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lB",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "S in the standard alphabet",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I+/2pp2+lUPEOJjlUuzZszXRiN4ZpfukrX73EehE+lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "S as the grouped display, with dashes between the groups",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2-pp2--lUPE-OJjl-UuzZ-szXR-iN4Z-pfuk-rX73-EehE--lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "an invite link is not a kit",
+        "input": "https://andvaripass.com/l#v2.aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw.I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM.-",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "a form feed inside: it is not white space, so it is not removed and the text is malformed",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5\fca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "a vertical tab at the end",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM\u000b",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "a NO-BREAK SPACE inside",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5\u00a0ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2VAZXhhbXBsZS5jb20:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      },
+      {
+        "why": "E decodes to a display-name form, alice<alice@example.com>: lower case, one @, printable ASCII, but not a dot-atom local part, so not an emailNorm",
+        "input": "andvari-kit:2:aHR0cHM6Ly92YXVsdC5leGFtcGxlLm9yZw:5ca1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1:YWxpY2U8YWxpY2VAZXhhbXBsZS5jb20-:I-_2pp2-lUPEOJjlUuzZszXRiN4ZpfukrX73EehE-lM",
+        "expect": {
+          "valid": false,
+          "verdict": "bad_kit"
+        }
+      }
+    ]
+  }
+}

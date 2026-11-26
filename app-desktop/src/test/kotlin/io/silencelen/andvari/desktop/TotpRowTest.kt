@@ -1,6 +1,7 @@
 package io.silencelen.andvari.desktop
 
 import io.silencelen.andvari.core.crypto.Totp
+import io.silencelen.andvari.desktop.trust.TOTP_URI_UNREADABLE
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull

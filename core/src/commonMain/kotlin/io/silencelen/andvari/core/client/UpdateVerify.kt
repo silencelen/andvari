@@ -16,25 +16,29 @@ import io.silencelen.andvari.core.crypto.CryptoProvider
  */
 object UpdateVerify {
     /**
-     * The placeholder sentinel. Pinning ONLY this value hard-disables the update path (§M-D3
-     * fail-closed) — which is the SHIPPED state again since the 2026-07-15 multi-tenant pivot
-     * deliberately un-armed the channel (design §9; see [PINNED]).
+     * The placeholder sentinel. A build that pins ONLY this value has the update path hard-disabled
+     * (§M-D3 fail-closed: [updatesEnabled] is false and [verify] accepts nothing). The shipped
+     * [PINNED] holds the ceremony key, not this value: the channel is armed.
      */
     const val TEST_PUBKEY = "TEST_KEY_placeholder__pin_the_real_workstation_pubkey_here"
 
     /**
      * ARMED 2026-07-18 with the ceremony key (minted 2026-07-14 on the owner workstation, public
      * record `docs/runbooks/release-signing-keys.md`; the PRIVATE key never leaves that machine —
-     * Option B). The 2026-07-15 multi-tenant pivot had UN-armed this (design §9): a single
-     * owner-pinned key makes every self-host `/downloads` unverifiable-by-construction. That
-     * objection is answered by SCOPE, not by staying dark: the CALLERS (desktop
-     * `Platform.checkForUpdate`, extension `background.checkForUpdate`) gate the whole channel on
-     * the configured server being the shipped REFERENCE origin — a self-host/custom origin never
-     * fetches the manifest at all, landing in the same fail-closed-quiet "disabled" state the
-     * un-armed build had. Per-instance signed updates (key discovery/pinning/rotation) remain
-     * separate later work. Still a SET (§M-D7) so a rotation can overlap without bricking fielded
-     * clients. Byte-locked to the extension's `updateverify.ts PINNED_UPDATE_KEYS` by
-     * `updateverify.test.ts` — change together.
+     * Option B). This one key set signs every list, whoever relays it: a relaying server can hold a
+     * list back, it cannot forge one.
+     *
+     * Who may relay (design §N): the desktop (`checkForUpdates` in `Platform.kt`) asks the server
+     * this computer holds an account on, and the project's GitHub releases when that server gives no
+     * verified list; before there is an account it asks nothing. A fetch from the attached server
+     * follows no redirect to another host. The banner never shows an address made from the relaying
+     * server's origin: only the download address the verified list itself carries for this platform,
+     * when that is https on the publisher's hosts, else the project's GitHub releases page. The
+     * extension (`background.checkForUpdate`) asks only the shipped reference origin.
+     *
+     * Still a SET (§M-D7) so a rotation can overlap without bricking fielded clients. Byte-locked to
+     * the extension's `updateverify.ts PINNED_UPDATE_KEYS` by `updateverify.test.ts` — change
+     * together.
      */
     val PINNED: List<String> = listOf("e_2TpyoQG4ygtbdVO9RUWbUW4MTHGPO8eXL7Jqc_tHI")
 

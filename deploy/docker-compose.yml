@@ -1,14 +1,28 @@
 # andvari self-host — docker compose (design 2026-07-15 §8.2).
 #
-# The one required file. Bring-up: ./bringup.sh (writes andvari.env + .env,
-# runs the escrow ceremony, starts this stack, smoke-tests /client-policy).
-# Updates: docker compose pull && docker compose up -d
+# The one required file. Bring-up: run `andvari setup` from the image first (it writes andvari.env,
+# creates the database in ./data and prints the setup link; the line is in andvari.env.template and
+# docs/self-hosting.md "Install"), then start this stack.
+#
+# Settings read from `.env` beside this file (each has a default except the version):
+#   ANDVARI_VERSION      the image version to run, for example 1.0.0. Required: there is no tag that
+#                        moves by itself, so an update is always a version you chose (see "Updates").
+#   ANDVARI_BIND         the host address the app port is published on (default 127.0.0.1).
+#   ANDVARI_HOST_PORT    the host port (default 8080). Set it, and COMPOSE_PROJECT_NAME (which Compose
+#                        itself reads from `.env` and which takes the place of `name:` below), when a
+#                        second andvari stack runs on the same host, each in its own folder.
+# Updates: first take a snapshot while the server runs, copy it aside and stop the server
+# (docs/self-hosting.md "Updates", step 1); the snapshot is
+#   docker compose exec -T -u andvari andvari /usr/local/bin/docker-entrypoint.sh admin backup --env-file /etc/andvari.env
+# then set the new ANDVARI_VERSION in .env and run
+# docker compose pull && docker compose up -d
 #
 # The app port is published on 127.0.0.1 ONLY by default — a TLS front must sit
 # in front of it (the caddy overlay `docker-compose.caddy.yml`, or your own
-# proxy / cloudflared / tailscale serve pointed at 127.0.0.1:8080). For a plain
-# LAN/dev deployment set ANDVARI_BIND=0.0.0.0 in `.env` (bringup.sh does this
-# automatically when you choose an http:// origin).
+# proxy / cloudflared / tailscale serve pointed at 127.0.0.1:8080). To let a TLS
+# front on another machine reach the app, set ANDVARI_BIND in `.env` to this
+# host's address on that network (plain http works only on the host itself: the
+# server accepts a plain-http origin only for localhost and 127.0.0.1).
 #
 # NOTE on client IPs (rate-limit keys + audit rows): the server trusts
 # forwarded-IP headers only from a direct TCP peer inside
@@ -25,14 +39,19 @@ name: andvari
 
 services:
   andvari:
-    image: ghcr.io/silencelen/andvari:${ANDVARI_VERSION:-latest}
+    image: ghcr.io/silencelen/andvari-server:${ANDVARI_VERSION:?set ANDVARI_VERSION in .env beside this file, for example 1.0.0}
     restart: unless-stopped
     env_file: andvari.env
     ports:
-      - "${ANDVARI_BIND:-127.0.0.1}:8080:8080"
+      - "${ANDVARI_BIND:-127.0.0.1}:${ANDVARI_HOST_PORT:-8080}:8080"
     volumes:
-      # All state: SQLite DB + blob dir (+ optional downloads dir). Back this up.
+      # The SQLite DB + blob dir + backup/ snapshots (+ optional downloads dir). Back it up together
+      # with andvari.env and .env beside this file, which hold the server's settings and secrets and
+      # its version, and with this file if you changed it (docs/self-hosting.md "Backup").
       - ./data:/data
+      # The same settings file, read-only, for the snapshot command that runs inside this container
+      # (`andvari admin backup --env-file /etc/andvari.env`); the server itself reads env_file above.
+      - ./andvari.env:/etc/andvari.env:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
       interval: 30s

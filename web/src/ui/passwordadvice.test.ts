@@ -58,16 +58,16 @@ describe("F31 — every surface where a master password or backup passphrase is 
   const src = (p: string) => readFileSync(fileURLToPath(new URL(p, import.meta.url)), "utf8");
   const welcome = src("./Welcome.tsx");
   const settings = src("./Settings.tsx");
-  const recover = src("./Recover.tsx");
   const exportPanel = src("./ExportPanel.tsx");
   const vault = src("./Vault.tsx");
+  const count = (s: string, needle: string) => s.split(needle).length - 1;
 
-  it("enrollment, change-password and the recovery reset all render the shared hint", () => {
-    expect(welcome).toContain("<MasterPasswordHint password={password} />");
+  it("sign-up, change-password and the kit recovery's new password all render the shared hint", () => {
+    // Welcome holds both sign-up and the kit recovery (the old Recover.tsx is gone with the old recovery screen).
+    expect(count(welcome, "<MasterPasswordHint password={password} />")).toBe(2);
     expect(settings).toContain("<MasterPasswordHint password={next} />");
-    expect(recover).toContain("<MasterPasswordHint password={password} />");
-    // …and all three take it from the one component, so a fix lands on all three at once.
-    for (const [name, s] of [["Welcome", welcome], ["Settings", settings], ["Recover", recover]] as const) {
+    // …and all take it from the one component, so a fix lands on all at once.
+    for (const [name, s] of [["Welcome", welcome], ["Settings", settings]] as const) {
       expect(s, `${name} must import the shared hint`).toContain('from "./passwordadvice"');
     }
   });
@@ -96,9 +96,8 @@ describe("F31 — every surface where a master password or backup passphrase is 
 
   it("nothing on these surfaces blocks on a caution — the floors are unchanged", () => {
     // The gates stay exactly what they were; F31 may only add sentences.
-    expect(welcome).toContain("const pwStrongEnough = meetsMasterPasswordFloor(password);");
+    expect(count(welcome, "const strong = meetsMasterPasswordFloor(password);")).toBe(2);
     expect(settings).toContain("const canSubmit = current && meetsMasterPasswordFloor(next) && next === confirm;");
-    expect(recover).toContain("const pwStrongEnough = meetsMasterPasswordFloor(password);");
     expect(exportPanel).toContain("const passOk = pw.length > 0 && strength >= BACKUP_FLOOR && pw === confirm;");
   });
 });

@@ -20,3 +20,24 @@ package io.silencelen.andvari.core.crypto
 internal fun requireJsonSafe(value: String, what: String) {
     require('"' !in value && '\\' !in value) { "$what must not contain a quote or backslash" }
 }
+
+/**
+ * Spec 01 §5.1 "no nesting" (design 2026-11-15 §2.2): a signed statement is ONE flat JSON object, so a
+ * `[` anywhere, or a second `{`, makes it `non_canonical`. Every statement parser of core asks this
+ * BEFORE it hands the text to the platform JSON parser.
+ *
+ * Why before: kotlinx's tree reader recurses once per array level with no depth limit, so a statement
+ * of a thousand `[` (it fits in the 1,024 bytes a frame allows) overflows a small thread stack. A
+ * `StackOverflowError` is not an `Exception`, so no parser's `catch` turns it into a verdict, and on
+ * Kotlin/Native it cannot be caught at all: it is a crash that any sender of a frame could cause.
+ *
+ * Nothing canonical is lost: no value type of the grammar admits `[` or `{`.
+ */
+internal fun isFlatStatement(statement: ByteArray): Boolean {
+    var braces = 0
+    for (b in statement) {
+        if (b == '['.code.toByte()) return false
+        if (b == '{'.code.toByte() && ++braces > 1) return false
+    }
+    return true
+}

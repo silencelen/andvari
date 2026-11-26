@@ -41,6 +41,16 @@ object Strength {
     /** F31: the master-password gate is the PRE-pattern proxy on purpose (class KDoc). */
     fun meetsMasterPasswordFloor(pw: String): Boolean = entropyProxyScore(pw) >= MASTER_PW_MIN_SCORE
 
+    /** The same gate over a password the caller will wipe: no `String` copy of it is made. */
+    fun meetsMasterPasswordFloor(pw: CharArray): Boolean {
+        val view = object : CharSequence {
+            override val length: Int get() = pw.size
+            override fun get(index: Int): Char = pw[index]
+            override fun subSequence(startIndex: Int, endIndex: Int): CharSequence = throw UnsupportedOperationException()
+        }
+        return scoreOf(pw.size, classCount(view)) >= MASTER_PW_MIN_SCORE
+    }
+
     /** Advisory (never blocks): non-ASCII in a master password may not round-trip across
      *  IMEs/keyboards on other devices. Exact mirror of web strength.ts ([^\x20-\x7e]). */
     fun masterPasswordHasNonAscii(pw: String): Boolean = pw.any { it.code < 0x20 || it.code > 0x7e }
@@ -86,7 +96,7 @@ object Strength {
     /** Same idea for ±1 runs: "abc" is a coincidence, "abcd" is a sequence. */
     private const val MIN_SEQUENCE_RUN = 4
 
-    private fun classCount(pw: String): Int {
+    private fun classCount(pw: CharSequence): Int {
         var classes = 0
         if (pw.any { it in 'a'..'z' }) classes++
         if (pw.any { it in 'A'..'Z' }) classes++

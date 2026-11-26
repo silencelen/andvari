@@ -4,15 +4,18 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, type ApiClient } from "../api/client";
 import type { ItemDoc, Mutation, PushResponse, SyncResponse, WireGrant, WireItem, WireVault } from "../api/types";
 import type { AccountKeys } from "../api/types";
+import { adVaultMeta } from "../crypto/ad";
+import { toB64, utf8 } from "../crypto/bytes";
+import { seal } from "../crypto/envelope";
 import { fingerprint } from "../crypto/escrow";
 import type { KdfParams } from "../crypto/keys";
-import { deleteProof, offerProof } from "../crypto/lifecycleproof";
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
 import { initSodium } from "../crypto/sodium";
 import { Account } from "./account";
-import { memoryClientState } from "./accountstatesync";
-import { IdbVaultCache, openVaultCache } from "./idbcache";
-import { SyncIntegrityError, VaultStore } from "./store";
+import { type ClientStateStore, memoryClientState } from "./accountstatesync";
+import { type FakeRole, FakeSharedLogs } from "./fakesharedlogs.testkit";
+import { IdbVaultCache, openVaultCache, type VaultCache } from "./idbcache";
+import { type ItemWire, SyncIntegrityError, VaultStore } from "./store";
 
 /**
  * S2 unit suite (design 2026-07-13-web-offline-cache §D): VaultStore driving a REAL
@@ -23,8 +26,9 @@ import { SyncIntegrityError, VaultStore } from "./store";
  * commit (ciphertext-only rows, a failed commit freezing disk coherent, the contiguity
  * refuse that keeps later deltas off a gapped disk + the fresh-session gap re-pull,
  * the 410-resync clear that PRESERVES accountKeys/queue/holding — breaker #2), §D.4
- * hydrate (tri-state parity, holding-name re-derivation without key retention, replay
- * floors, restart-surviving cursor → cross-session F31 — §D.6), §D.5 cross-tab (lock
+ * hydrate (tri-state parity with the shared key adopted again from the log, the holding
+ * area without key retention, staged denials, restart-surviving cursor → cross-session
+ * F31 — §D.6), §D.5 cross-tab (lock
  * name + the §D.5.1 cursor-skip), §D.2a post-push persist, and the §D.1 stuck-cache
  * demotion (3 non-landing commits: a thrown tx, rejecting reads, or a force-closed
  * cache's silent no-ops).
@@ -82,7 +86,7 @@ class FakeApi {
     };
   }
 
-  async push(mutations: Mutation[]): Promise<PushResponse> {
+  async pushMutations(mutations: Mutation[]): Promise<PushResponse> {
     this.pushes.push(mutations);
     return {
       rev: ++this.rev,
@@ -92,6 +96,11 @@ class FakeApi {
 
   asClient(): ApiClient {
     return this as unknown as ApiClient;
+  }
+
+  /** The item routes the store calls (its ItemWire): this fake serves them too. */
+  asWire(): ItemWire {
+    return this as unknown as ItemWire;
   }
 }
 
@@ -135,9 +144,10 @@ async function enroll(email: string): Promise<Enrolled> {
       encryptedIdentitySeed: request.encryptedIdentitySeed,
       identityPub: request.identityPub,
       escrowFingerprint: request.escrow!.fingerprint,
+      personalWrap: request.personalWrap, // design §5.3: the personal vault is the one whose served wrap opens at unlock
     },
     personalVault: { vaultId: request.personalVault.vaultId, type: "personal", rev: 1, metaBlob: request.personalVault.metaBlob, createdAt: 0 },
-    personalGrant: { vaultId: request.personalVault.vaultId, userId: request.userId, role: "owner", wrappedVk: request.personalVault.wrappedVk, rev: 1, sealedVk: null },
+    personalGrant: { vaultId: request.personalVault.vaultId, userId: request.userId, role: "owner", wrappedVk: request.personalVault.wrappedVk, rev: 1 },
   };
 }
 
@@ -149,28 +159,31 @@ interface Scenario {
   owner: Enrolled;
   member: Enrolled;
   vaultId: string;
+  vk: Uint8Array;
+  role: FakeRole;
   vault: WireVault;
   grant: WireGrant;
   itemId: string;
   item: WireItem;
 }
 
-/** Owner creates a shared vault + item and seals its VK to the member — real client crypto. */
-async function scenario(role = "writer"): Promise<Scenario> {
+/** Owner's shared vault + item; its verified log lists the member with [role] (design §3.6) — real client crypto. */
+async function scenario(role: FakeRole = "writer"): Promise<Scenario> {
   const owner = await enroll("owner@example.com");
   const member = await enroll("member@example.com");
-  const { request, vaultId } = owner.account.buildCreateSharedVault("Family");
-  const sealedVk = owner.account.wrapVkForMember(member.account.identityPub, vaultId);
-  // A6: this fixture's member vouched for the v1-only key (as after "Accept" on the review card), so the
-  // legacy key is writable here; signedgrant.store.test.ts covers the unconfirmed path.
-  member.account.authorizeLegacyKey(vaultId, owner.account.legacyKeyTag(vaultId)!); // bound to the vault key (A6 HIGH-1)
+  const vaultId = owner.account.newItemId();
+  const vk = randomBytes(32);
+  owner.account.logKeyRing().set(vaultId, vk.slice());
+  owner.account.attachLogRoles(() => "owner", () => true);
   const itemId = owner.account.newItemId();
   return {
     owner,
     member,
     vaultId,
-    vault: { vaultId, type: "shared", rev: 2, metaBlob: request.metaBlob, createdAt: 0 },
-    grant: { vaultId, userId: member.account.userId, role, wrappedVk: "", rev: 3, sealedVk },
+    vk,
+    role,
+    vault: { vaultId, type: "shared", rev: 2, metaBlob: toB64(seal(vk, utf8(JSON.stringify({ name: "Family" })), adVaultMeta(vaultId))), createdAt: 0 },
+    grant: { vaultId, userId: member.account.userId, role, wrappedVk: "", rev: 3 }, // a hint only: the log decides
     itemId,
     item: {
       itemId,
@@ -187,14 +200,23 @@ async function scenario(role = "writer"): Promise<Scenario> {
   };
 }
 
+/** A store for the member's [account] (the first device, or a restarted one), with the fake log layer attached as
+ *  enterVault attaches the real one: the vault's log lists the member with the scenario's role. */
+function memberStore(s: Scenario, api: ApiClient, account: Account, cache?: VaultCache, local?: ClientStateStore): { store: VaultStore; logs: FakeSharedLogs } {
+  const store = new VaultStore(api, account, cache, local, api as unknown as ItemWire); // the fake serves the item routes too
+  const logs = new FakeSharedLogs(account).attachTo(store);
+  logs.share(s.vaultId, s.vk, s.role);
+  return { store, logs };
+}
+
 /** Member store on a REAL IdbVaultCache, seeded at cursor 5 with the shared vault,
  *  the member's personal vault, and one shared item. */
-async function seeded(role = "writer") {
+async function seeded(role: FakeRole = "writer") {
   const s = await scenario(role);
   const cache = (await openVaultCache(s.member.account.userId)) as IdbVaultCache;
   expect(cache).toBeInstanceOf(IdbVaultCache);
   const api = new FakeApi();
-  const store = new VaultStore(api.asClient(), s.member.account, cache);
+  const { store, logs } = memberStore(s, api.asClient(), s.member.account, cache);
   api.queue.push({
     rev: 5,
     full: true,
@@ -204,7 +226,7 @@ async function seeded(role = "writer") {
     removedGrants: [],
   });
   await store.sync();
-  return { s, api, cache, store };
+  return { s, api, cache, store, logs };
 }
 
 describe("VaultStore durable offline cache (S2, design §D)", () => {
@@ -273,7 +295,7 @@ describe("VaultStore durable offline cache (S2, design §D)", () => {
       // land, and both memory and disk converge with the twin that never lost a commit.
       const fresh = await relock(s.member);
       const cache2 = (await openVaultCache(fresh.userId)) as IdbVaultCache;
-      const store2 = new VaultStore(api.asClient(), fresh, cache2);
+      const { store: store2 } = memberStore(s, api.asClient(), fresh, cache2);
       await store2.hydrate();
       await store2.sync(); // the ledger serves the strict delta (5, 7]
       expect(api.sinceLog.at(-1)).toBe(5); // resumed from DISK, not from memory
@@ -385,16 +407,15 @@ describe("VaultStore durable offline cache (S2, design §D)", () => {
     const cache = (await openVaultCache(s.member.account.userId)) as IdbVaultCache;
     // The device's own client state (localStorage in a browser) survives the restart with the cache.
     const local = memoryClientState();
-    const storeA = new VaultStore(apiA.asClient(), s.member.account, cache, local);
+    const { store: storeA } = memberStore(s, apiA.asClient(), s.member.account, cache, local);
     apiA.queue.push(pull);
     await storeA.sync();
 
-    // "Restart": fresh unlock (no keys, personalVaultId undiscovered), reopened cache, dead network.
+    // "Restart": fresh unlock (no shared keys held), reopened cache, dead network. The shared key comes back from the
+    // vault's verified log at hydrate (design §3.6), never from the cached grant row.
     const fresh = await relock(s.member);
-    fresh.authorizeLegacyKey(s.vaultId, s.owner.account.legacyKeyTag(s.vaultId)!); // A6: the restarted device keeps its vouched-for legacy key (the store persists it; this fixture sets it on the Account)
     expect(fresh.hasVault(s.vaultId)).toBe(false);
-    expect(fresh.personalVaultId).toBe("");
-    const storeB = new VaultStore(deadApi(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache, local);
+    const { store: storeB } = memberStore(s, deadApi(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache, local);
     await storeB.hydrate();
 
     // The exact tri-state, byte for byte against the synced twin.
@@ -404,10 +425,9 @@ describe("VaultStore durable offline cache (S2, design §D)", () => {
     expect(storeB.undecryptable().map((u) => u.itemId).sort()).toEqual([fv3Id, foreignId].sort());
     expect(storeB.needsUpdateCount()).toBe(1); // the fv=3 held-key item — retried, still newer
     expect(storeB.vaults()).toEqual(storeA.vaults());
-    // A5 review H-1: the fixture's keys carry no wrap, so it comes from this device's cached (UVK-sealed)
-    // wrap and is flagged "withheld"; never from the cached row's server label.
+    // Design §5.3: the personal vault is the one whose served wrap opened at unlock, never the cached row's label.
     expect(fresh.personalVaultId).toBe(s.member.account.personalVaultId);
-    expect(fresh.roleFor(s.vaultId)).toBe("writer"); // grant re-opened, role applied
+    expect(fresh.roleFor(s.vaultId)).toBe("writer"); // the key adopted again from the log, with the log's role
     expect(storeB.lastSyncAt).toBe(storeA.lastSyncAt); // the honest "vault as of last sync <t>" stamp
   });
 
@@ -415,7 +435,7 @@ describe("VaultStore durable offline cache (S2, design §D)", () => {
     const { s } = await seeded(); // disk cursor 5
     const fresh = await relock(s.member);
     const api2 = new FakeApi();
-    const store2 = new VaultStore(api2.asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
+    const { store: store2 } = memberStore(s, api2.asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
     await store2.hydrate();
 
     // Not a fresh-device since=0 pull — the restored cursor drives the delta…
@@ -435,11 +455,10 @@ describe("VaultStore durable offline cache (S2, design §D)", () => {
     }
   });
 
-  it("hydrate restores the holding area, re-deriving the name from the retained grant WITHOUT retaining the key (A2)", async () => {
-    const { s, api, cache, store } = await seeded();
-    const key = await s.owner.account.lifecycleKeyFor(s.vaultId);
-    const deleteId = crypto.randomUUID();
+  it("hydrate restores the holding area WITHOUT a plaintext name at rest and without retaining the key (A2)", async () => {
+    const { s, api, cache, store, logs } = await seeded();
     const purgeAt = Date.now() + 7 * 86_400_000;
+    logs.deleteVault(s.vaultId); // the verified log ends in the owner's delete (§3.11); the served purge time is shown
     api.queue.push({
       rev: 6,
       full: false,
@@ -447,57 +466,42 @@ describe("VaultStore durable offline cache (S2, design §D)", () => {
       grants: [],
       items: [],
       removedGrants: [s.vaultId],
-      removedGrantsInfo: [{ vaultId: s.vaultId, reason: "deleted", deleteId, deleteProof: await deleteProof(key, s.vaultId, deleteId), purgeAt }],
+      removedGrantsInfo: [{ vaultId: s.vaultId, reason: "deleted", purgeAt }],
     });
     await store.sync();
     expect(store.heldVaults().find((h) => h.vaultId === s.vaultId)?.verified).toBe(true);
 
-    // At rest: ciphertext snapshot + retained grant, the live rows dropped in the SAME tx,
-    // and NO plaintext name (A2).
+    // At rest: ciphertext snapshot, the live rows dropped in the SAME tx, NO plaintext name (A2), and no grant row
+    // retained (under the log a key comes from the log alone, so a row would open nothing).
     const atRest = await cache.getHeld(s.vaultId);
     expect(atRest).toBeTruthy();
     expect("cachedName" in (atRest as object)).toBe(false);
     expect(atRest!.items.map((i) => i.itemId)).toEqual([s.itemId]); // the re-sealed snapshot persisted
-    expect(atRest!.grant?.vaultId).toBe(s.vaultId);
+    expect(atRest!.grant ?? null).toBeNull();
     expect(await cache.envelopes()).toEqual([]); // dropVault rode the same commit
     expect((await cache.grants()).map((x) => x.vaultId)).toEqual([s.member.personalVault.vaultId]);
 
     const fresh = await relock(s.member);
-    const store2 = new VaultStore(deadApi(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
+    const { store: store2 } = memberStore(s, deadApi(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
     await store2.hydrate();
     const held = store2.heldVaults().find((h) => h.vaultId === s.vaultId);
-    expect(held?.name).toBe("Family"); // re-derived via the retained grant (peek, not retain)
+    // Under the log the key went with the removal and the retained grant row opens nothing: no name is re-derived.
+    expect(held?.name).toBe("(vault)");
     expect(held?.verified).toBe(true);
     expect(held?.purgeAt).toBe(purgeAt);
     expect(fresh.hasVault(s.vaultId)).toBe(false); // the peek did NOT leave the key open
     expect(store2.list().some((i) => i.vaultId === s.vaultId)).toBe(false); // held ≠ live
   });
 
-  it("hydrate restores consumedDeleteIds: a replayed tombstone bearing a consumed deleteId keeps the vault live", async () => {
-    const { s, cache } = await seeded();
-    const consumedId = crypto.randomUUID();
-    await cache.addConsumedDeleteId(consumedId);
-
+  it("hydrate without a log layer opens only the personal vault's cached grant: a shared row never reaches addGrant", async () => {
+    const { s } = await seeded();
     const fresh = await relock(s.member);
-    const api2 = new FakeApi();
-    const store2 = new VaultStore(api2.asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
+    const store2 = new VaultStore(deadApi(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache); // nothing attached
+    const addGrant = vi.spyOn(fresh, "addGrant");
     await store2.hydrate();
-
-    // A replayed old tombstone bearing the consumed deleteId is recognized as stale —
-    // the vault stays live, no holding, no notice (spec 03 §11 #4, across a restart).
-    api2.queue.push({
-      rev: 6,
-      full: false,
-      vaults: [],
-      grants: [],
-      items: [],
-      removedGrants: [s.vaultId],
-      removedGrantsInfo: [{ vaultId: s.vaultId, reason: "deleted", deleteId: consumedId, deleteProof: "irrelevant" }],
-    });
-    await store2.sync();
-    expect(store2.get(s.itemId)).toBeDefined();
-    expect(store2.heldVaults()).toHaveLength(0);
-    expect(store2.notices()).toHaveLength(0);
+    expect(addGrant.mock.calls.map(([g]) => g.vaultId)).toEqual([s.member.personalVault.vaultId]);
+    expect(fresh.hasVault(s.vaultId)).toBe(false);
+    expect(store2.get(s.itemId)).toBeUndefined();
   });
 
   it("hydrate restores staged denials: a real verified delete folds them into the holding record (F21, across a restart)", async () => {
@@ -516,14 +520,13 @@ describe("VaultStore durable offline cache (S2, design §D)", () => {
 
     const fresh = await relock(s.member);
     const api2 = new FakeApi();
-    const store2 = new VaultStore(api2.asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
+    const { store: store2, logs } = memberStore(s, api2.asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
     await store2.hydrate();
 
-    // The vault's REAL verified delete arrives (its grace period): the reconnect pull folds the
+    // The vault's REAL verified delete arrives (its grace period; the log says so): the reconnect pull folds the
     // hydrated staged denial into the holding record for restore replay (F21) — so
     // surfaceStagedDenials finds it already parked and never surfaces it as a genuine denial.
-    const key = await s.owner.account.lifecycleKeyFor(s.vaultId);
-    const deleteId = crypto.randomUUID();
+    logs.deleteVault(s.vaultId);
     api2.queue.push({
       rev: 7,
       full: false,
@@ -531,42 +534,12 @@ describe("VaultStore durable offline cache (S2, design §D)", () => {
       grants: [],
       items: [],
       removedGrants: [s.vaultId],
-      removedGrantsInfo: [{ vaultId: s.vaultId, reason: "deleted", deleteId, deleteProof: await deleteProof(key, s.vaultId, deleteId), purgeAt: Date.now() + 7 * 86_400_000 }],
+      removedGrantsInfo: [{ vaultId: s.vaultId, reason: "deleted", purgeAt: Date.now() + 7 * 86_400_000 }],
     });
     await store2.sync(); // must NOT throw — the denial is parked, not a genuine refusal
     expect(store2.notices().find((n) => n.vaultId === s.vaultId)?.parkedCount).toBe(1);
     // The staged queue row was dropped in the same tx it folded into held.parked (no double-load).
     expect(await (await openVaultCache(fresh.userId)).stagedDenied()).toEqual([]);
-  });
-
-  it("hydrate restores lastVerifiedTransferSeq — a replayed offer at the already-seen seq stays hidden", async () => {
-    const { s, cache } = await seeded();
-    await cache.setLastVerifiedTransferSeq(s.vaultId, 7);
-
-    const fresh = await relock(s.member);
-    const api2 = new FakeApi();
-    const store2 = new VaultStore(api2.asClient(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
-    await store2.hydrate();
-
-    const key = await s.owner.account.lifecycleKeyFor(s.vaultId);
-    const offerId = crypto.randomUUID();
-    const expiresAt = Date.now() + 14 * 86_400_000;
-    // Each re-delivery of the vault row carries the response's rev — the real server
-    // bumps the row when pendingTransfer changes, and the honest fake only serves rows
-    // newer than `since`.
-    const offerAt = async (seq: number, rev: number): Promise<WireVault> => ({
-      ...s.vault,
-      rev,
-      pendingTransfer: { toUserId: s.member.account.userId, offerId, proof: await offerProof(key, s.vaultId, offerId, s.member.account.userId, expiresAt, seq), expiresAt, seq },
-    });
-    // seq 7 was verified before the restart → suppressed (would surface on a floor-less store)…
-    api2.queue.push({ rev: 8, full: false, vaults: [await offerAt(7, 8)], grants: [], items: [], removedGrants: [] });
-    await store2.sync();
-    expect(store2.incomingTransfers()).toHaveLength(0);
-    // …seq 8 is genuinely new → surfaces after its proof verifies.
-    api2.queue.push({ rev: 9, full: false, vaults: [await offerAt(8, 9)], grants: [], items: [], removedGrants: [] });
-    await store2.sync();
-    expect(store2.incomingTransfers().map((t) => t.vaultId)).toEqual([s.vaultId]);
   });
 
   // ---- §D.5 cross-tab ----
@@ -598,7 +571,7 @@ describe("VaultStore durable offline cache (S2, design §D)", () => {
     const s = await scenario();
     const cache = (await openVaultCache(s.member.account.userId)) as IdbVaultCache;
     const api = new FakeApi();
-    const store = new VaultStore(api.asClient(), s.member.account, cache);
+    const { store } = memberStore(s, api.asClient(), s.member.account, cache);
     api.queue.push({ rev: 5, full: true, vaults: [s.vault], grants: [s.grant], items: [s.item], removedGrants: [] });
 
     const requested: string[] = [];
@@ -634,9 +607,10 @@ describe("VaultStore durable offline cache (S2, design §D)", () => {
     expect(persisted!.blob).toBe(api.pushes.at(-1)![0]!.item!.blob); // the EXACT committed envelope
 
     const fresh = await relock(s.member);
-    const store2 = new VaultStore(deadApi(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
+    const { store: store2 } = memberStore(s, deadApi(), fresh, (await openVaultCache(fresh.userId)) as IdbVaultCache);
     await store2.hydrate();
-    expect(store2.get(savedId)?.doc).toEqual({ type: "note", name: "made offline-durable" });
+    // A shared vault's item also carries the log head it was written at (design §3.9).
+    expect(store2.get(savedId)?.doc).toMatchObject({ type: "note", name: "made offline-durable" });
   });
 
   it("a committed remove's disk delete lands in the same breath, independent of the reconcile pull (§D.2a)", async () => {
@@ -714,10 +688,49 @@ describe("VaultStore durable offline cache (S2, design §D)", () => {
 
   // ---- one code shape: the NullCache default is exactly today's behavior ----
 
+  it("a deleted vault's copy held by the earlier rule (until the purge time) is kept 30 days from the hydrate, on disk too; and “Remove from this device” takes it off the disk at once (design §3.8)", async () => {
+    const { s, cache } = await seeded("writer");
+    const now = Date.now();
+    const DAY = 86_400_000;
+    const record = (vaultId: string, purgeAt: number, expungeAt: number) => ({
+      vault: { vaultId, type: "shared", rev: 1, metaBlob: "", createdAt: 0 },
+      grant: null,
+      items: [],
+      reason: "deleted" as const,
+      verified: true,
+      purgeAt,
+      parked: [],
+      expungeAt,
+      cachedName: "gone",
+    });
+    const past = "00000000-0000-4000-8000-0000000000a1";
+    const soon = "00000000-0000-4000-8000-0000000000a2";
+    const ours = "00000000-0000-4000-8000-0000000000a3";
+    await cache.putHeld(record(past, now - 2 * DAY, now - 2 * DAY)); // the purge passed while the browser was closed
+    await cache.putHeld(record(soon, now + DAY, now + DAY));
+    await cache.putHeld(record(ours, now + DAY, now + 30 * DAY)); // made by this rule: left as it is
+
+    const fresh = await relock(s.member);
+    const cache2 = (await openVaultCache(fresh.userId)) as IdbVaultCache;
+    const { store: store2 } = memberStore(s, deadApi(), fresh, cache2);
+    await store2.hydrate();
+    const by = new Map(store2.heldVaults().map((h) => [h.vaultId, h.expungeAt]));
+    expect(by.get(past)).toBeGreaterThanOrEqual(now + 30 * DAY);
+    expect(by.get(soon)).toBeGreaterThanOrEqual(now + 30 * DAY);
+    expect(by.get(ours)).toBe(now + 30 * DAY);
+    const disk = new Map((await cache2.heldVaults()).map((h) => [h.vault.vaultId, h.expungeAt]));
+    expect(disk.get(past)).toBe(by.get(past));
+    expect(disk.get(soon)).toBe(by.get(soon));
+
+    await store2.removeHeldCopy(soon);
+    expect(store2.heldVaults().map((h) => h.vaultId).sort()).toEqual([past, ours].sort());
+    expect((await cache2.heldVaults()).map((h) => h.vault.vaultId).sort()).toEqual([past, ours].sort());
+  });
+
   it("hydrate on the default NullCache is a cold start — nothing restored, first sync still from 0", async () => {
     const s = await scenario();
     const api = new FakeApi();
-    const store = new VaultStore(api.asClient(), s.member.account); // two-arg caller, as today
+    const { store } = memberStore(s, api.asClient(), s.member.account); // no cache: the NullCache default
     await store.hydrate();
     expect(store.list()).toEqual([]);
     expect(store.lastSyncAt).toBeNull();

@@ -21,6 +21,9 @@ object Envelope {
         ad: ByteArray,
     ): ByteArray {
         require(nonce.size == NONCE_BYTES) { "nonce must be $NONCE_BYTES bytes" }
+        // Nothing is sealed under a wiped key, and no wiped key is wrapped: KeysGoneException.
+        KeyFloor.requireKey(key)
+        KeyFloor.requireNotWipedKey(plaintext)
         val ct = crypto.aeadEncrypt(key, nonce, plaintext, ad)
         return byteArrayOf(VERSION, ALG_XCHACHA20POLY1305_IETF) + nonce + ct
     }
@@ -52,6 +55,8 @@ object Envelope {
 
     fun open(crypto: CryptoProvider, key: ByteArray, envelope: ByteArray, ad: ByteArray): ByteArray {
         structuralRefusal(envelope)?.let { throw CryptoException(it) }
+        // A wiped key opens nothing, and says so as a lock (KeysGoneException), never as a wrong key (CryptoException).
+        KeyFloor.requireKey(key)
         val nonce = envelope.copyOfRange(2, HEADER_BYTES)
         val ct = envelope.copyOfRange(HEADER_BYTES, envelope.size)
         return crypto.aeadDecrypt(key, nonce, ct, ad)

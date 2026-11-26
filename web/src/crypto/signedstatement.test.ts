@@ -215,14 +215,15 @@ describe("Account — joint signing key (owner decision: joint key)", () => {
     });
     expect(unlocked.signPub).toEqual(a.account.signPub);
 
-    // The account's only signing path is escrow v2 (A4): the joint key signs the statement the
-    // re-seal produces, which verifies under the account's own identity and no other.
+    // The account's escrow v2 statement (A4) is signed by the joint key at enrolment, and verifies under the
+    // account's own identity and no other.
     const org = boxKeypairFromSeed(randomBytes(32));
     const orgFp = await orgFingerprint(org.publicKey);
-    const { sealed } = await unlocked.resealEscrowFor(toB64(org.publicKey), orgFp);
-    const frame = sealOpen(org.publicKey, org.privateKey, fromB64(sealed));
-    const verified = verifyEscrowStatement(frame, a.request.userId, a.account.identityPub, orgFp);
-    expect(verified.signerPub).toEqual(a.account.signPub);
-    expect(verdictOf(() => verifyEscrowStatement(frame, a.request.userId, b.account.identityPub, orgFp))).toBe("signer_not_pinned_key");
+    const c = await Account.enroll({ inviteToken: "inv", email: "c@x.com", displayName: "c", password: PASSWORD, kdfParams: KDF, recoveryPublicKey: org.publicKey, recoveryFingerprint: orgFp });
+    expect(ed25519PkToCurve25519(c.account.signPub)).toEqual(c.account.identityPub);
+    const frame = sealOpen(org.publicKey, org.privateKey, fromB64(c.request.escrow!.sealed));
+    const verified = verifyEscrowStatement(frame, c.request.userId, c.account.identityPub, orgFp);
+    expect(verified.signerPub).toEqual(c.account.signPub);
+    expect(verdictOf(() => verifyEscrowStatement(frame, c.request.userId, b.account.identityPub, orgFp))).toBe("signer_not_pinned_key");
   });
 });

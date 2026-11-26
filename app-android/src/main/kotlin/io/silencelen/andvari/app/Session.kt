@@ -489,32 +489,6 @@ class SessionStore(context: Context) : SessionPersistence {
     }
 
     /**
-     * Account deletion (spec 03 §13: the phone is left as a fresh install): forget the server at [originKey]. Every
-     * `ns.<originKey>.` key goes, whoever's it is (the policy mirrors, cached account keys, the quick-unlock stamps and
-     * offer counters, the self-identity pins and bindings); so does the stored session when it is that origin's. A phone
-     * that dials that origin goes back to the default one, as a first launch has it, and the pending-switch marker and
-     * the last sync and last backup times, which were that account's, go with the address. What is the device's own stays: the clock ratchet,
-     * the one-shot migration flags, another origin's namespace (§4.2). One synchronous write, so nothing of it is left
-     * for a process started right after.
-     */
-    override fun forgetServer(originKey: String) {
-        synchronized(SESSION_LOCK) {
-            val edit = prefs.edit()
-            val sessionOrigin = prefs.getString(SESSION_ORIGIN, null)
-            if (sessionOrigin.isNullOrEmpty() || OriginNamespace.originKey(sessionOrigin) == originKey) {
-                runCatching { AppSignerBindings.clearAll(appContext) }
-                edit.remove("userId").remove("email").remove("accessToken").remove("refreshToken").remove(SESSION_ORIGIN).remove("mustChangePassword")
-            }
-            val prefix = ns(originKey, "")
-            for (key in prefs.all.keys) if (key.startsWith(prefix)) edit.remove(key)
-            // The server the phone dials: its address, the switch that was pending on it, and its account's times.
-            if (currentOriginKey() == originKey) edit.remove("baseUrl").remove("pendingServer").remove("lastSyncAt").remove("lastExportAt")
-            edit.commit()
-            originKeyMemo = null
-        }
-    }
-
-    /**
      * §4.1 rule 1 (B1-5): drop ONLY the single global active session — identity + access/refresh
      * tokens + the F58 flag — so a client rebuilt for a DIFFERENT origin can carry no old bearer
      * token to the new one. Unlike [clear], this touches NO per-origin namespace: a server switch

@@ -1,4 +1,4 @@
-import type { AccountDeleteBlocker, AccountDeletePreview, AccountKeys, DeletedItem, DeletedVaultSummary, SessionResponse, SyncResponse, UserLookupResponse, VaultMemberSummary } from "./types";
+import type { AccountDeleteBlocker, AccountDeletePreview, AccountKeys, DeletedItem, DeletedVaultSummary, SessionResponse, SyncResponse, VaultMemberSummary } from "./types";
 
 /**
  * The id grammar at the wire boundary (security review 2026-10, plugin scan F1/F2; branch A10).
@@ -17,6 +17,14 @@ export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 
 export function isUuid(s: unknown): s is string {
   return typeof s === "string" && UUID_RE.test(s);
+}
+
+/** The all-zero user id. It is never an account (core `UserIds.NIL`): a client refuses it wherever a server hands it one. */
+export const NIL_USER_ID = "00000000-0000-0000-0000-000000000000";
+
+/** True for the all-zero user id (core `UserIds.isNil`). */
+export function isNilUserId(s: unknown): boolean {
+  return s === NIL_USER_ID;
 }
 
 /** One refused id: `field` names the wire field (dotted for a nested one), `value` the offending string. */
@@ -115,14 +123,9 @@ export function sanitizeDeletePreview(p: AccountDeletePreview): Sanitized<Accoun
   };
 }
 
-/** A served identity row is refused outright (there is no partial row to keep). */
-export function refusedUser(u: UserLookupResponse): Refusal | null {
-  return isUuid(u.userId) ? null : { field: "userId", value: String(u.userId) };
-}
-
 /** A session naming a malformed user or device id is refused outright: both are storage namespace keys. */
 export function refusedSession(s: SessionResponse): Refusal | null {
-  if (!isUuid(s.userId)) return { field: "userId", value: String(s.userId) };
+  if (!isUuid(s.userId) || isNilUserId(s.userId)) return { field: "userId", value: String(s.userId) };
   if (!isUuid(s.deviceId)) return { field: "deviceId", value: String(s.deviceId) };
   return null;
 }

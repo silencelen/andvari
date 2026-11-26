@@ -119,7 +119,7 @@ object CsvImport {
      */
     fun rowOrdinalsByLine(bytes: ByteArray): Map<Int, Int> {
         var text = bytes.decodeToString()
-        if (text.isNotEmpty() && text[0] == '﻿') text = text.substring(1)
+        if (text.isNotEmpty() && text[0] == '\uFEFF') text = text.substring(1)
         val out = LinkedHashMap<Int, Int>()
         var ordinal = 0
         for (rec in Rfc4180.parse(text).drop(1)) {
@@ -134,7 +134,7 @@ object CsvImport {
     fun parse(bytes: ByteArray): Parsed {
         if (bytes.size > MAX_BYTES) throw ImportException("too_large")
         var text = bytes.decodeToString() // lenient UTF-8 (invalid → U+FFFD)
-        if (text.isNotEmpty() && text[0] == '﻿') text = text.substring(1) // strip BOM
+        if (text.isNotEmpty() && text[0] == '\uFEFF') text = text.substring(1) // strip BOM
 
         val records = Rfc4180.parse(text)
         if (records.isEmpty()) throw ImportException("unrecognized_header")

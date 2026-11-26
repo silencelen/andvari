@@ -26,15 +26,6 @@ interface NamespaceStorage {
      * device state can never be used again. Every other purge keeps it. Never throws.
      */
     fun deleteDeviceState(originKey: String, userId: String) {}
-
-    /**
-     * Forget the server at [originKey] (spec 03 §13: an account deletion leaves nothing of the account's server either):
-     * every user's namespace under that origin goes, with its vault cache and device state. Returns the users it held a
-     * namespace for there, as the path segments they are kept under ([io.silencelen.andvari.core.client.OriginCanon.pathSafe]),
-     * so the caller can destroy what else is keyed by them (a quick-unlock key). Another origin is never touched. Never
-     * throws.
-     */
-    fun deleteOrigin(originKey: String): List<String>
 }
 
 /**

@@ -1,5 +1,6 @@
 package io.silencelen.andvari.server
 
+import io.ktor.websocket.CloseReason
 import io.ktor.websocket.Frame
 import io.ktor.websocket.WebSocketSession
 import io.ktor.websocket.close
@@ -11,6 +12,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * WebSocket "dirty bell" (spec 03 §6). Server → client frames only: {"type":"rev","rev":N} when
@@ -39,14 +41,57 @@ class Notifier(
      * nothing cancels it, and an idle scope holds no thread.
      */
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    /** Wall time, for how long a refresh's rotation is kept ([ROTATION_KEEP_MS]). */
+    private val clock: () -> Long = ::now,
 ) {
-    private class Conn(val deviceId: String, val session: WebSocketSession)
+    /**
+     * One socket: its device, and [sessionId], the session it was opened on, carried along the session's refresh chain
+     * ([sessionRotated]), so that a revocation that ends only some sessions reaches exactly their sockets.
+     */
+    private class Conn(val deviceId: String, @Volatile var sessionId: String, val session: WebSocketSession, val seq: Long)
 
     private val conns = ConcurrentHashMap<String, MutableSet<Conn>>()
+    private val seq = AtomicLong()
 
-    fun register(userId: String, deviceId: String, session: WebSocketSession) {
-        conns.computeIfAbsent(userId) { ConcurrentHashMap.newKeySet() }.add(Conn(deviceId, session))
+    /**
+     * Recent refreshes, old session to new, kept [ROTATION_KEEP_MS]: a ticket minted on a session that a refresh rotated
+     * away before the socket was opened still registers under the chain's current session. Pruned on every refresh.
+     */
+    private class Rotation(val to: String, val at: Long)
+    private val rotations = ConcurrentHashMap<String, Rotation>()
+
+    /**
+     * Registers [session] for [deviceId]. A device holds at most [MAX_SOCKETS_PER_DEVICE] sockets
+     * (one bearer used to open any number): registering one more closes that device's OLDEST socket
+     * (`1008`, "too_many_sockets") rather than refusing the new one, because a device's oldest socket is
+     * the likeliest to be a dead connection the 60 s pong reaper has not reached yet, and a reconnecting
+     * client must not be locked out by it. The evicted socket leaves the set at once, so the count is
+     * bounded even while its close is still in flight.
+     */
+    fun register(userId: String, deviceId: String, sessionId: String, session: WebSocketSession) {
+        val set = conns.computeIfAbsent(userId) { ConcurrentHashMap.newKeySet() }
+        val evicted: List<Conn>
+        synchronized(set) {
+            set.add(Conn(deviceId, currentOf(sessionId), session, seq.incrementAndGet()))
+            val mine = set.filter { it.deviceId == deviceId }.sortedBy { it.seq }
+            evicted = mine.take((mine.size - MAX_SOCKETS_PER_DEVICE).coerceAtLeast(0))
+            set.removeAll(evicted.toSet())
+        }
+        for (c in evicted) {
+            scope.launch { runCatching { withTimeoutOrNull(SEND_TIMEOUT_MS) { c.session.close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "too_many_sockets")) } } }
+        }
     }
+
+    /**
+     * How often an open events socket re-checks that its device still has a live session on an active
+     * account (spec 03 §6). The bell above reaches only sockets of THIS process; a change
+     * made by another process (`andvari admin disable`) is caught by this re-check instead. Settable so a
+     * test need not wait 30 s; never set in production.
+     */
+    @Volatile internal var recheckMs: Long = 30_000L
+
+    /** Test hook: the live sockets registered for [deviceId]. */
+    internal fun socketCount(userId: String, deviceId: String): Int = conns[userId]?.count { it.deviceId == deviceId } ?: 0
 
     fun unregister(userId: String, session: WebSocketSession) {
         conns[userId]?.removeIf { it.session === session }
@@ -57,6 +102,18 @@ class Notifier(
         for (userId in userIds.toSet()) {
             conns[userId]?.forEach { deliver(it, text, closeAfter = false) }
         }
+    }
+
+    /**
+     * Ring EVERY registered socket, of every account (spec 03 §6): the instance card chain changed (a new card
+     * or rotation statement was stored, §17.2, §17.3). [rev] is the fresh global rev the store took, so it is
+     * above every client's own and even a client that pulls only for a higher rev pulls. The frame is the
+     * ordinary `rev` bell: it names no account and no card, and a client learns what changed only from the
+     * chain it then fetches and verifies itself.
+     */
+    fun notifyEveryone(rev: Long) {
+        val text = buildJsonObject { put("type", "rev"); put("rev", rev) }.toString()
+        for (set in conns.values) set.forEach { deliver(it, text, closeAfter = false) }
     }
 
     /**
@@ -72,12 +129,59 @@ class Notifier(
     fun notifyRevokedUser(userId: String) = notifyRevokedUserExcept(userId, keepDeviceId = null)
 
     /**
-     * M8: revoke every session EXCEPT one device's — a password change kills the user's OTHER sessions
-     * but deliberately keeps the changing device's own, so its socket must stay live. [keepDeviceId] =
-     * null hits every device (the user-wide revoke).
+     * M8: revoke every session EXCEPT one device's (a recovery's commit, whose new device is the one kept).
+     * [keepDeviceId] = null hits every device (the user-wide revoke).
      */
     fun notifyRevokedUserExcept(userId: String, keepDeviceId: String?) {
         conns[userId]?.filter { keepDeviceId == null || it.deviceId != keepDeviceId }?.forEach { deliver(it, REVOKED, closeAfter = true) }
+    }
+
+    /**
+     * Every session of [userId] but [keepSessionId] was ended (a password change, spec 03 §3): every socket opened on
+     * another session is told so and closed, whichever device it belongs to, those of the kept session's own device
+     * included; the kept session's sockets stay. Before 2026-11-17 the notice spared the whole changing device although
+     * the revocation did not, so a second session there kept a live socket after its session had ended.
+     */
+    fun notifyRevokedUserExceptSession(userId: String, keepSessionId: String) {
+        val keep = currentOf(keepSessionId)
+        conns[userId]?.filter { it.sessionId != keep }?.forEach { deliver(it, REVOKED, closeAfter = true) }
+    }
+
+    /**
+     * A sign-in gave [deviceId] the new session [keepSessionId] and ended the device's earlier ones: every socket of the
+     * device opened on another session is told so and closed, as after a password change; the new session's stay.
+     */
+    fun notifyRevokedDeviceExceptSession(userId: String, deviceId: String, keepSessionId: String) {
+        val keep = currentOf(keepSessionId)
+        conns[userId]?.filter { it.deviceId == deviceId && it.sessionId != keep }?.forEach { deliver(it, REVOKED, closeAfter = true) }
+    }
+
+    /**
+     * A sign-in on a browser's row ended exactly the sessions [sessionIds] (the one it named, spec 03 §2): the sockets
+     * opened on them, or on an earlier session of their chain, are told so and closed; every other socket of the row stays.
+     */
+    fun notifyRevokedSessions(userId: String, sessionIds: Collection<String>) {
+        if (sessionIds.isEmpty()) return
+        val ended = sessionIds.toSet()
+        conns[userId]?.filter { currentOf(it.sessionId) in ended || it.sessionId in ended }?.forEach { deliver(it, REVOKED, closeAfter = true) }
+    }
+
+    /**
+     * A refresh rotated session [from] to [to] (spec 03 §2): the sockets opened on [from], or on an earlier session of
+     * the same chain, now belong to [to]. Called after the refresh committed.
+     */
+    fun sessionRotated(userId: String, from: String, to: String) {
+        val t = clock()
+        rotations.entries.removeIf { t - it.value.at > ROTATION_KEEP_MS }
+        rotations[from] = Rotation(to, t)
+        conns[userId]?.forEach { if (it.sessionId == from) it.sessionId = to }
+    }
+
+    /** The chain's current session for [sessionId], following the refreshes kept in [rotations]. */
+    private fun currentOf(sessionId: String): String {
+        var id = sessionId
+        repeat(MAX_ROTATION_HOPS) { id = rotations[id]?.to ?: return id }
+        return id
     }
 
     /**
@@ -97,9 +201,18 @@ class Notifier(
         }
     }
 
-    private companion object {
+    internal companion object {
+        /** Sockets one device may hold (spec 03 §6): several windows or tabs, never an unbounded number. */
+        const val MAX_SOCKETS_PER_DEVICE = 8
+
         /** A wedged peer holds one coroutine for at most this long — never a request. */
         const val SEND_TIMEOUT_MS = 2_000L
+
+        /** How long a refresh's old-to-new pair is kept for a ticket minted before it: twice a ticket's 30 s. */
+        const val ROTATION_KEEP_MS = 60_000L
+
+        /** At most this many refreshes are followed from one session (a chain within [ROTATION_KEEP_MS] is short). */
+        const val MAX_ROTATION_HOPS = 64
         val REVOKED = buildJsonObject { put("type", "revoked") }.toString()
     }
 }

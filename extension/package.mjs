@@ -4,14 +4,20 @@
 // The zip roots the files directly (manifest.json at top level) — unzip → Load unpacked.
 //
 // `node package.mjs --check` (scripts/verify.sh and CI): every target built as it ships, Safari's too, with the
-// packaging's refusals applied, and no zip. It skips the tests (the gate has just run them) and the A15 release check
-// (between releases the tree may carry the last release's version). The 0.30.0 release check found the packaging
+// packaging's refusals applied, and no zip. It skips the tests (the gate has just run them) and the public-instance
+// release check (until the cut-over the tree carries the placeholders). The 0.30.0 release check found the packaging
 // refusing the Chrome and Firefox builds while both gates were green, because neither built them this way.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
-import { a15ReleaseProblem } from "./src/releasegate.ts";
+import { publicInstanceReleaseProblem } from "./src/releasegate.ts";
 
 const check = process.argv.includes("--check");
+
+// A person's test build (build.mjs TESTBUILD=1) is never a store package: the builds below inherit this environment, so
+// the setting would make every package a test build. Refused before anything is built.
+if (process.env.TESTBUILD !== undefined) {
+  throw new Error("package.mjs packages the store builds and refuses to run with TESTBUILD set: a test build is never a store package");
+}
 
 const version = JSON.parse(readFileSync("manifest.json", "utf8")).version;
 // The version lives in three hand-edited files; a forgotten bump would silently ship a
@@ -24,12 +30,11 @@ if (version !== ffVersion || version !== safariVersion || version !== pkgVersion
     `version drift: manifest.json=${version} manifest.firefox.json=${ffVersion} manifest.safari.json=${safariVersion} package.json=${pkgVersion} — bump all four`,
   );
 }
-// Security review 2026-10 (the A16 review): a release of this tree must be newer than the last release without the A15
-// trusted store, or the next update would be taken for the pre-A15 upgrade (src/releasegate.ts). Here, not in verify.sh:
-// between releases the tree may carry the last release's version.
+// Design 2026-11-15 §0.3: a store build must not ship while the baked public instance is a placeholder
+// (src/releasegate.ts). Here, not in verify.sh: until the cut-over the tree carries the placeholders.
 if (!check) {
-  const a15 = a15ReleaseProblem(version);
-  if (a15 !== null) throw new Error(a15);
+  const baked = publicInstanceReleaseProblem();
+  if (baked !== null) throw new Error(baked);
   mkdirSync("artifacts", { recursive: true });
 
   // A7: refuse to zip a build whose tests fail — mirrors the version-drift refusal above.

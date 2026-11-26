@@ -22,7 +22,8 @@ object KdfUpgrade {
     /**
      * True iff [policy] is a legitimate UPGRADE of [account]: it dominates on BOTH cost axes
      * (`memBytes >= AND ops >=`), is STRICTLY greater on at least one (equal params are a no-op,
-     * not an upgrade), has `policy.v >= account.v`, and sits inside the sanity fence above.
+     * not an upgrade), has `policy.v >= account.v`, sits inside the sanity fence above, and asks for
+     * a memory cost that is a whole number of KiB.
      *
      * PARTIAL-ORDER GAP (breaker-named, accepted): "dominates on both axes" is a partial order,
      * so an account that STRADDLES the policy — higher on one axis, lower on the other — never
@@ -38,12 +39,40 @@ object KdfUpgrade {
         // Sanity fence FIRST: a policy outside [floor, ceiling] is never an upgrade, no matter
         // how it compares to the account — a compromised server must be able to neither weaken
         // nor DoS the KDF.
-        if (policy.memBytes < MIN_MEM_BYTES || policy.ops < MIN_OPS) return false
-        if (policy.memBytes > MAX_MEM_BYTES || policy.ops > MAX_OPS) return false
+        if (!withinFence(policy)) return false
         // Upgrade-only: the policy must dominate the account on BOTH axes...
         if (policy.memBytes < account.memBytes || policy.ops < account.ops) return false
         // ...and be strictly greater on at least one (else it is an equal-params no-op).
         return policy.memBytes > account.memBytes || policy.ops > account.ops
+    }
+
+    /**
+     * Whether the quiet raising of the account's cost is due on the new engine (decided on 2026-11-17): the served cost
+     * [served] is inside this client's fence ([withinFence]) and [account] is below it on ANY figure (memory or passes),
+     * with `served.v >= account.v`. The wrap is then made at [wrapCost] (figure by figure the higher of the two, inside
+     * this client's limits), so no figure is ever lowered and none is raised beyond what the server serves or this device
+     * accepts. Unlike [shouldUpgrade], an account that stands above the served cost on one figure and below it on the
+     * other is raised (only on the figure it lacks): the server refuses a new wrap below its served cost on any figure.
+     * Nonsense answers false, never a throw.
+     */
+    fun belowServed(account: KdfParams, served: KdfParams): Boolean {
+        if (served.v < account.v) return false
+        if (!withinFence(served)) return false
+        return account.memBytes < served.memBytes || account.ops < served.ops
+    }
+
+    /**
+     * The fence a re-key target must pass, on its own (spec 01 §7): never below the floor, never above the ceiling, and a
+     * memory cost that is a whole number of KiB. The last one because the server refuses any other cost as
+     * `kdf_mem_not_kib_multiple` (spec 03), and the Argon2id engines round such a cost differently, so a wrap made at one
+     * could open on one client and read as a wrong password on another. A wrap the server serves that is neither this
+     * device's own nor its pending one is tried only at a cost inside it, so a server can make a device derive neither a
+     * cheap hash of the password nor an absurdly costly one.
+     */
+    fun withinFence(p: KdfParams): Boolean {
+        if (p.memBytes < MIN_MEM_BYTES || p.ops < MIN_OPS) return false
+        if (p.memBytes > MAX_MEM_BYTES || p.ops > MAX_OPS) return false
+        return p.memBytes % 1024L == 0L
     }
 
     /**
@@ -62,6 +91,42 @@ object KdfUpgrade {
     fun requireServerKdfParams(p: KdfParams) {
         if (p.memBytes < MIN_MEM_BYTES || p.ops < MIN_OPS) throw KdfPolicyViolationException("kdf_below_floor", p)
         if (p.memBytes > MAX_MEM_BYTES || p.ops > MAX_OPS) throw KdfPolicyViolationException("kdf_above_ceiling", p)
+        // The whole fence on every served cost, not only on a re-key's target or a served wrap's try: the Argon2id engines
+        // round a memory cost that is not a whole number of KiB differently, so deriving at one could read as a wrong
+        // password on one client and open on another. A server that serves one is at fault, never the password.
+        if (p.memBytes % 1024L != 0L) throw KdfPolicyViolationException(NOT_KIB, p)
+    }
+
+    /** [KdfPolicyViolationException.reason] for a served memory cost that is not a whole number of KiB. */
+    const val NOT_KIB = "kdf_mem_not_kib_multiple"
+
+    /**
+     * The cost a NEW wrap of the master password is made at (spec 01 §7; decided on 2026-11-17): figure by figure, the
+     * higher of what the account already has ([own], each wrap this device knows of it, none when there is no account yet
+     * or the device does not know its cost) and what the server serves ([served]), kept inside this client's own limits.
+     * A server floor raised above an account's cost, or an account that stands above the served cost on one figure and
+     * below it on the other, so both meet a cost the server takes. Before, a registration was made at the fixed default and
+     * a password change or a recovery at the account's own cost raised only where [shouldUpgrade] held: on a server whose
+     * floor was raised, every registration was refused, and an account that straddled the served cost could neither change
+     * its password nor recover on a device that keeps it.
+     *
+     * A [served] cost outside the fence ([withinFence]) is not taken, as before: nothing is derived at it, and the cost is
+     * the one without it. Null [served] (the policy could not be read): the account's own, or the default. The default is
+     * the floor of the result, and every figure is kept inside [MIN_OPS]..[MAX_OPS] and [MIN_MEM_BYTES]..[MAX_MEM_BYTES],
+     * the memory a whole number of KiB. This is the cost of a wrap made; WHEN the quiet raising is due is [shouldUpgrade]'s
+     * alone, unchanged.
+     */
+    fun wrapCost(served: KdfParams?, vararg own: KdfParams?): KdfParams {
+        var ops = KdfParams.DEFAULT.ops
+        var mem = KdfParams.DEFAULT.memBytes
+        val taken = served?.takeIf { withinFence(it) }
+        for (p in listOfNotNull(taken, *own)) {
+            ops = maxOf(ops, p.ops)
+            mem = maxOf(mem, p.memBytes)
+        }
+        ops = ops.coerceIn(MIN_OPS, MAX_OPS)
+        mem = ((mem + 1023L) / 1024L * 1024L).coerceIn(MIN_MEM_BYTES, MAX_MEM_BYTES)
+        return KdfParams(ops = ops, memBytes = mem)
     }
 }
 
@@ -70,7 +135,7 @@ object KdfUpgrade {
  * misconfigured server tried to weaken (or DoS) the master-password KDF (spec 05 T1). Deliberately
  * NOT an ApiException, so generic API error handling cannot relabel it as a transport / auth failure:
  * clients surface it as a distinct "the server sent weakened security settings" warning, never as a
- * wrong-password error. [reason] is `kdf_below_floor` or `kdf_above_ceiling`.
+ * wrong-password error. [reason] is `kdf_below_floor`, `kdf_above_ceiling` or [KdfUpgrade.NOT_KIB].
  */
 class KdfPolicyViolationException(val reason: String, val params: KdfParams) :
     Exception("server KDF params rejected ($reason): ops=${params.ops} memBytes=${params.memBytes}")

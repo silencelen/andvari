@@ -64,7 +64,8 @@ class NetworkSecurityConfigTest {
         val debug = config("debug")
         // A variant resource REPLACES the main file wholesale rather than merging, so the debug
         // overlay must re-list loopback as well as the emulator host.
-        assertEquals(listOf("10.0.2.2", "127.0.0.1"), cleartextDomains(debug))
+        // Debug also lists `localhost`, which the overhaul's origin grammar allows beside 127.0.0.1.
+        assertEquals(listOf("10.0.2.2", "127.0.0.1", "localhost"), cleartextDomains(debug))
         assertEquals("false", baseCleartext(debug), "debug widens ONE host, it does not open the base config")
     }
 

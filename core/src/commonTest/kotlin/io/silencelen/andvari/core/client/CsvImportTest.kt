@@ -59,7 +59,7 @@ class CsvImportTest {
     }
 
     @Test fun bom_stripped() {
-        val p = plan("﻿name,url,username,password,note\nA,https://a,u,p,\n")
+        val p = plan("\uFEFFname,url,username,password,note\nA,https://a,u,p,\n")
         assertEquals(1, p.items.size); assertEquals("A", p.items[0].doc.name)
     }
 

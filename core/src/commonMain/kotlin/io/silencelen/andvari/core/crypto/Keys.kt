@@ -1,15 +1,24 @@
 package io.silencelen.andvari.core.crypto
 
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
-/** spec 01 §1 — per-user KDF parameters, server-stored and cached beside wrappedUvk. */
+/**
+ * spec 01 §1 — per-user KDF parameters, server-stored and cached beside wrappedUvk.
+ *
+ * Every field is encoded at its default too (spec 03 §0.1 "Field presence"): a serialiser that leaves
+ * out default values sent `kdfParams` as `{}`, a client in another language had to guess the defaults,
+ * and a later change of them would have made every sign-in there look like a wrong password.
+ */
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class KdfParams(
-    @SerialName("v") val v: Int = 1,
-    @SerialName("alg") val alg: String = "argon2id13",
-    @SerialName("ops") val ops: Long = 3,
-    @SerialName("memBytes") val memBytes: Long = 67_108_864,
+    @EncodeDefault @SerialName("v") val v: Int = 1,
+    @EncodeDefault @SerialName("alg") val alg: String = "argon2id13",
+    @EncodeDefault @SerialName("ops") val ops: Long = 3,
+    @EncodeDefault @SerialName("memBytes") val memBytes: Long = 67_108_864,
 ) {
     init {
         require(v == 1 && alg == "argon2id13") { "unsupported kdfParams" }

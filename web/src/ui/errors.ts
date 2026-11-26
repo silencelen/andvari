@@ -1,4 +1,5 @@
-import { ApiError } from "../api/client";
+import { answerLimitOf, ApiError, RefreshUnansweredError } from "../api/client";
+import { ANSWER_STALLED, ANSWER_TOO_LONG, RENEWAL_NOT_SAVED } from "./copy";
 
 /**
  * A transport-level failure: the fetch rejected before any HTTP response arrived
@@ -34,6 +35,27 @@ export async function net<T>(p: Promise<T>): Promise<T> {
 
 /** The one canonical "can't reach the server" sentence, reused across auth surfaces. */
 export const UNREACHABLE = "Can't reach the andvari server — check your connection (and your VPN, if your server is private), then try again.";
+
+/**
+ * The sentence for a request one of the client's two limits ended (api/client.ts): the server stopped answering in the
+ * middle of an answer that grows, or a small answer took too long. Null when no limit ended it. Every place that shows a
+ * failed request's line asks this first, so a limit is never said as "can't reach the server" or as a silent failure.
+ */
+export function answerLimitText(e: unknown): string | null {
+  if (renewalNotSaved(e)) return RENEWAL_NOT_SAVED;
+  const kind = answerLimitOf(e);
+  return kind === "stalled" ? ANSWER_STALLED : kind === "too_long" ? ANSWER_TOO_LONG : null;
+}
+
+/** A request whose session renewal sent nothing because the mark of it could not be saved (RefreshUnansweredError `not_kept`). */
+function renewalNotSaved(e: unknown): boolean {
+  let x: unknown = e;
+  for (let depth = 0; depth < 4 && x !== null && x !== undefined; depth++) {
+    if (x instanceof RefreshUnansweredError) return x.kind === "not_kept";
+    x = typeof x === "object" ? (x as { cause?: unknown }).cause : undefined;
+  }
+  return false;
+}
 
 /** Policy/settings fetch failed — deliberately neutral between "unreachable" and "server
  *  errored", because the caller can't always tell and must not send users VPN-debugging

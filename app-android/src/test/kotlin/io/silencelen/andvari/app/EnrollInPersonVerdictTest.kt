@@ -109,10 +109,8 @@ class EnrollInPersonVerdictTest {
         assertTrue(entry.contains("val inPersonVerified = inPersonVerdict("), "enrollOp re-asserts the verdict at the state layer")
         assertFalse(entry.contains("inPersonVerified: Boolean"), "and takes no verdict from the form")
         assertTrue(vm.contains("EnrollRequest(invite, email, name, password, waived, typedShortFp, gatePolicy, affirmedRfp, linkPayload, inPersonEntry, inPersonAffirmed, inviteProvenance)"), "the raw evidence crosses to core")
-        val main = code(mainSource)
-        assertTrue(main.contains("inPersonEntry = inPersonEntry"), "the form hands over the RAW typed code")
-        assertTrue(main.contains("inPersonAffirmed = affirmed"), "…the human's first-person affirmation")
-        assertTrue(main.contains("inviteProvenance = inviteProvenance"), "…and the field's provenance, for the state layer to judge")
-        assertFalse(main.contains("inPersonVerified = "), "the form no longer pre-computes the verdict for the state layer")
+        // The form half of this pin went with the old EnrollForm; nothing in the activity may
+        // pre-compute the verdict again.
+        assertFalse(code(mainSource).contains("inPersonVerified = "), "the form no longer pre-computes the verdict for the state layer")
     }
 }

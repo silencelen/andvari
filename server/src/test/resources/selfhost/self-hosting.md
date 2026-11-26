@@ -5,7 +5,7 @@ server/build.gradle.kts processResources — this fixture shadows it on the TEST
 
 <script>alert("must-be-escaped")</script>
 
-- run `bringup.sh` once
+- run `andvari setup` once
 - point any andvari app at **your origin**
 - docs: [example](https://example.com/docs)
 

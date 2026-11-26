@@ -150,7 +150,9 @@ object SignedGrant {
         if (st.to != myUserId || !Bytes.ctEquals(st.toKey, myIdentityPub)) return GrantOutcome.Refused(GrantVerdict.MISADDRESSED)
         if (st.vaultId != rowVaultId) return GrantOutcome.Refused(GrantVerdict.VAULT_MISMATCH)
         val vk = st.vk
-        if (vk.size != 32) return GrantOutcome.Refused(GrantVerdict.BAD_VK)
+        // A vault key of 32 zero bytes is a bad key, never one to adopt, as the new line's commitment refuses it: every
+        // later open under it would be refused by the key floor as if the account were locked (spec 01, keys in memory).
+        if (vk.size != 32 || KeyFloor.allZero(vk)) return GrantOutcome.Refused(GrantVerdict.BAD_VK)
         if (heldVk != null && !Bytes.ctEquals(heldVk, vk)) return GrantOutcome.Refused(GrantVerdict.VK_MISMATCH)
         return GrantOutcome.Adopted(vk, st.from, Bytes.toB64(st.grantId), st.issuedAt)
     }

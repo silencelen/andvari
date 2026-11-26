@@ -1,11 +1,10 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { adVaultMeta } from "../crypto/ad";
-import { fromB64, toB64, utf8 } from "../crypto/bytes";
+import { toB64, utf8 } from "../crypto/bytes";
 import { seal } from "../crypto/envelope";
 import { fingerprint } from "../crypto/escrow";
 import type { KdfParams } from "../crypto/keys";
 import { boxKeypairFromSeed, randomBytes } from "../crypto/provider";
-import { openSharedGrant } from "../crypto/sharedgrant";
 import { initSodium } from "../crypto/sodium";
 import { Account, MalformedVaultMetaError } from "./account";
 
@@ -35,10 +34,12 @@ describe("vault meta shape (A11 q55)", () => {
 
   it("a non-object meta plaintext is refused on read and replaced cleanly on rename", async () => {
     const owner = await enroll();
-    const { vaultId } = owner.buildCreateSharedVault("Family");
-    // A co-member's view of the same VK (any holder can seal a meta blob).
-    const kp = boxKeypairFromSeed(randomBytes(32));
-    const vk = openSharedGrant(kp.publicKey, kp.privateKey, vaultId, fromB64(owner.wrapVkForMember(kp.publicKey, vaultId)));
+    // A shared vault whose key the verified log gave this account (design §3.6), as an owner who may write; a
+    // co-member holds the same VK and can seal any meta blob under it.
+    const vaultId = owner.newItemId();
+    const vk = randomBytes(32);
+    owner.logKeyRing().set(vaultId, vk.slice());
+    owner.attachLogRoles((id) => (id === vaultId ? "owner" : null), (id) => id === vaultId);
     for (const junk of ["null", '"abc"', "[1,2,3]", "7", "true"]) {
       const blob = toB64(seal(vk, utf8(junk), adVaultMeta(vaultId)));
       expect(() => owner.decryptVaultMeta(vaultId, blob), junk).toThrow(MalformedVaultMetaError);

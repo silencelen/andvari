@@ -27,7 +27,7 @@ object MemberRecovery {
 
     /** Strip ASCII whitespace the way the printed sheet may hard-wrap it. base64url's alphabet
      *  includes `-` and `_`, so only whitespace is a safe separator to drop (mirrors [EnrollLink]). */
-    private const val WHITESPACE = " \t\n\r"
+    private const val WHITESPACE = " \t\n\r\u000B\u000C"
 
     /** HKDF-SHA-256(recoverySecret, "andvari/v1/recovery-wrap", 32) — the KEK that wraps the UVK. */
     fun wrapKey(crypto: CryptoProvider, recoverySecret: ByteArray): ByteArray =
@@ -88,7 +88,8 @@ object MemberRecovery {
      * TOTAL (never throws) — it runs in UI layers. Strips hard-wrap whitespace, then base64url-decodes.
      */
     fun parseSecret(typed: String): ByteArray? = try {
-        Bytes.fromB64(typed.filterNot { it in WHITESPACE })
+        // A secret of zeros is not a phrase, never "locked": the floor would refuse its HKDF.
+        Bytes.fromB64(typed.filterNot { it in WHITESPACE }).takeUnless { KeyFloor.allZero(it) }
     } catch (_: CryptoException) {
         null
     }

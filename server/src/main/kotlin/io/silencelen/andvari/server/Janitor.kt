@@ -1,352 +1,124 @@
 package io.silencelen.andvari.server
 
 /**
- * Vault-lifecycle + retention janitor (spec 02 §7 / spec 03 §11; designs 2026-07-07
- * skipti §4 step 6 and 2026-07-10 n2 §5). The sweep set: (a) purge vaults past their
- * grace window, (b) expire transfer offers past expiresAt, (c) purge item tombstones
- * past [ITEM_TOMBSTONE_RETENTION_MS], (d) prune `changes` below the fence AND advance
- * `oldestRetainedRev` in the same tx — floored at MAX(rev) so `currentRev` never
- * regresses (spec 02 §7 invariants (a)+(b)), (e)–(h) prune dead sessions
- * ([SESSION_RETENTION_MS]) and then the device rows those sessions were the last evidence
- * of (H25 — same horizon, session-less rows only), the mutation-dedup journal ([MUTATION_RETENTION_MS]),
- * audit rows ([AUDIT_RETENTION_MS]) and dead invites ([INVITE_RETENTION_MS]). The old (i),
- * stale hibp_cache rows, went with the table itself in schema v11 (Db.purgeHibpCache); the
- * current (i) prunes a deleted account's pseudonymised audit rows 90 days after the deletion
- * (spec 03 §13, design 2026-11-10-account-deletion).
- * The changes fence REUSES the item-tombstone horizon by construction: any cursor old
- * enough to have missed a purged tombstone is behind the fence too, so it gets 410 → full
- * resync instead of resurrecting deletions.
+ * The janitor (spec 03 §11.1, §15.8, §16.2, §18; spec 02 §7): daily at 04:30 and once after boot.
  *
- * Purge is andvari's first data-destruction code (design §14.1), so every destructive
- * statement re-checks `deletedAt/purgeAt/purgedAt` INSIDE the per-vault tx (closes the
- * purge-vs-restore race even if the single-connection lock is ever relaxed), blob files
- * are unlinked only POST-commit outside the DB lock in small batches (the hourly orphan
- * sweep is the crash backstop), and ANDVARI_JANITOR_DRYRUN turns the whole sweep into
- * log-only for the first armed week.
+ * - vaults past their grace are purged, keeping the tombstone and the log for a year; a year after the
+ *   purge the log rows go (the vault row stays, so a vault id is never recycled);
+ * - expired ownership offers are cleared;
+ * - open links past expiry become `expired`, and rows that left `open` 30 days ago are deleted
+ *   (`connections` are never touched);
+ * - device links past their state's timeout, sign-up codes and tickets, and dead recovery requests go;
+ * - item tombstones past 30 days go and the `changes` fence (`oldestRetainedRev`) advances with them;
+ * - dead sessions, the mutation journal (180 days), audit rows (365 days) and a deleted account's
+ *   pseudonymised rows (90 days after its deletion).
  *
- * Retained forever: the vault tombstone row (metaBlob blanked, vaultId never recycled) and
- * ALL grant rows (key material blanked: wrappedVk='' — the NOT NULL sentinel —, sealedVk=NULL
- * and the v14 signedGrant=NULL (a sealed SignedStatement carrying the VK; security review
- * 2026-10, q43), active and previously-revoked alike) — those two are what deny a push
- * against the purged vault itself for every stale client forever (role==null; the item row
- * is never read on that path, so the edit-over-tombstone fence never applies post-purge).
- * Item rows become ciphertext-free skeletal tombstones (deleted=1, blob=NULL, NO rev bump —
- * revoked members receive nothing; updatedAt restamped to the purge instant) and then age
- * out through rule (c) like every other tombstone — deliberately NO vault filter there.
- * Their one post-purge reader is the vault_mismatch teleport fence (applyMutation's global
- * itemById), and one horizon is enough by a TWO-legged argument: (1) a cursor predating
- * the DELETE has sat behind `oldestRetainedRev` for at least the full grace window by
- * skeletal ageout (410 → full resync → vault absent); (2) a cursor minted DURING grace
- * was minted by a pull that already delivered the revoked grant (removedGrantsInfo), so
- * vault-absent holds by delivery — that cursor may never 410 at all on an idle server
- * (MAX(rev) fence floor + strict since<fence). Either leg ends vault-absent, so a
- * post-horizon teleport re-push degrades into the accepted re-add class (see (f) and
- * Repo.purgeItem): a clean INSERT of the pusher's OWN re-encrypted copy into their OWN
- * vault, delivered to nobody else. Pinned in JanitorTest.
+ * Device rows are never pruned (only an account deletion removes them): a device whose secret hash is set
+ * must stay a known device (spec 03 §16.8) however long ago its last session died, and a revoked one keeps
+ * its row for the devices list.
+ *
+ * Under `ANDVARI_JANITOR_DRYRUN` nothing is destroyed; each step says what it would do.
  */
-class Janitor(
-    private val repo: Repo,
-    private val attachments: AttachmentStore,
-    private val config: Config,
-    private val onChange: suspend (userIds: Collection<String>, rev: Long) -> Unit = { _, _ -> },
-) {
-    class SweepResult(
-        val purgedVaults: List<String>,
-        val expiredOffers: List<String>,
-        val purgedItemTombstones: List<String>,
-        // Per-table prune counts (design 2026-07-10 n2 §5): rows deleted, or — in dry-run —
-        // rows that WOULD have been deleted (nothing is deleted, the fence does not move).
-        val prunedChanges: Long,
-        val prunedSessions: Long,
-        val prunedDevices: Long,
-        val prunedMutations: Long,
-        val prunedAudit: Long,
-        val prunedInvites: Long,
-        val dryRun: Boolean,
-        /** (i) rows of deleted accounts past their 90-day window (design 2026-11-10). */
-        val prunedDeletedAccountAudit: Long = 0,
-    )
-
-    suspend fun sweep(nowMs: Long = now()): SweepResult = SweepResult(
-        purgedVaults = purgeDueVaults(nowMs),
-        expiredOffers = expireTransferOffers(nowMs),
-        purgedItemTombstones = purgeOldItemTombstones(nowMs),
-        prunedChanges = pruneChanges(nowMs),
-        prunedSessions = pruneOldSessions(nowMs),
-        prunedDevices = pruneOrphanDevices(nowMs), // after sessions: a row orphaned by THIS sweep goes in the same pass
-        prunedMutations = pruneOldMutations(nowMs),
-        prunedAudit = pruneOldAudit(nowMs),
-        prunedInvites = pruneOldInvites(nowMs),
-        dryRun = config.janitorDryRun,
-        prunedDeletedAccountAudit = pruneDeletedAccountAudit(nowMs),
-    )
-
-    // ---- (c) F49: item-tombstone retention (30 days) ----
-
-    /** Hard-delete item tombstones deleted more than 30 days ago (+ their archived versions), so
-     *  Trash is bounded. Deliberately NO vault filter: purged vaults' skeletal tombstones ride the
-     *  same horizon (purgeVault restamps their updatedAt, so they get the full window from purge —
-     *  see the header). Dry-run aware; failures are logged, never thrown. Returns the purged ids. */
-    fun purgeOldItemTombstones(nowMs: Long): List<String> {
-        val cutoff = nowMs - ITEM_TOMBSTONE_RETENTION_MS
-        val due = repo.db.read { c ->
-            c.queryAll("SELECT itemId FROM items WHERE deleted=1 AND updatedAt<?", cutoff) { it.getString(1) }
-        }
-        if (due.isEmpty()) return emptyList()
-        if (config.janitorDryRun) {
-            System.err.println("[andvari] janitor DRY-RUN: would purge ${due.size} item tombstone(s) past 30d")
-            return emptyList()
-        }
-        return runCatching { repo.db.tx { c -> repo.purgeOldTombstones(c, cutoff) } }
-            .onFailure { System.err.println("[andvari] janitor: item-tombstone purge failed: $it") }
-            .getOrDefault(emptyList())
+class Janitor(private val s: Services) {
+    companion object {
+        const val ITEM_TOMBSTONE_RETENTION_MS = 30 * Clock.DAY_MS
+        const val TOMBSTONE_LOG_RETENTION_MS = 365 * Clock.DAY_MS
+        const val LINK_RETENTION_MS = 30 * Clock.DAY_MS
+        const val SESSION_RETENTION_MS = 90 * Clock.DAY_MS
+        const val MUTATION_RETENTION_MS = 180 * Clock.DAY_MS
+        const val AUDIT_RETENTION_MS = 365 * Clock.DAY_MS
     }
 
-    // ---- (d) F49: `changes` pruning + oldestRetainedRev fence advancement ----
+    private val dry get() = s.config.janitorDryRun
+
+    fun sweep(nowMs: Long = s.clock.now()) {
+        step("vault purge") { purgeDueVaults(nowMs) }
+        step("tombstone logs") { prune("vault_log", "vaultId IN (SELECT vaultId FROM vaults WHERE purgedAt IS NOT NULL AND purgedAt<?)", nowMs - TOMBSTONE_LOG_RETENTION_MS) }
+        step("offers") {
+            if (dry) 0 else s.db.tx { c -> c.exec("UPDATE vaults SET pendingOfferId=NULL, pendingOwnerId=NULL, pendingOfferExpiresAt=NULL WHERE pendingOfferExpiresAt<?", nowMs).toLong() }
+        }
+        step("links expire") {
+            if (dry) 0 else s.db.tx { c -> c.exec("UPDATE links SET state='expired', stateChangedAt=? WHERE state='open' AND expiresAt<=?", nowMs, nowMs).toLong() }
+        }
+        step("links") { prune("links", "state<>'open' AND stateChangedAt<?", nowMs - LINK_RETENTION_MS) }
+        step("device links") {
+            prune(
+                "device_links",
+                """(state='open' AND expiresAt<=?1) OR (state='claimed' AND claimedAt<=?2) OR (state='revealed' AND revealedAt<=?2) OR (state='approved' AND approvedAt<=?2)""",
+                nowMs, nowMs - DeviceLinks.STATE_TTL_MS,
+            )
+        }
+        step("signup codes") { prune("signup_codes", "expiresAt<=?", nowMs) }
+        step("signup tickets") { prune("signup_tickets", "expiresAt<=?", nowMs) }
+        step("recovery requests") {
+            prune(
+                "recovery_requests",
+                """(state='unverified' AND createdAt<=?1) OR (state IN ('verified','fulfilled') AND holdEndsAt<=?2) OR (state='vetoed' AND createdAt<=?3)""",
+                nowMs - Assisted.UNVERIFIED_TTL_MS, nowMs - Assisted.AFTER_HOLD_TTL_MS, nowMs - Assisted.AFTER_HOLD_TTL_MS,
+            )
+        }
+        step("recovery mailbox values") { prune("recovery_mailbox_values", "expiresAt<=?", nowMs) }
+        step("item tombstones") {
+            if (dry) 0 else s.db.tx { c ->
+                val cutoff = nowMs - ITEM_TOMBSTONE_RETENTION_MS
+                c.exec("DELETE FROM item_versions WHERE itemId IN (SELECT itemId FROM items WHERE deleted=1 AND updatedAt<?)", cutoff)
+                c.exec("DELETE FROM items WHERE deleted=1 AND updatedAt<?", cutoff).toLong()
+            }
+        }
+        step("changes fence") { pruneChanges(nowMs) }
+        step("sessions") { prune("sessions", "(revokedAt IS NOT NULL AND revokedAt<?1) OR refreshExpiresAt<?1", nowMs - SESSION_RETENTION_MS) }
+        // A chain row whose session is gone: pruned above, or deleted by a server of the version before, which does not
+        // know the table (spec 02 §5 `session_chains`).
+        step("session chains") { prune("session_chains", "sessionId NOT IN (SELECT sessionId FROM sessions)") }
+        step("mutations") { prune("mutations", "createdAt<?", nowMs - MUTATION_RETENTION_MS) }
+        step("audit") { prune("audit", "at<?", nowMs - AUDIT_RETENTION_MS) }
+        step("deleted-account audit") {
+            prune("audit", "userId IN (SELECT userId FROM audit WHERE type='account_delete' AND at<?)", nowMs - AccountDeletion.AUDIT_RETENTION_MS)
+        }
+    }
+
+    private fun step(label: String, block: () -> Long) {
+        runCatching(block)
+            .onSuccess { n -> if (n > 0) System.err.println("[andvari] janitor${if (dry) " DRY-RUN" else ""}: $label: $n") }
+            .onFailure { System.err.println("[andvari] janitor: $label failed: $it") }
+    }
+
+    private fun prune(table: String, where: String, vararg args: Any?): Long =
+        if (dry) s.db.read { c -> c.count("SELECT COUNT(*) FROM $table WHERE $where", *args) }
+        else s.db.tx { c -> c.exec("DELETE FROM $table WHERE $where", *args).toLong() }
+
+    /** Purge every vault whose grace ended (spec 03 §11.1); each in its own transaction that re-checks it is still due. */
+    fun purgeDueVaults(nowMs: Long): Long {
+        val due = s.db.read { c -> c.queryAll("SELECT vaultId FROM vaults WHERE deletedAt IS NOT NULL AND purgedAt IS NULL AND purgeAt<=?", nowMs) { it.getString(1) } }
+        if (dry) return due.size.toLong()
+        var n = 0L
+        for (v in due) {
+            val files = s.db.tx { c ->
+                val still = c.queryOne("SELECT 1 FROM vaults WHERE vaultId=? AND deletedAt IS NOT NULL AND purgedAt IS NULL AND purgeAt<=?", v, nowMs) { 1 } != null
+                if (!still) return@tx null
+                Purge.vault(s, c, v, nowMs, keepLog = true)
+            } ?: continue
+            s.attachments.unlinkOrphaned(files)
+            n++
+        }
+        if (n > 0) s.db.checkpointTruncate()
+        return n
+    }
 
     /**
-     * Prune `changes` rows below the fence and advance `oldestRetainedRev` in the SAME tx
-     * (spec 02 §7 invariants (a)+(b); design 2026-07-10 n2 §5 + amendments B1/A-fence).
-     * The horizon IS [ITEM_TOMBSTONE_RETENTION_MS] — one constant, never split: a cursor
-     * that predates the fence also predates every purged item tombstone, so it 410s into
-     * a full resync (Service.pull → ResyncRequired) instead of silently keeping deleted
-     * items forever. H is floored at MAX(rev): on an idle server (every row stale) only
-     * the newest row is retained, so `currentRev` (= MAX(rev)) never regresses — a
-     * regression would wedge every up-to-date client in 409 rev_regression until the
-     * next write. Rows below the fence serve no reads (pulls only INSERT + MAX(rev) this
-     * table). Dry-run counts without deleting and does NOT move the fence.
+     * Prune `changes` behind the 30-day horizon and advance `oldestRetainedRev` in the same transaction; the
+     * newest row always stays (the fence never passes MAX(rev), so `currentRev` never regresses).
      */
     fun pruneChanges(nowMs: Long): Long {
         val cutoff = nowMs - ITEM_TOMBSTONE_RETENTION_MS
-        if (config.janitorDryRun) {
-            val n = repo.db.read { c ->
-                val maxRev = c.queryOne("SELECT MAX(rev) FROM changes") { rs ->
-                    rs.getLong(1).let { if (rs.wasNull()) null else it }
-                } ?: return@read 0L // empty table: nothing to fence
-                val h = c.queryOne("SELECT MIN(rev) FROM changes WHERE at>=?", cutoff) { rs ->
-                    rs.getLong(1).let { if (rs.wasNull()) null else it }
-                } ?: maxRev
-                if (h <= repo.oldestRetainedRev(c)) 0L
-                else c.queryOne("SELECT COUNT(*) FROM changes WHERE rev<?", h) { it.getLong(1) } ?: 0L
-            }
-            if (n > 0) System.err.println("[andvari] janitor DRY-RUN: would prune $n changes row(s) and advance oldestRetainedRev")
-            return n
+        return s.db.tx { c ->
+            val maxRev = c.queryOne("SELECT MAX(rev) FROM changes") { it.longOrNull("MAX(rev)") } ?: return@tx 0L
+            val h = c.queryOne("SELECT MIN(rev) FROM changes WHERE at>=?", cutoff) { it.longOrNull("MIN(rev)") } ?: maxRev
+            val fence = c.queryOne("SELECT value FROM meta WHERE key='oldestRetainedRev'") { it.getString(1).toLong() } ?: 0L
+            if (h <= fence || dry) return@tx 0L
+            val n = c.exec("DELETE FROM changes WHERE rev<?", h).toLong()
+            c.exec("INSERT INTO meta(key,value) VALUES('oldestRetainedRev',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", h.toString())
+            n
         }
-        return runCatching {
-            val (pruned, from, to) = repo.db.tx { c ->
-                val maxRev = c.queryOne("SELECT MAX(rev) FROM changes") { rs ->
-                    rs.getLong(1).let { if (rs.wasNull()) null else it }
-                } ?: return@tx Triple(0L, 0L, 0L) // empty table: skip the rule entirely
-                // H = oldest rev still inside the horizon; if NO row qualifies (idle
-                // server) H = MAX(rev), retaining exactly the newest row (B1).
-                val h = c.queryOne("SELECT MIN(rev) FROM changes WHERE at>=?", cutoff) { rs ->
-                    rs.getLong(1).let { if (rs.wasNull()) null else it }
-                } ?: maxRev
-                val fence = repo.oldestRetainedRev(c)
-                if (h <= fence) return@tx Triple(0L, fence, fence) // never move the fence backwards
-                val n = c.exec("DELETE FROM changes WHERE rev<?", h).toLong()
-                // Same-tx fence advance (invariant (b)). Raw upsert — NEVER repo.setMeta
-                // here: it opens its own tx and Db.tx is not reentrant (a nested tx
-                // commits the outer work mid-flight; see the auditOn/audit split in Repo).
-                c.exec(
-                    "INSERT INTO meta(key,value) VALUES('oldestRetainedRev',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    h.toString(),
-                )
-                Triple(n, fence, h)
-            }
-            if (to > from) System.err.println("[andvari] janitor: pruned $pruned changes row(s); oldestRetainedRev $from -> $to")
-            pruned
-        }.onFailure { System.err.println("[andvari] janitor: changes prune failed: $it") }
-            .getOrDefault(0L)
-    }
-
-    // ---- (e)–(h) F49: bounded-retention prunes (sessions/devices/mutations/audit/invites) ----
-
-    /** Shared shape of the simple retention rules: one bounded DELETE, dry-run counts only. */
-    private fun prune(table: String, label: String, where: String, vararg args: Any?): Long {
-        if (config.janitorDryRun) {
-            val n = repo.db.read { c -> c.queryOne("SELECT COUNT(*) FROM $table WHERE $where", *args) { it.getLong(1) } ?: 0L }
-            if (n > 0) System.err.println("[andvari] janitor DRY-RUN: would delete $n $label")
-            return n
-        }
-        return runCatching {
-            repo.db.tx { c -> c.exec("DELETE FROM $table WHERE $where", *args).toLong() }
-                .also { if (it > 0) System.err.println("[andvari] janitor: deleted $it $label") }
-        }.onFailure { System.err.println("[andvari] janitor: $label prune failed: $it") }
-            .getOrDefault(0L)
-    }
-
-    /** (e) Dead sessions: revoked >90d ago, or refresh chain expired >90d ago. Rotation does
-     *  NOT set revokedAt (it stamps refreshConsumedAt + inserts a fresh row), so the expiry leg
-     *  is what ages out the ~24 consumed rows/day a healthy device accretes (amendment B2).
-     *  Accepted trade: a consumed token replayed >90d after expiry now yields invalid_refresh
-     *  instead of the refresh_reuse theft-signal + device revoke (unusable either way). */
-    fun pruneOldSessions(nowMs: Long): Long {
-        val cutoff = nowMs - SESSION_RETENTION_MS
-        return prune("sessions", "dead session row(s) past 90d", "(revokedAt IS NOT NULL AND revokedAt<?) OR refreshExpiresAt<?", cutoff, cutoff)
-    }
-
-    /** (e2) H25 (audit 2026-09-13): device rows with NO session rows left. issueSession inserts a
-     *  device and its first session in one tx, so a device with zero sessions is one whose every
-     *  session rule (e) has already aged out — dead for ≥90 d by construction; the createdAt belt
-     *  keeps a row that is mid-insert on a relaxed lock out of the sweep. Before this no rule ever
-     *  touched `devices`, so every login's fresh row (and every signed-out phone) lived forever and
-     *  the Admin device list grew monotonically with sign-ins. Runs AFTER (e) in the same sweep so
-     *  a row orphaned today is gone today. Only session-less rows: sessions.deviceId is a FK, and
-     *  a device that still has any session row — live, revoked or expired-but-inside-90d — is
-     *  still evidence an admin may want. audit.deviceId / mutations.deviceId / member_recovery.
-     *  setupDeviceId are plain text columns, not FKs, and none dereferences the device row. */
-    fun pruneOrphanDevices(nowMs: Long): Long {
-        val cutoff = nowMs - SESSION_RETENTION_MS
-        return prune(
-            "devices", "session-less device row(s) past 90d",
-            "createdAt<? AND NOT EXISTS(SELECT 1 FROM sessions s WHERE s.deviceId = devices.deviceId)", cutoff,
-        )
-    }
-
-    /** (f) Mutation-dedup journal >180d. Accepted residual: a >180d replay of a put whose item
-     *  tombstone was ALSO purged resurrects the item as a clean `applied` INSERT (Service.applyPut
-     *  existing==null) — same accepted class as the offline-re-add note on Repo.purgeItem. */
-    fun pruneOldMutations(nowMs: Long): Long =
-        prune("mutations", "mutation-journal row(s) past 180d", "createdAt<?", nowMs - MUTATION_RETENTION_MS)
-
-    /** (g) Audit rows >365d. The off-box copy ships via logback → journald → Loki (PROD-1),
-     *  so the local year is a floor, not the only record. */
-    fun pruneOldAudit(nowMs: Long): Long =
-        prune("audit", "audit row(s) past 365d", "at<?", nowMs - AUDIT_RETENTION_MS)
-
-    /**
-     * (i) Account deletion (spec 03 §13, design 2026-11-10): a deleted account's security events were kept under a fresh
-     * pseudonym (its own rows' userId), and they go [AccountDeletion.AUDIT_RETENTION_MS] after the DELETION — the
-     * window an incident review that starts from the deletion needs, whatever the age of the events themselves. The
-     * deletion's own `account_delete` row carries the pseudonym and the instant, so it is the clock; it matches its own
-     * predicate and goes with the rest. Rows of OTHER accounts that mention the pseudonym in meta (an admin's
-     * `user_disable`, an owner's `vault_member_add`) are those accounts' history and keep the ordinary rule (g).
-     */
-    fun pruneDeletedAccountAudit(nowMs: Long): Long = prune(
-        "audit", "deleted-account audit row(s) past 90d",
-        "userId IN (SELECT userId FROM audit WHERE type='account_delete' AND at<?)",
-        nowMs - AccountDeletion.AUDIT_RETENTION_MS,
-    )
-
-    /** (h) Dead invites: used >30d ago, or expired >30d ago (the admin UI lists only live ones). */
-    fun pruneOldInvites(nowMs: Long): Long {
-        val cutoff = nowMs - INVITE_RETENTION_MS
-        return prune("invites", "dead invite row(s) past 30d", "(usedAt IS NOT NULL AND usedAt<?) OR expiresAt<?", cutoff, cutoff)
-    }
-
-    // ---- (a) vault purge ----
-
-    fun purgeDueVaults(nowMs: Long): List<String> {
-        val due = repo.db.read { c ->
-            c.queryAll(
-                "SELECT vaultId FROM vaults WHERE deletedAt IS NOT NULL AND purgeAt IS NOT NULL AND purgeAt<=? AND purgedAt IS NULL",
-                nowMs,
-            ) { it.getString(1) }
-        }
-        val purged = mutableListOf<String>()
-        for (vaultId in due) {
-            if (config.janitorDryRun) {
-                System.err.println("[andvari] janitor DRY-RUN: would purge vault $vaultId")
-                continue
-            }
-            runCatching { if (purgeVault(vaultId, nowMs)) purged.add(vaultId) }
-                .onFailure { System.err.println("[andvari] janitor: purge of $vaultId failed: $it") }
-        }
-        return purged
-    }
-
-    /**
-     * Purge ONE vault in one tx. Returns false (untouched) when the in-tx re-check finds
-     * the vault no longer due — restored, already purged, or not deleted (the fence).
-     * Internal so the restore-vs-purge fence is directly testable.
-     */
-    internal fun purgeVault(vaultId: String, nowMs: Long): Boolean {
-        // Every destructive statement carries this guard as an EXISTS clause; the final
-        // purgedAt stamp uses it as its own WHERE and must hit exactly one row or the
-        // whole tx rolls back.
-        val guard = "SELECT 1 FROM vaults WHERE vaultId=? AND deletedAt IS NOT NULL AND purgeAt<=? AND purgedAt IS NULL"
-        val files = mutableListOf<String>()
-        val purged = repo.db.tx { c ->
-            if (c.queryOne(guard, vaultId, nowMs) { 1 } == null) return@tx false
-            // The destructive statements live in Repo.purgeVaultContents, shared with account deletion (design
-            // 2026-11-10) so a new key-carrier column is blanked by both: archived versions + attachment rows go
-            // (blob paths collected first; unlink happens post-commit), item rows become skeletal tombstones with
-            // NO rev bump and updatedAt restamped to the purge instant (rule (c) then gives every skeletal row the
-            // FULL tombstone horizon from PURGE — retention story in the class header), and ALL grants' key
-            // material is wiped, active AND previously-revoked (a removed member's sealedVk must not survive the
-            // purge; the v14 signedGrant too — q43). Every statement carries this guard as an EXISTS clause.
-            files += repo.purgeVaultContents(c, vaultId, nowMs, guard, vaultId, nowMs)
-            val stamped = c.exec(
-                "UPDATE vaults SET metaBlob='', purgedAt=? WHERE vaultId=? AND deletedAt IS NOT NULL AND purgeAt<=? AND purgedAt IS NULL",
-                nowMs, vaultId, nowMs,
-            )
-            check(stamped == 1) { "vault purge fence failed for $vaultId" } // rolls the tx back
-            repo.auditOn(c, "vault_purge", null, null, null, vaultId)
-            true
-        }
-        if (purged) {
-            // Server scan 2026-10-26 (F5): the blanked grant key columns and deleted ciphertext were
-            // zeroed in the main file by secure_delete; flush + truncate the WAL so no pre-purge page
-            // image survives there either. Outside the tx, before the file unlinks.
-            repo.db.checkpointTruncate()
-            // Post-commit, outside the DB lock, in small batches. Failures are left to the
-            // hourly attachment orphan sweep (rows are gone, so the files are orphans).
-            files.chunked(UNLINK_BATCH).forEach { batch -> batch.forEach { runCatching { attachments.file(it).delete() } } }
-        }
-        return purged
-    }
-
-    // ---- (b) transfer-offer expiry ----
-
-    suspend fun expireTransferOffers(nowMs: Long): List<String> {
-        val due = repo.db.read { c ->
-            c.queryAll(
-                "SELECT vaultId FROM vaults WHERE pendingOfferId IS NOT NULL AND pendingOfferExpiresAt IS NOT NULL AND pendingOfferExpiresAt<=?",
-                nowMs,
-            ) { it.getString(1) }
-        }
-        val expired = mutableListOf<String>()
-        for (vaultId in due) {
-            if (config.janitorDryRun) {
-                System.err.println("[andvari] janitor DRY-RUN: would expire transfer offer on vault $vaultId")
-                continue
-            }
-            val (rev, notify, didExpire) = repo.db.tx { c ->
-                // In-tx re-check: an accept/cancel may have raced the due-list read.
-                val pending = c.queryOne(
-                    "SELECT pendingOwnerId, pendingOfferExpiresAt FROM vaults WHERE vaultId=? AND pendingOfferId IS NOT NULL",
-                    vaultId,
-                ) { rs -> rs.getString(1) to rs.getLong(2) } ?: return@tx Triple(0L, emptySet<String>(), false)
-                if (pending.second > nowMs) return@tx Triple(0L, emptySet<String>(), false)
-                val members = c.queryAll(
-                    "SELECT userId FROM grants WHERE vaultId=? AND revokedAt IS NULL", vaultId,
-                ) { it.getString(1) }.toSet()
-                // Shared clear helper (#9): same pending-clear + rev bump (banner re-delivery)
-                // as Service's cancel path; the janitor writes its own vault_transfer_expire audit.
-                repo.clearPendingOffer(c, vaultId, bumpVaultRev = true)
-                repo.auditOn(c, "vault_transfer_expire", null, null, null, "$vaultId:${pending.first}")
-                Triple(repo.currentRev(c), members, true)
-            }
-            if (didExpire) {
-                expired.add(vaultId)
-                if (notify.isNotEmpty()) onChange(notify, rev)
-            }
-        }
-        return expired
-    }
-
-    companion object {
-        private const val UNLINK_BATCH = 50
-
-        // Retention horizons (design 2026-07-10 n2 §5 + amendments; named here, no config sprawl).
-        /** Item-tombstone retention AND the `changes`/`oldestRetainedRev` fence horizon — ONE
-         *  constant BY CONSTRUCTION (amendment A-fence), so the two can never drift apart: a
-         *  cursor older than the fence is older than every purged tombstone and full-resyncs. */
-        internal const val ITEM_TOMBSTONE_RETENTION_MS = 30 * Service.DAY_MS
-        internal const val SESSION_RETENTION_MS = 90 * Service.DAY_MS
-        internal const val MUTATION_RETENTION_MS = 180 * Service.DAY_MS
-        internal const val AUDIT_RETENTION_MS = 365 * Service.DAY_MS
-        internal const val INVITE_RETENTION_MS = 30 * Service.DAY_MS
     }
 }

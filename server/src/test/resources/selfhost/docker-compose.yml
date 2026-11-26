@@ -1,4 +1,4 @@
-# selfhost test fixture — the real file is deploy/docker-compose.yml (docs/deploy lane)
+# selfhost test fixture — the real file is deploy/docker-compose.yml (this stub shadows it on the test classpath)
 services:
   andvari:
-    image: ghcr.io/silencelen/andvari:latest
+    image: ghcr.io/silencelen/andvari-server:1.0.0

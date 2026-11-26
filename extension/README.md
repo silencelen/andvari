@@ -219,10 +219,11 @@ Both stores review every update, even unlisted ones. Credentials and the full fi
     runs **only** against the shipped default origin (the pinned key signs that instance's
     `/downloads` alone). A custom origin gets no fetch at all. Per-instance keys are later work.
 - **Manifests (both):** branded icons (`icons/icon{16,32,48,128}.png` — the dark-background ᛅ brand
-  mark shared with the desktop, phone and web surfaces. The source is
-  **`assets/brand/andvari-mark.svg`** and `scripts/gen-brand-icons.sh` is the only way to produce
-  these PNGs; never hand-edit one. `app-desktop/icons/andvari.svg` is a COPY of that source, not
-  the source — it was the source before H138 gave the fleet one mark),
+  mark shared with the desktop, phone and web surfaces. The sources are under
+  **`assets/brand/`** (the tiles redrawn for 16 and 32 px, `andvari-mark.svg` for 48 px,
+  `andvari-mark-gilded.svg` for 128 px) and `scripts/gen-brand-icons.sh` is the only way to produce
+  these PNGs; never hand-edit one. `app-desktop/icons/andvari.svg` is a COPY of the small tile, not
+  a source),
   extension-page CSP without `'wasm-unsafe-eval'` (nothing loads wasm). The autofill content script
   is **registered dynamically by the service worker** (`chrome.scripting.registerContentScripts`,
   all frames, `document_idle`) — there is deliberately **no static `content_scripts` entry**: a

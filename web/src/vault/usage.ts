@@ -1,4 +1,3 @@
-import type { ApiClient } from "../api/client";
 import { fromUtf8, utf8 } from "../crypto/bytes";
 import type { Account } from "./account";
 
@@ -168,13 +167,19 @@ export function recordUse(map: UsageMap, itemId: string, now: number): UsageMap 
  * prune-and-PUT again: an `updatedAt` bump not driven by a use, the coarse-activity leak the
  * batching rule exists to limit.
  */
+/** The usage-ledger routes of spec 03 §3, as the post-cut-over `WireApi` has them. `putUsage` rejects on any refusal. */
+export interface UsageWire {
+  usage(): Promise<{ readonly sealedUsage: string | null }>;
+  putUsage(sealedUsage: string): Promise<unknown>;
+}
+
 export class UsageTracker {
   private map: UsageMap = {};
   private pending: UsageMap = {};
   private timer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
-    private readonly client: ApiClient,
+    private readonly client: UsageWire,
     private readonly account: Account,
   ) {}
 
@@ -182,8 +187,9 @@ export class UsageTracker {
    *  leaves an EMPTY ledger and is never surfaced: this is a ranking hint, and it must not be
    *  able to fail an unlock or spawn an error banner. */
   async load(): Promise<void> {
+    if (this.halted) return;
     try {
-      const res = await this.client.getUsage();
+      const res = await this.client.usage();
       if (!res.sealedUsage) return;
       this.map = mergeUsage(this.map, parseUsage(fromUtf8(await this.account.openUsage(res.sealedUsage))));
     } catch {
@@ -202,7 +208,7 @@ export class UsageTracker {
   record(itemId: string, now: number = Date.now()): void {
     this.map = recordUse(this.map, itemId, now);
     this.pending = recordUse(this.pending, itemId, now);
-    if (this.timer !== null) return;
+    if (this.timer !== null || this.halted) return;
     this.timer = setTimeout(() => {
       this.timer = null;
       void this.flush();
@@ -225,13 +231,14 @@ export class UsageTracker {
    * retries. Only a genuinely absent blob is written without a merge.
    */
   async flush(liveItemIds?: ReadonlySet<string>): Promise<void> {
+    if (this.halted) return;
     const mine = this.pending;
     if (Object.keys(mine).length === 0 && !liveItemIds) return;
     this.pending = {};
     try {
       let server: ServerLedger;
       try {
-        const res = await this.client.getUsage();
+        const res = await this.client.usage();
         server = res.sealedUsage
           ? { kind: "present", map: parseUsage(fromUtf8(await this.account.openUsage(res.sealedUsage))) }
           : { kind: "absent" };
@@ -257,6 +264,18 @@ export class UsageTracker {
       // server refusal only because putUsage rides text() and REJECTS on a non-2xx (audit H34).
       this.pending = mergeUsage(mine, this.pending);
     }
+  }
+
+  private halted = false;
+
+  /**
+   * Design §4.4: the session is the read-only copy under a forked pin. Nothing is loaded or flushed from here on (the
+   * ledger is a server blob); uses are still shown for this tab. One way only.
+   */
+  halt(): void {
+    this.halted = true;
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
   }
 
   /** Stop the timer. Callers flush FIRST if they want the pending uses stored — dispose alone
